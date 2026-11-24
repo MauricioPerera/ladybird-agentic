@@ -38,6 +38,7 @@ public:
 private:
     virtual bool event(QEvent*) override;
     virtual void showEvent(QShowEvent*) override;
+    virtual void resizeEvent(QResizeEvent*) override;
 
     void update_chrome_style();
 

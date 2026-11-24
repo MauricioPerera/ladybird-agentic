@@ -242,6 +242,12 @@ ApplicationActions::ApplicationActions(PageOptions const& options)
     m_inspect_menu->add_action(*m_toggle_devtools_action);
     devtools_enabled_changed(options.devtools_enabled);
 
+    m_toggle_mcp_action = Action::create("Enable MCP Server"sv, ActionID::ToggleMCP, [] {
+        HubConnection::the().async_toggle_mcp_enabled();
+    });
+    m_inspect_menu->add_action(*m_toggle_mcp_action);
+    mcp_enabled_changed(options.mcp_enabled);
+
     m_report_website_issue_action = Action::create("Report Website Issue…"sv, ActionID::ReportWebsiteIssue, on_active_view([](RemoteView& view) {
         view.report_website_issue();
     }));
@@ -382,6 +388,11 @@ void ApplicationActions::update_force_dark_action()
 void ApplicationActions::devtools_enabled_changed(bool enabled)
 {
     m_toggle_devtools_action->set_text(enabled ? "Disable DevTools"sv : "Enable DevTools"sv);
+}
+
+void ApplicationActions::mcp_enabled_changed(bool enabled)
+{
+    m_toggle_mcp_action->set_text(enabled ? "Disable MCP Server"sv : "Enable MCP Server"sv);
 }
 
 void ApplicationActions::update_website_color_scheme_actions()

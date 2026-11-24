@@ -35,6 +35,7 @@ public:
     static Optional<u64> input_id_of(Web::BrowserInputData const*);
 
     virtual void die() override;
+    void detach_from_application();
 
 private:
     explicit ConnectionFromUI(NonnullOwnPtr<IPC::Transport>);
@@ -47,6 +48,7 @@ private:
     // The requests that the UI has asked us to make, as it has no network of its own.
     HashMap<u64, NonnullRefPtr<Requests::Request>> m_requests;
     u64 m_last_applied_settings_change_id { 0 };
+    bool m_detached_from_application { false };
 
     // A close that the UI got ready for, and finishes once the tab is gone from its window.
     HashMap<u64, Function<void()>> m_prepared_closes;
@@ -69,6 +71,7 @@ private:
     void start_request(u64 request_id, ByteString const& method, URL::URL const&, HTTP::HeaderList const& headers, ByteString const& body, HTTP::CacheMode, HTTP::Cookie::IncludeCredentials, WebView::IsPrivate, ReadonlySpan<StringView> response_header_names);
     virtual void stop_request(u64 request_id) override;
     virtual void toggle_devtools_enabled() override;
+    virtual void toggle_mcp_enabled() override;
     virtual void check_for_updates(WebView::UpdateCheckTrigger) override;
     virtual void skip_update_version(String) override;
     virtual void set_preferred_contrast(Web::CSS::PreferredContrast) override;
@@ -177,6 +180,7 @@ private:
     virtual void view_set_window_size(u64 view_id, Gfx::IntSize size) override;
     virtual void view_set_system_visibility_state(u64 view_id, Web::HTML::VisibilityState visibility_state) override;
     virtual void view_set_pinned(u64 view_id, bool pinned) override;
+    virtual void view_set_mcp_access_allowed(u64 view_id, bool allowed) override;
     virtual void view_set_current_tab_of_window(u64 view_id, bool current_tab_of_window) override;
     virtual void view_set_presents_from_cpu_memory(u64 view_id, bool presents_from_cpu_memory) override;
     virtual void view_set_hosts_remote_layer(u64 view_id, bool hosts_remote_layer) override;

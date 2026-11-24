@@ -649,6 +649,7 @@ ViewState View::current_state() const
     state.title = title();
     state.handle = handle();
     state.is_loading = is_loading();
+    state.mcp_access_allowed = is_mcp_access_allowed();
     state.zoom_level = zoom_level();
     state.can_navigate_back = can_navigate_back();
     state.can_navigate_forward = can_navigate_forward();

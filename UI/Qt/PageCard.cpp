@@ -13,10 +13,14 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QVBoxLayout>
 
 #if defined(AK_OS_MACOS)
 #    include <UI/Qt/MacWindow.h>
+#elif defined(AK_OS_WINDOWS)
+#    include <QPainterPath>
+#    include <QRegion>
 #endif
 
 namespace Ladybird {
@@ -32,7 +36,7 @@ PageCard::PageCard(QWidget& parent, QString const& title, QString const& text, V
 {
     setObjectName("LadybirdPageCard");
     setAccessibleName(title);
-#if defined(AK_OS_MACOS)
+#if defined(AK_OS_MACOS) || defined(USE_DIRECTX) || defined(USE_VULKAN_DMABUF_IMAGES)
     setAttribute(Qt::WA_DontCreateNativeAncestors);
     setAttribute(Qt::WA_NativeWindow);
 #endif
@@ -61,6 +65,7 @@ PageCard::PageCard(QWidget& parent, QString const& title, QString const& text, V
         push_button->setObjectName(is_primary ? "LadybirdPageCardPrimaryButton" : "LadybirdPageCardSecondaryButton");
         push_button->setDefault(is_primary);
         QObject::connect(push_button, &QPushButton::clicked, this, [this, on_click = AK::move(button.on_click)] {
+            hide();
             if (on_click)
                 on_click();
             deleteLater();
@@ -74,13 +79,12 @@ PageCard::PageCard(QWidget& parent, QString const& title, QString const& text, V
 
 void PageCard::reposition(QWidget& page, int top_offset)
 {
-    if (m_page != &page)
-        raise();
     m_page = &page;
     auto page_top_left = page.mapTo(parentWidget(), QPoint(0, 0));
     auto position = QPoint(page_top_left.x() + ((page.width() - width()) / 2), page_top_left.y() + PAGE_TOP_INSET + top_offset);
     if (pos() != position)
         move(position);
+    raise();
 }
 
 bool PageCard::event(QEvent* event)
@@ -95,6 +99,18 @@ void PageCard::showEvent(QShowEvent* event)
     QFrame::showEvent(event);
 #if defined(AK_OS_MACOS)
     round_appkit_view_corners(*this, CARD_CORNER_RADIUS, Theme::panel().edge);
+#elif defined(AK_OS_WINDOWS)
+    raise();
+#endif
+}
+
+void PageCard::resizeEvent(QResizeEvent* event)
+{
+    QFrame::resizeEvent(event);
+#if defined(AK_OS_WINDOWS)
+    QPainterPath path;
+    path.addRoundedRect(QRectF(rect()), CARD_CORNER_RADIUS, CARD_CORNER_RADIUS);
+    setMask(QRegion(path.toFillPolygon().toPolygon()));
 #endif
 }
 

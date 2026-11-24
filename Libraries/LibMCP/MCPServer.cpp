@@ -1,0 +1,884 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <AK/ByteBuffer.h>
+#include <AK/ByteString.h>
+#include <AK/IPv4Address.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
+#include <AK/Random.h>
+#include <AK/StringBuilder.h>
+#include <AK/WeakPtr.h>
+#include <LibCore/EventLoop.h>
+#include <LibCore/Socket.h>
+#include <LibCore/TCPServer.h>
+#include <LibHTTP/HttpRequest.h>
+#include <LibHTTP/Status.h>
+#include <LibMCP/MCPDelegate.h>
+#include <LibMCP/MCPServer.h>
+
+namespace MCP {
+
+static constexpr size_t MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
+static bool is_ascii_digits(StringView view)
+{
+    if (view.is_empty())
+        return false;
+    for (auto ch : view) {
+        if (ch < '0' || ch > '9')
+            return false;
+    }
+    return true;
+}
+
+static bool is_allowed_host(StringView host)
+{
+    host = host.trim_whitespace();
+    if (auto colon = host.find_last(':'); colon.has_value()) {
+        auto port_part = host.substring_view(*colon + 1);
+        if (!is_ascii_digits(port_part))
+            return false;
+        host = host.substring_view(0, *colon);
+    }
+    return host.equals_ignoring_ascii_case("localhost"sv) || host == "127.0.0.1"sv;
+}
+
+static Optional<StringView> find_header(HTTP::HttpRequest const& request, StringView name)
+{
+    if (auto it = request.headers().headers().find_if([&](auto& header) { return header.name.equals_ignoring_ascii_case(name); }); !it.is_end())
+        return it->value.view();
+    return {};
+}
+
+static bool constant_time_equals(ReadonlyBytes a, ReadonlyBytes b)
+{
+    if (a.size() != b.size())
+        return false;
+    u8 diff = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
+static JsonObject make_prop(StringView type, StringView description)
+{
+    JsonObject prop;
+    prop.set("type"sv, type);
+    prop.set("description"sv, description);
+    return prop;
+}
+
+static JsonObject make_string_enum_prop(StringView description, ReadonlySpan<StringView> values, StringView default_value)
+{
+    JsonObject prop = make_prop("string"sv, description);
+    JsonArray enum_values;
+    for (auto value : values)
+        enum_values.must_append(value);
+    prop.set("enum"sv, move(enum_values));
+    prop.set("default"sv, default_value);
+    return prop;
+}
+
+static JsonObject make_tool_schema(StringView name, StringView description, JsonObject properties, ReadonlySpan<StringView> required = {})
+{
+    JsonObject schema;
+    schema.set("type"sv, "object"sv);
+    schema.set("properties"sv, move(properties));
+    if (!required.is_empty()) {
+        JsonArray required_array;
+        for (auto field : required)
+            required_array.must_append(field);
+        schema.set("required"sv, move(required_array));
+    }
+    schema.set("additionalProperties"sv, false);
+
+    JsonObject tool;
+    tool.set("name"sv, name);
+    tool.set("description"sv, description);
+    tool.set("inputSchema"sv, move(schema));
+    return tool;
+}
+
+static JsonArray build_tool_definitions()
+{
+    static constexpr Array selector_strategies { "css selector"sv, "xpath"sv, "link text"sv, "partial link text"sv, "tag name"sv };
+    JsonArray tools;
+
+    tools.must_append(make_tool_schema(
+        "list_tabs"sv,
+        "List open browser tabs that currently allow MCP access. Denied or private-by-default tabs are omitted."sv,
+        JsonObject {}));
+
+    tools.must_append(make_tool_schema(
+        "get_active_tab"sv,
+        "Get metadata for the active browser tab if it currently allows MCP access."sv,
+        JsonObject {}));
+
+    {
+        JsonObject props;
+        props.set("url"sv, make_prop("string"sv, "Optional http:, https:, or about:blank URL to load in the new tab."sv));
+        props.set("activate"sv, make_prop("boolean"sv, "Whether to focus the new tab in the window (default: true)."sv));
+        props.set("wait_for_load"sv, make_prop("boolean"sv, "Whether to wait for initial page load before returning (default: true)."sv));
+        tools.must_append(make_tool_schema(
+            "open_tab"sv,
+            "Open a new non-private browser tab with MCP access automatically enabled."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "switch_tab"sv,
+            "Activate and focus an MCP-allowed browser tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "close_tab"sv,
+            "Close an MCP-allowed browser tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("url"sv, make_prop("string"sv, "Destination URL (only http:, https:, or about:blank allowed)."sv));
+        props.set("wait_for_load"sv, make_prop("boolean"sv, "Wait until load completes before returning (default: true)."sv));
+        tools.must_append(make_tool_schema(
+            "navigate"sv,
+            "Navigate an MCP-allowed tab to a URL."sv,
+            move(props),
+            Array { "tab_id"sv, "url"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("wait_for_load"sv, make_prop("boolean"sv, "Wait until reload completes before returning (default: true)."sv));
+        tools.must_append(make_tool_schema(
+            "reload"sv,
+            "Reload an MCP-allowed browser tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "go_back"sv,
+            "Navigate back one entry in the tab's session history."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "go_forward"sv,
+            "Navigate forward one entry in the tab's session history."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "get_accessibility_tree"sv,
+            "Retrieve the current document's accessibility tree JSON."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "get_dom_tree"sv,
+            "Retrieve the current document's serialized DOM tree JSON."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "get_page_source"sv,
+            "Retrieve the current document's serialized HTML source."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("selector"sv, make_prop("string"sv, "Selector expression to match DOM elements."sv));
+        props.set("strategy"sv, make_string_enum_prop("Locator strategy (default: css selector)."sv, selector_strategies, "css selector"sv));
+        tools.must_append(make_tool_schema(
+            "find_elements"sv,
+            "Find matching DOM elements in the tab and return their WebDriver element handles."sv,
+            move(props),
+            Array { "tab_id"sv, "selector"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("selector"sv, make_prop("string"sv, "Selector for the element to click (used if element_id is omitted)."sv));
+        props.set("element_id"sv, make_prop("string"sv, "Previously returned element ID from find_elements."sv));
+        props.set("strategy"sv, make_string_enum_prop("Locator strategy when selector is used (default: css selector)."sv, selector_strategies, "css selector"sv));
+        tools.must_append(make_tool_schema(
+            "click"sv,
+            "Click an element identified by element_id or selector."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("text"sv, make_prop("string"sv, "Text to type into the element."sv));
+        props.set("selector"sv, make_prop("string"sv, "Selector for the target input element (used if element_id is omitted)."sv));
+        props.set("element_id"sv, make_prop("string"sv, "Previously returned element ID from find_elements."sv));
+        props.set("clear"sv, make_prop("boolean"sv, "Clear existing value before typing (default: false)."sv));
+        props.set("strategy"sv, make_string_enum_prop("Locator strategy when selector is used (default: css selector)."sv, selector_strategies, "css selector"sv));
+        tools.must_append(make_tool_schema(
+            "type_text"sv,
+            "Type text into an element identified by element_id or selector."sv,
+            move(props),
+            Array { "tab_id"sv, "text"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("script"sv, make_prop("string"sv, "JavaScript function body to execute in the top-level document context (use `return ...` to return a value)."sv));
+        tools.must_append(make_tool_schema(
+            "eval_js"sv,
+            "Execute JavaScript in the tab and return the JSON-serialized result."sv,
+            move(props),
+            Array { "tab_id"sv, "script"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "take_screenshot"sv,
+            "Capture a PNG screenshot of the tab's top-level viewport."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    return tools;
+}
+
+static JsonObject tab_info_to_json(TabInfo const& info)
+{
+    JsonObject object;
+    object.set("id"sv, info.id);
+    object.set("title"sv, info.title);
+    object.set("url"sv, info.url);
+    object.set("is_loading"sv, info.is_loading);
+    object.set("is_active"sv, info.is_active);
+    return object;
+}
+
+class MCPServer::Connection final
+    : public RefCounted<Connection>
+    , public Weakable<Connection> {
+public:
+    static ErrorOr<NonnullRefPtr<Connection>> create(MCPServer& server, NonnullOwnPtr<Core::TCPSocket> socket)
+    {
+        auto buffered_socket = TRY(Core::BufferedTCPSocket::create(move(socket)));
+        return adopt_ref(*new Connection(server, move(buffered_socket)));
+    }
+
+    ~Connection()
+    {
+        close();
+    }
+
+    void close()
+    {
+        if (m_closed)
+            return;
+        m_closed = true;
+        m_socket->on_ready_to_read = {};
+        m_socket->close();
+    }
+
+private:
+    Connection(MCPServer& server, NonnullOwnPtr<Core::BufferedTCPSocket> socket)
+        : m_server(server.make_weak_ptr())
+        , m_socket(move(socket))
+    {
+        m_socket->on_ready_to_read = [this] {
+            if (auto result = on_ready_to_read(); result.is_error()) {
+                warnln("MCP connection error: {}", result.error());
+                send_http_text_error(500, "Internal Server Error"sv);
+            }
+        };
+    }
+
+    void close_later()
+    {
+        if (m_close_scheduled)
+            return;
+        m_close_scheduled = true;
+        close();
+        Core::deferred_invoke([weak_self = make_weak_ptr(), weak_server = m_server] {
+            if (weak_server && weak_self)
+                weak_server->remove_connection(*weak_self);
+        });
+    }
+
+    ErrorOr<void> on_ready_to_read()
+    {
+        if (m_closed || m_request_handled)
+            return {};
+
+        auto buffer = TRY(ByteBuffer::create_uninitialized(max(m_socket->buffer_size(), static_cast<size_t>(4096))));
+        for (;;) {
+            if (!TRY(m_socket->can_read_without_blocking()))
+                break;
+
+            auto data = TRY(m_socket->read_some(buffer));
+            if (data.is_empty()) {
+                if (m_socket->is_eof())
+                    break;
+                break;
+            }
+            if (m_remaining_request.length() + data.size() > MAX_REQUEST_BYTES) {
+                send_http_text_error(413, "Request exceeded maximum allowed size"sv);
+                return {};
+            }
+            TRY(m_remaining_request.try_append(StringView { data }));
+
+            if (m_socket->is_eof())
+                break;
+        }
+
+        if (m_remaining_request.is_empty()) {
+            if (m_socket->is_eof())
+                close_later();
+            return {};
+        }
+
+        auto parsed_request = HTTP::HttpRequest::from_raw_request(m_remaining_request.string_view().bytes());
+        if (parsed_request.is_error()) {
+            switch (parsed_request.error()) {
+            case HTTP::HttpRequest::ParseError::RequestIncomplete:
+                if (m_socket->is_eof())
+                    close_later();
+                return {};
+            case HTTP::HttpRequest::ParseError::RequestTooLarge:
+                send_http_text_error(413, "Request body or header too large (max 64 KiB)"sv);
+                return {};
+            case HTTP::HttpRequest::ParseError::UnsupportedMethod:
+                send_http_text_error(405, "Method Not Allowed"sv, "Allow: POST, DELETE\r\n"sv);
+                return {};
+            case HTTP::HttpRequest::ParseError::InvalidURL:
+            case HTTP::HttpRequest::ParseError::OutOfMemory:
+                send_http_text_error(400, HTTP::HttpRequest::parse_error_to_string(parsed_request.error()));
+                return {};
+            }
+            VERIFY_NOT_REACHED();
+        }
+
+        m_remaining_request.clear();
+        m_request_handled = true;
+        handle_http_request(parsed_request.release_value());
+        return {};
+    }
+
+    void handle_http_request(HTTP::HttpRequest const& request)
+    {
+        if (!m_server) {
+            close_later();
+            return;
+        }
+
+        auto host = find_header(request, "Host"sv);
+        if (!host.has_value() || !is_allowed_host(*host)) {
+            send_http_text_error(403, "Forbidden: Host header must be localhost or 127.0.0.1"sv);
+            return;
+        }
+
+        if (find_header(request, "Origin"sv).has_value()) {
+            send_http_text_error(403, "Forbidden: Requests with an Origin header are not allowed"sv);
+            return;
+        }
+
+        auto authorization = find_header(request, "Authorization"sv);
+        if (!authorization.has_value()) {
+            send_http_text_error(401, "Unauthorized: Missing Bearer token"sv, "WWW-Authenticate: Bearer\r\n"sv);
+            return;
+        }
+        auto trimmed_auth = authorization->trim_whitespace();
+        static constexpr auto bearer_prefix = "Bearer "sv;
+        if (!trimmed_auth.starts_with(bearer_prefix)
+            || !constant_time_equals(trimmed_auth.substring_view(bearer_prefix.length()).bytes(), m_server->auth_token().bytes())) {
+            send_http_text_error(401, "Unauthorized: Invalid Bearer token"sv, "WWW-Authenticate: Bearer\r\n"sv);
+            return;
+        }
+
+        if (request.resource() != "/mcp"sv) {
+            send_http_text_error(404, "Not Found"sv);
+            return;
+        }
+
+        if (request.method() == HTTP::HttpRequest::Method::DELETE) {
+            send_raw_http_response(200, "application/json; charset=utf-8"sv, "{\"ok\":true}"sv);
+            return;
+        }
+
+        if (request.method() != HTTP::HttpRequest::Method::POST) {
+            send_http_text_error(405, "Method Not Allowed"sv, "Allow: POST, DELETE\r\n"sv);
+            return;
+        }
+
+        auto content_type = find_header(request, "Content-Type"sv);
+        if (!content_type.has_value()
+            || !content_type->find_first_split_view(';').trim_whitespace().equals_ignoring_ascii_case("application/json"sv)) {
+            send_http_text_error(415, "Unsupported Media Type: Expected application/json"sv);
+            return;
+        }
+
+        auto maybe_json = JsonValue::from_string(StringView { request.body() });
+        if (maybe_json.is_error()) {
+            send_json_rpc_error(JsonValue {}, -32700, "Parse error: Invalid JSON"sv, 400);
+            return;
+        }
+
+        if (!maybe_json.value().is_object()) {
+            send_json_rpc_error(JsonValue {}, -32600, "Invalid Request: Expected JSON-RPC object"sv, 400);
+            return;
+        }
+
+        auto const& rpc = maybe_json.value().as_object();
+        auto jsonrpc = rpc.get_string("jsonrpc"sv);
+        auto method = rpc.get_string("method"sv);
+        if (!jsonrpc.has_value() || *jsonrpc != "2.0"sv || !method.has_value()) {
+            JsonValue id;
+            if (auto maybe_id = rpc.get("id"sv); maybe_id.has_value())
+                id = *maybe_id;
+            send_json_rpc_error(id, -32600, "Invalid Request: Expected jsonrpc '2.0' and method"sv, 400);
+            return;
+        }
+
+        if (!rpc.has("id"sv)) {
+            send_raw_http_response(202, "text/plain; charset=utf-8"sv, ""sv);
+            return;
+        }
+
+        JsonValue id = *rpc.get("id"sv);
+        if (id.is_null()) {
+            send_json_rpc_error(id, -32600, "Invalid Request: Request id cannot be null"sv, 400);
+            return;
+        }
+
+        handle_json_rpc_request(move(id), *method, rpc.get_object("params"sv));
+    }
+
+    void handle_json_rpc_request(JsonValue id, StringView method, Optional<JsonObject const&> params)
+    {
+        if (!m_server) {
+            close_later();
+            return;
+        }
+
+        if (method == "initialize"sv) {
+            JsonObject capabilities;
+            JsonObject tools_cap;
+            tools_cap.set("listChanged"sv, false);
+            capabilities.set("tools"sv, move(tools_cap));
+
+            JsonObject server_info;
+            server_info.set("name"sv, "ladybird-mcp"sv);
+            server_info.set("version"sv, "0.1.0"sv);
+
+            JsonObject result;
+            result.set("protocolVersion"sv, "2025-03-26"sv);
+            result.set("capabilities"sv, move(capabilities));
+            result.set("serverInfo"sv, move(server_info));
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab are automatically allowed."sv);
+
+            auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
+            send_json_rpc_result(id, move(result), extra_headers);
+            return;
+        }
+
+        if (method == "ping"sv) {
+            send_json_rpc_result(id, JsonObject {});
+            return;
+        }
+
+        if (method == "tools/list"sv) {
+            JsonObject result;
+            result.set("tools"sv, build_tool_definitions());
+            send_json_rpc_result(id, move(result));
+            return;
+        }
+
+        if (method == "tools/call"sv) {
+            if (!params.has_value()) {
+                send_json_rpc_error(id, -32602, "Invalid params: Expected params object"sv);
+                return;
+            }
+
+            auto tool_name = params->get_string("name"sv);
+            if (!tool_name.has_value()) {
+                send_json_rpc_error(id, -32602, "Invalid params: Missing tool name"sv);
+                return;
+            }
+
+            JsonObject empty_args;
+            JsonObject const& arguments = params->get_object("arguments"sv).value_or(empty_args);
+
+            dispatch_tool_call(move(id), *tool_name, arguments);
+            return;
+        }
+
+        send_json_rpc_error(id, -32601, "Method not found"sv);
+    }
+
+    void dispatch_tool_call(JsonValue id, StringView tool_name, JsonObject const& arguments)
+    {
+        auto complete = [weak_self = make_weak_ptr(), id = move(id)](ToolCallResult call_result) mutable {
+            if (!weak_self || weak_self->m_closed)
+                return;
+
+            JsonObject item;
+            if (call_result.image_base64_png.has_value()) {
+                item.set("type"sv, "image"sv);
+                item.set("data"sv, *call_result.image_base64_png);
+                item.set("mimeType"sv, "image/png"sv);
+            } else {
+                item.set("type"sv, "text"sv);
+                item.set("text"sv, call_result.text);
+            }
+
+            JsonArray content;
+            content.must_append(move(item));
+
+            JsonObject result;
+            result.set("content"sv, move(content));
+            result.set("isError"sv, call_result.is_error);
+            weak_self->send_json_rpc_result(id, move(result));
+        };
+
+        auto fail_invalid_params = [&](StringView msg) {
+            complete({ .is_error = true, .text = String::from_utf8_without_validation(msg.bytes()) });
+        };
+
+        auto require_tab_id = [&]() -> Optional<u64> {
+            return arguments.get_u64("tab_id"sv);
+        };
+
+        auto& delegate = m_server->m_delegate;
+
+        if (tool_name == "list_tabs"sv) {
+            JsonArray tabs_json;
+            for (auto const& tab : delegate.list_allowed_tabs())
+                tabs_json.must_append(tab_info_to_json(tab));
+            JsonObject payload;
+            payload.set("tabs"sv, move(tabs_json));
+            complete({ .is_error = false, .text = JsonValue { move(payload) }.serialized() });
+            return;
+        }
+
+        if (tool_name == "get_active_tab"sv) {
+            JsonObject payload;
+            if (auto tab = delegate.active_allowed_tab(); tab.has_value()) {
+                payload.set("tab"sv, tab_info_to_json(*tab));
+            } else {
+                payload.set("tab"sv, JsonValue {});
+                payload.set("reason"sv, "Active tab does not have MCP access enabled"sv);
+            }
+            complete({ .is_error = false, .text = JsonValue { move(payload) }.serialized() });
+            return;
+        }
+
+        if (tool_name == "open_tab"sv) {
+            Optional<String> url;
+            if (auto maybe_url = arguments.get_string("url"sv); maybe_url.has_value())
+                url = *maybe_url;
+            bool activate = arguments.get_bool("activate"sv).value_or(true);
+            bool wait_for_load = arguments.get_bool("wait_for_load"sv).value_or(true);
+            delegate.open_tab(move(url), activate, wait_for_load, move(complete));
+            return;
+        }
+
+        if (tool_name == "switch_tab"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.switch_tab(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "close_tab"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.close_tab(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "navigate"sv) {
+            auto tab_id = require_tab_id();
+            auto url = arguments.get_string("url"sv);
+            if (!tab_id.has_value() || !url.has_value())
+                return fail_invalid_params("Missing required parameters 'tab_id' and 'url'"sv);
+            bool wait_for_load = arguments.get_bool("wait_for_load"sv).value_or(true);
+            delegate.navigate_tab(*tab_id, *url, wait_for_load, move(complete));
+            return;
+        }
+
+        if (tool_name == "reload"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            bool wait_for_load = arguments.get_bool("wait_for_load"sv).value_or(true);
+            delegate.reload_tab(*tab_id, wait_for_load, move(complete));
+            return;
+        }
+
+        if (tool_name == "go_back"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.go_back(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "go_forward"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.go_forward(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_accessibility_tree"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.get_accessibility_tree(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_dom_tree"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.get_dom_tree(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_page_source"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.get_page_source(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "find_elements"sv) {
+            auto tab_id = require_tab_id();
+            auto selector = arguments.get_string("selector"sv);
+            if (!tab_id.has_value() || !selector.has_value())
+                return fail_invalid_params("Missing required parameters 'tab_id' and 'selector'"sv);
+            auto strategy = arguments.get_string("strategy"sv).value_or("css selector"_string);
+            delegate.find_elements(*tab_id, *selector, strategy, move(complete));
+            return;
+        }
+
+        if (tool_name == "click"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            Optional<String> selector;
+            if (auto maybe_selector = arguments.get_string("selector"sv); maybe_selector.has_value())
+                selector = *maybe_selector;
+            Optional<String> element_id;
+            if (auto maybe_element_id = arguments.get_string("element_id"sv); maybe_element_id.has_value())
+                element_id = *maybe_element_id;
+            auto strategy = arguments.get_string("strategy"sv).value_or("css selector"_string);
+            delegate.click_element(*tab_id, move(selector), move(element_id), strategy, move(complete));
+            return;
+        }
+
+        if (tool_name == "type_text"sv) {
+            auto tab_id = require_tab_id();
+            auto text = arguments.get_string("text"sv);
+            if (!tab_id.has_value() || !text.has_value())
+                return fail_invalid_params("Missing required parameters 'tab_id' and 'text'"sv);
+            Optional<String> selector;
+            if (auto maybe_selector = arguments.get_string("selector"sv); maybe_selector.has_value())
+                selector = *maybe_selector;
+            Optional<String> element_id;
+            if (auto maybe_element_id = arguments.get_string("element_id"sv); maybe_element_id.has_value())
+                element_id = *maybe_element_id;
+            bool clear_first = arguments.get_bool("clear"sv).value_or(false);
+            auto strategy = arguments.get_string("strategy"sv).value_or("css selector"_string);
+            delegate.type_text(*tab_id, move(selector), move(element_id), *text, clear_first, strategy, move(complete));
+            return;
+        }
+
+        if (tool_name == "eval_js"sv) {
+            auto tab_id = require_tab_id();
+            auto script = arguments.get_string("script"sv);
+            if (!tab_id.has_value() || !script.has_value())
+                return fail_invalid_params("Missing required parameters 'tab_id' and 'script'"sv);
+            delegate.evaluate_javascript(*tab_id, *script, move(complete));
+            return;
+        }
+
+        if (tool_name == "take_screenshot"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.take_screenshot(*tab_id, move(complete));
+            return;
+        }
+
+        fail_invalid_params("Unknown tool name"sv);
+    }
+
+    void send_json_rpc_result(JsonValue const& id, JsonValue result, StringView extra_headers = {})
+    {
+        JsonObject response;
+        response.set("jsonrpc"sv, "2.0"sv);
+        response.set("id"sv, id);
+        response.set("result"sv, move(result));
+        auto serialized = response.serialized();
+        send_raw_http_response(200, "application/json; charset=utf-8"sv, serialized.bytes_as_string_view(), extra_headers);
+    }
+
+    void send_json_rpc_error(JsonValue const& id, i64 code, StringView message, u32 http_status = 200)
+    {
+        JsonObject error;
+        error.set("code"sv, code);
+        error.set("message"sv, message);
+
+        JsonObject response;
+        response.set("jsonrpc"sv, "2.0"sv);
+        response.set("id"sv, id);
+        response.set("error"sv, move(error));
+        auto serialized = response.serialized();
+        send_raw_http_response(http_status, "application/json; charset=utf-8"sv, serialized.bytes_as_string_view());
+    }
+
+    void send_http_text_error(u32 status_code, StringView message, StringView extra_headers = {})
+    {
+        JsonObject body;
+        body.set("error"sv, message);
+        auto serialized = body.serialized();
+        send_raw_http_response(status_code, "application/json; charset=utf-8"sv, serialized.bytes_as_string_view(), extra_headers);
+    }
+
+    void send_raw_http_response(u32 status_code, StringView content_type, StringView body, StringView extra_headers = {})
+    {
+        if (m_closed)
+            return;
+
+        StringBuilder builder;
+        builder.appendff("HTTP/1.1 {} {}\r\n", status_code, HTTP::reason_phrase_for_code(status_code));
+        builder.append("Connection: close\r\n"sv);
+        builder.append("Cache-Control: no-store\r\n"sv);
+        builder.append("X-Content-Type-Options: nosniff\r\n"sv);
+        builder.appendff("Content-Type: {}\r\n", content_type);
+        builder.appendff("Content-Length: {}\r\n", body.length());
+        if (!extra_headers.is_empty())
+            builder.append(extra_headers);
+        builder.append("\r\n"sv);
+        builder.append(body);
+
+        if (auto result = m_socket->write_until_depleted(builder.string_view()); result.is_error())
+            warnln("Failed to write MCP HTTP response: {}", result.error());
+
+        close_later();
+    }
+
+    WeakPtr<MCPServer> m_server;
+    NonnullOwnPtr<Core::BufferedTCPSocket> m_socket;
+    StringBuilder m_remaining_request;
+    bool m_request_handled { false };
+    bool m_closed { false };
+    bool m_close_scheduled { false };
+};
+
+ErrorOr<NonnullOwnPtr<MCPServer>> MCPServer::create(MCPDelegate& delegate, u16 port, String auth_token)
+{
+    auto address = IPv4Address { 127, 0, 0, 1 };
+    auto server = TRY(Core::TCPServer::try_create());
+    TRY(server->listen(address, port, Core::TCPServer::AllowAddressReuse::Yes));
+
+    return adopt_own(*new MCPServer(delegate, move(server), move(auth_token), generate_random_uuid()));
+}
+
+MCPServer::MCPServer(MCPDelegate& delegate, NonnullRefPtr<Core::TCPServer> server, String auth_token, String session_id)
+    : m_delegate(delegate)
+    , m_server(move(server))
+    , m_auth_token(move(auth_token))
+    , m_session_id(move(session_id))
+{
+    m_server->on_ready_to_accept = [weak_self = make_weak_ptr<MCPServer>()] {
+        if (!weak_self)
+            return;
+
+        if (auto result = weak_self->on_new_client(); result.is_error())
+            warnln("Failed to accept MCP client: {}", result.error());
+    };
+}
+
+MCPServer::~MCPServer()
+{
+    m_is_shutting_down = true;
+    m_server->on_ready_to_accept = {};
+
+    for (auto const& connection : m_connections)
+        connection->close();
+    m_connections.clear();
+}
+
+Optional<u16> MCPServer::local_port() const
+{
+    return m_server->local_port();
+}
+
+ErrorOr<void> MCPServer::on_new_client()
+{
+    auto client = TRY(m_server->accept());
+    auto connection = TRY(Connection::create(*this, move(client)));
+    m_connections.set(move(connection));
+    return {};
+}
+
+void MCPServer::remove_connection(Connection& connection)
+{
+    if (m_is_shutting_down)
+        return;
+
+    m_connections.remove_all_matching([&](auto const& entry) {
+        return entry.ptr() == &connection;
+    });
+}
+
+}

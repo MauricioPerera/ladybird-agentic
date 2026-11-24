@@ -29,6 +29,8 @@
 #include <LibGfx/Point.h>
 #include <LibGfx/Size.h>
 #include <LibIPC/Forward.h>
+#include <LibMCP/Forward.h>
+#include <LibMCP/MCPDelegate.h>
 #include <LibMain/Main.h>
 #include <LibRequests/Forward.h>
 #include <LibURL/URL.h>
@@ -82,7 +84,9 @@ namespace WebView {
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
 
-class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
+class WEBVIEW_API Application
+    : public DevTools::DevToolsDelegate
+    , public MCP::MCPDelegate {
     AK_MAKE_NONCOPYABLE(Application);
 
 public:
@@ -96,9 +100,11 @@ public:
     static bool is_initialized() { return s_the != nullptr; }
 
     static Settings& settings() { return *the().m_settings; }
+    static Settings* settings_if_initialized() { return s_the ? s_the->m_settings.ptr() : nullptr; }
     static Profile const& profile() { return *the().m_profile; }
     static LocalFileGrantPolicy const& local_file_grant_policy() { return the().m_local_file_grant_policy; }
     BrowserProcess& browser_process() { return *m_browser_process; }
+    BrowserProcess* browser_process_if_initialized() { return m_browser_process.ptr(); }
     bool should_exit_after_profile_coordination() const { return m_should_exit_after_profile_coordination; }
     // Whether the process exits because a browser is running for the profile, but does not take what we were asked to
     // open.
@@ -317,6 +323,7 @@ public:
     virtual Optional<ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const { return {}; }
 
     virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, ViewImplementation const* = nullptr) const { return {}; }
+    virtual Optional<ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab) const { return {}; }
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, ViewImplementation const* source_view = nullptr) const;
     virtual void activate_or_open_tab_with_url(URL::URL const&) const;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
@@ -402,6 +409,12 @@ public:
     void set_shows_compositor_layers(bool);
 
     bool devtools_enabled() const { return m_devtools; }
+    bool mcp_enabled() const { return m_mcp != nullptr; }
+    Optional<u16> mcp_port() const;
+    Optional<String> const& mcp_token() const { return m_mcp_token; }
+    ErrorOr<void> toggle_mcp_enabled();
+    void did_revoke_mcp_access_for_view(u64 view_id);
+    void did_close_mcp_view(u64 view_id);
     void dump_cookies() const;
     void crash_compositor_process();
     bool has_compositor_process() const { return m_compositor_client; }
@@ -470,6 +483,12 @@ protected:
 
     virtual void on_devtools_enabled() const { }
     virtual void on_devtools_disabled() const { }
+    virtual void on_mcp_enabled(u16 port, String const& token) const
+    {
+        (void)port;
+        (void)token;
+    }
+    virtual void on_mcp_disabled() const { }
     virtual void on_compositor_gpu_painting_changed() const { }
 
     Main::Arguments& arguments() { return m_arguments; }
@@ -503,6 +522,15 @@ private:
     void relaunch_compositor_process(bool counts_as_crash);
     ErrorOr<void> launch_request_server();
     ErrorOr<void> launch_devtools_server();
+    ErrorOr<void> launch_mcp_server();
+    void fail_mcp_requests_for_view(u64 view_id, StringView message);
+    void fail_all_mcp_requests(StringView message);
+    bool did_complete_mcp_content_command(u64 command_id, Web::WebDriver::Response&);
+    void enqueue_mcp_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, Function<void(Web::WebDriver::Response)> on_complete);
+    void dispatch_next_mcp_content_command(u64 view_id);
+    void wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete);
+    void finish_mcp_navigation_wait(u64 wait_id, MCP::ToolCallResult);
+    void finish_mcp_tree_wait(u64 wait_id, MCP::ToolCallResult);
     // Returns whether the combined rules changed.
     ErrorOr<bool> load_content_blocker_lists();
     void apply_content_blocker_settings();
@@ -616,6 +644,25 @@ private:
     virtual void did_connect_devtools_client(DevTools::TabDescription const&) const override;
     virtual void did_disconnect_devtools_client(DevTools::TabDescription const&) const override;
     virtual void did_close_devtools_connection() override;
+
+    // ^MCP::MCPDelegate
+    virtual Vector<MCP::TabInfo> list_allowed_tabs() const override;
+    virtual Optional<MCP::TabInfo> active_allowed_tab() const override;
+    virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, MCP::OnToolCallComplete) override;
+    virtual void switch_tab(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void close_tab(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::OnToolCallComplete) override;
+    virtual void reload_tab(u64 tab_id, bool wait_for_load, MCP::OnToolCallComplete) override;
+    virtual void go_back(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void go_forward(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void get_accessibility_tree(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void get_dom_tree(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void get_page_source(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void find_elements(u64 tab_id, String selector, String strategy, MCP::OnToolCallComplete) override;
+    virtual void click_element(u64 tab_id, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete) override;
+    virtual void type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete) override;
+    virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
+    virtual void take_screenshot(u64 tab_id, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
@@ -762,6 +809,44 @@ private:
 
     OwnPtr<DevTools::DevToolsServer> m_devtools;
     OwnPtr<DevTools::FirefoxClient> m_devtools_client;
+
+    OwnPtr<MCP::MCPServer> m_mcp;
+    Optional<String> m_mcp_token;
+    u64 m_next_mcp_command_id { 0x8000'0000'0000'0001ULL };
+    u64 m_next_mcp_wait_id { 1 };
+
+    struct PendingMCPContentCommand {
+        String name;
+        JsonValue payload;
+        Vector<String> arguments;
+        Function<void(Web::WebDriver::Response)> on_complete;
+    };
+    struct MCPViewQueue {
+        AK_ALLOC_WITH_KMALLOC;
+        Vector<PendingMCPContentCommand> queued;
+        Optional<u64> in_flight_command_id;
+        Function<void(Web::WebDriver::Response)> in_flight_callback;
+        RefPtr<Core::Timer> in_flight_timer;
+    };
+    struct PendingMCPNavigationWait {
+        AK_ALLOC_WITH_KMALLOC;
+        u64 view_id { 0 };
+        u64 listener_id { 0 };
+        RefPtr<Core::Timer> timer;
+        MCP::OnToolCallComplete on_complete;
+    };
+    struct PendingMCPTreeWait {
+        AK_ALLOC_WITH_KMALLOC;
+        u64 view_id { 0 };
+        bool is_accessibility { false };
+        RefPtr<Core::Timer> timer;
+        MCP::OnToolCallComplete on_complete;
+    };
+
+    HashMap<u64, OwnPtr<MCPViewQueue>> m_mcp_content_queues;
+    HashMap<u64, u64> m_mcp_command_to_view;
+    HashMap<u64, OwnPtr<PendingMCPNavigationWait>> m_mcp_nav_waits;
+    HashMap<u64, OwnPtr<PendingMCPTreeWait>> m_mcp_tree_waits;
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
 };

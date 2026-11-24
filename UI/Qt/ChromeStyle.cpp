@@ -1034,7 +1034,7 @@ QColor report_review_placeholder_text(QPalette const& palette)
     return mix(chrome_text(palette), chrome_surface_recessed(palette), 0.45);
 }
 
-QString devtools_banner_style_sheet(QPalette const& palette)
+static QString bottom_banner_style_sheet(QPalette const& palette, StringView object_name)
 {
     auto background = style_sheet_color(chrome_background(palette));
     auto border = style_sheet_color(chrome_border(palette));
@@ -1044,35 +1044,45 @@ QString devtools_banner_style_sheet(QPalette const& palette)
     auto text = style_sheet_color(chrome_text(palette));
 
     return qformatted(R"(
-QWidget#LadybirdDevToolsBanner {{
+QWidget#{6} {{
     background: {0};
     border-top: 1px solid {1};
 }}
 
-QWidget#LadybirdDevToolsBanner QLabel,
-QWidget#LadybirdDevToolsBanner QPushButton {{
+QWidget#{6} QLabel,
+QWidget#{6} QPushButton {{
     background: transparent;
     color: {5};
 }}
 
-QWidget#LadybirdDevToolsBanner QPushButton {{
+QWidget#{6} QPushButton {{
     border: 1px solid transparent;
     border-radius: 7px;
     min-height: 26px;
     padding: 2px 9px;
 }}
 
-QWidget#LadybirdDevToolsBanner QPushButton:hover {{
+QWidget#{6} QPushButton:hover {{
     background: {3};
     border-color: {2};
 }}
 
-QWidget#LadybirdDevToolsBanner QPushButton:pressed {{
+QWidget#{6} QPushButton:pressed {{
     background: {4};
     border-color: {2};
 }}
 )",
-        background, border, control_border, hover, pressed, text);
+        background, border, control_border, hover, pressed, text, object_name);
+}
+
+QString devtools_banner_style_sheet(QPalette const& palette)
+{
+    return bottom_banner_style_sheet(palette, "LadybirdDevToolsBanner"sv);
+}
+
+QString mcp_banner_style_sheet(QPalette const& palette)
+{
+    return bottom_banner_style_sheet(palette, "LadybirdMCPBanner"sv);
 }
 
 QString notification_bar_style_sheet(QPalette const& palette)

@@ -178,7 +178,7 @@ target_include_directories(${LADYBIRD_TARGET} ${LADYBIRD_SOURCE_DIR})
 target_include_directories(${LADYBIRD_TARGET} ${LADYBIRD_SOURCE_DIR}/Services/)
 
 if(WIN32)
-    target_link_libraries(${LADYBIRD_TARGET} LibDevTools)
+    target_link_libraries(${LADYBIRD_TARGET} LibDevTools LibMCP)
 endif()
 
 function(set_helper_process_properties)

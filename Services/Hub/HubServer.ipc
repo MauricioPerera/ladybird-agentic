@@ -139,6 +139,7 @@ endpoint HubServer
     stop_request(u64 request_id) =|
 
     toggle_devtools_enabled() =|
+    toggle_mcp_enabled() =|
     check_for_updates(WebView::UpdateCheckTrigger trigger) =|
     skip_update_version(String version) =|
     set_preferred_contrast(Web::CSS::PreferredContrast contrast) =|
@@ -261,6 +262,7 @@ endpoint HubServer
     view_set_window_size(u64 view_id, Gfx::IntSize size) =|
     view_set_system_visibility_state(u64 view_id, Web::HTML::VisibilityState visibility_state) =|
     view_set_pinned(u64 view_id, bool pinned) =|
+    view_set_mcp_access_allowed(u64 view_id, bool allowed) =|
     view_set_current_tab_of_window(u64 view_id, bool current_tab_of_window) =|
     view_set_presents_from_cpu_memory(u64 view_id, bool presents_from_cpu_memory) =|
     view_set_hosts_remote_layer(u64 view_id, bool hosts_remote_layer) =|

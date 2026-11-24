@@ -30,6 +30,7 @@ public:
         bool scripting_enabled { true };
         bool blocks_pop_ups { true };
         bool devtools_enabled { false };
+        bool mcp_enabled { false };
     };
 
     static ApplicationActions& the();
@@ -39,6 +40,7 @@ public:
 
     void update_for_active_view();
     void devtools_enabled_changed(bool enabled);
+    void mcp_enabled_changed(bool enabled);
 
     Action& reload_action() { return *m_reload_action; }
     Action& show_compositor_layers_action() { return *m_show_compositor_layers_action; }
@@ -103,6 +105,7 @@ private:
     RefPtr<Action> m_toggle_menu_bar_action;
     RefPtr<Action> m_view_source_action;
     RefPtr<Action> m_toggle_devtools_action;
+    RefPtr<Action> m_toggle_mcp_action;
     RefPtr<Action> m_report_website_issue_action;
     RefPtr<Action> m_show_tab_performance_monitor_action;
     RefPtr<Action> m_show_line_box_borders_action;

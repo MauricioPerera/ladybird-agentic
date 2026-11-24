@@ -83,6 +83,7 @@ private:
     virtual Optional<pid_t> ui_process_id() const override;
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
     virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, WebView::ViewImplementation const* related_view = nullptr) const override;
+    virtual Optional<WebView::ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab) const override;
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, WebView::ViewImplementation const* source_view = nullptr) const override;
     virtual void activate_or_open_tab_with_url(URL::URL const&) const override;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const override;
@@ -110,6 +111,8 @@ private:
     virtual bool captures_browser_crashes() const override { return true; }
     virtual void on_devtools_enabled() const override;
     virtual void on_devtools_disabled() const override;
+    virtual void on_mcp_enabled(u16 port, String const& token) const override;
+    virtual void on_mcp_disabled() const override;
     virtual void on_compositor_gpu_painting_changed() const override;
     virtual void create_platform_actions() override;
     virtual Optional<String> ui_font_family() const override;

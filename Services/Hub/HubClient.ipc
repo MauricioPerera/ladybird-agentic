@@ -160,6 +160,9 @@ struct Hub::InitialState {
     Vector<ByteString> raw_urls;
     ByteString crash_report_directory;
     Optional<u16> devtools_port;
+    bool mcp_enabled;
+    Optional<u16> mcp_port;
+    Optional<String> mcp_token;
     ByteString profile_identifier;
     ByteString profile_identity;
     bool profile_is_temporary;
@@ -221,6 +224,7 @@ struct Hub::ViewState {
     Utf16String title;
     String handle;
     bool is_loading;
+    bool mcp_access_allowed;
     bool crash_overlay_active;
     String crash_overlay_failed_url;
     bool crash_overlay_is_for_memory_limit;
@@ -313,6 +317,8 @@ endpoint HubClient
     app_quit_for_signal() =|
     app_did_enable_devtools(u16 port) =|
     app_did_disable_devtools() =|
+    app_did_enable_mcp(u16 port, String token) =|
+    app_did_disable_mcp() =|
     app_gpu_painting_changed(bool gpu_painting_enabled) =|
     app_open_urls_in_new_tabs(Vector<URL::URL> urls) =|
     app_activate_or_open_tab_with_url(URL::URL url) =|

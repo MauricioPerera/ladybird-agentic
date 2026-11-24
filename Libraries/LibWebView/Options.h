@@ -67,6 +67,7 @@ struct DNSOverUDP {
 using DNSSettings = Variant<SystemDNS, DNSOverTLS, DNSOverUDP>;
 
 constexpr inline u16 default_devtools_port = 6000;
+constexpr inline u16 default_mcp_port = 7331;
 
 enum class EnableContentBlocker {
     No,
@@ -109,6 +110,8 @@ struct BrowserOptions {
     Optional<ByteString> webdriver_browser_endpoint {};
     Optional<DNSSettings> dns_settings {};
     Optional<u16> devtools_port;
+    Optional<u16> mcp_port;
+    Optional<String> mcp_token;
     EnableContentBlocker enable_content_blocker { EnableContentBlocker::Yes };
     DisableSandbox disable_sandbox { DisableSandbox::No };
     ForceVideoDecoderServer force_video_decoder_server { ForceVideoDecoderServer::No };

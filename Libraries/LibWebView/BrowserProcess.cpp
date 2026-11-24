@@ -434,6 +434,13 @@ ErrorOr<BrowserProcess::HandoverResult> BrowserProcess::connect_as_client(ByteSt
         // removes it after, so a PID file without a socket is left behind as well.
         if (socket.error().is_errno() && (socket.error().code() == ECONNREFUSED || socket.error().code() == ENOENT))
             return HandoverResult { Handover::BrowserIsGone };
+#    if defined(AK_OS_WINDOWS)
+        if (socket.error().is_windows_error()
+            && (socket.error().code() == WSAECONNREFUSED
+                || socket.error().code() == ERROR_FILE_NOT_FOUND
+                || socket.error().code() == ERROR_PATH_NOT_FOUND))
+            return HandoverResult { Handover::BrowserIsGone };
+#    endif
         return socket.release_error();
     }
 
@@ -530,7 +537,8 @@ BrowserProcess::~BrowserProcess()
 
     if (m_pid_file) {
 #if defined(AK_OS_WINDOWS)
-        MUST(m_pid_file->truncate(0));
+        if (pid_file_is_ours)
+            (void)m_pid_file->truncate(0);
         // NOTE: On Windows, be conservative and close the pid file's handle before
         // removing the file; removal of an open file requires cooperative sharing modes.
         m_pid_file->close();
@@ -542,14 +550,9 @@ BrowserProcess::~BrowserProcess()
             (void)FileSystem::remove(m_pid_path, FileSystem::RecursionMode::Disallowed);
     }
 
-    if (!m_socket_path.is_empty()) {
-#if defined(AK_OS_WINDOWS)
-        MUST(FileSystem::remove(m_socket_path, FileSystem::RecursionMode::Disallowed));
-#else
-        if (pid_file_is_ours)
-            (void)FileSystem::remove(m_socket_path, FileSystem::RecursionMode::Disallowed);
-#endif
-    }
+    m_local_server = nullptr;
+    if (!m_socket_path.is_empty() && pid_file_is_ours)
+        (void)FileSystem::remove(m_socket_path, FileSystem::RecursionMode::Disallowed);
 }
 
 UIProcessClient::UIProcessClient(NonnullOwnPtr<IPC::Transport> transport)

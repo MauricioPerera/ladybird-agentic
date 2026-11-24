@@ -79,6 +79,7 @@ enum class ActionID {
     OpenTaskManager,
     OpenSettingsPage,
     ToggleDevTools,
+    ToggleMCP,
     ViewSource,
     InspectElement,
 

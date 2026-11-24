@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/JsonObject.h>
 #include <AK/Platform.h>
 #include <AK/StdLibExtras.h>
 #include <AK/TypeCasts.h>
@@ -25,6 +26,7 @@
 #include <UI/Qt/HubConnection.h>
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/LadybirdButton.h>
+#include <UI/Qt/MCPBanner.h>
 #include <UI/Qt/Menu.h>
 #include <UI/Qt/Motion.h>
 #include <UI/Qt/Popover.h>
@@ -43,6 +45,7 @@
 #include <QAbstractButton>
 #include <QActionGroup>
 #include <QApplication>
+#include <QClipboard>
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QGuiApplication>
@@ -457,6 +460,33 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     m_devtools_banner->hide();
     main_layout->addWidget(m_devtools_banner);
 
+    m_mcp_banner = new MCPBanner(main_widget);
+    connect(m_mcp_banner, &MCPBanner::toggle_current_tab_access_requested, this, [this] {
+        if (m_current_tab && m_current_tab->is_loaded())
+            m_current_tab->view().set_mcp_access_allowed(!m_current_tab->view().is_mcp_access_allowed());
+    });
+    connect(m_mcp_banner, &MCPBanner::copy_config_requested, this, [this] {
+        auto port = Application::the().mcp_port();
+        auto const& token = Application::the().mcp_token();
+        if (!port.has_value() || !token.has_value())
+            return;
+
+        JsonObject headers;
+        headers.set("Authorization"sv, MUST(String::formatted("Bearer {}", *token)));
+
+        JsonObject config;
+        config.set("url"sv, MUST(String::formatted("http://127.0.0.1:{}/mcp", *port)));
+        config.set("headers"sv, AK::move(headers));
+
+        QGuiApplication::clipboard()->setText(qstring_from_ak_string(config.serialized()));
+        m_mcp_banner->show_copied_feedback();
+    });
+    connect(m_mcp_banner, &MCPBanner::disable_requested, this, [] {
+        HubConnection::the().async_toggle_mcp_enabled();
+    });
+    m_mcp_banner->hide();
+    main_layout->addWidget(m_mcp_banner);
+
     setCentralWidget(main_widget);
     setContextMenuPolicy(Qt::PreventContextMenu);
 
@@ -467,6 +497,8 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
 
     if (Application::the().devtools_port().has_value())
         on_devtools_enabled();
+    if (Application::the().mcp_port().has_value())
+        on_mcp_enabled();
 }
 
 BrowserWindow::~BrowserWindow()
@@ -688,6 +720,31 @@ void BrowserWindow::on_devtools_disabled()
     m_devtools_banner->hide();
 }
 
+void BrowserWindow::on_mcp_enabled()
+{
+    update_mcp_banner();
+    m_mcp_banner->show();
+}
+
+void BrowserWindow::on_mcp_disabled()
+{
+    m_mcp_banner->hide();
+}
+
+void BrowserWindow::update_mcp_banner()
+{
+    if (!m_mcp_banner)
+        return;
+
+    auto port = Application::the().mcp_port();
+    if (!port.has_value())
+        return;
+
+    bool tab_loaded = m_current_tab && m_current_tab->is_loaded();
+    bool tab_allowed = tab_loaded && m_current_tab->view().is_mcp_access_allowed();
+    m_mcp_banner->update_state(*port, tab_loaded, tab_allowed);
+}
+
 Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab, TabLocation location)
 {
     auto& tab = create_new_tab(activate_tab, location);
@@ -902,6 +959,10 @@ void BrowserWindow::initialize_tab(Tab* tab)
     QObject::connect(tab, &Tab::title_changed, this, &BrowserWindow::tab_title_changed);
     QObject::connect(tab, &Tab::favicon_changed, this, &BrowserWindow::tab_favicon_changed);
     QObject::connect(tab, &Tab::audio_state_changed, this, &BrowserWindow::tab_audio_state_changed);
+    QObject::connect(tab, &Tab::mcp_access_changed, this, [this](int index) {
+        if (m_tabs_container->tab(index) == m_current_tab)
+            update_mcp_banner();
+    });
     QObject::connect(tab, &Tab::microphone_in_use_changed, this, [this] {
         m_tabs_container->tab_bar()->update_microphone_indicators();
     });
@@ -919,6 +980,8 @@ void BrowserWindow::initialize_tab(Tab* tab)
 
 void BrowserWindow::initialize_tab_view(Tab* tab)
 {
+    if (tab == m_current_tab)
+        update_mcp_banner();
     QObject::connect(&tab->view(), &WebContentView::urls_dropped, this, [this](auto& urls) {
         VERIFY(urls.size());
         m_current_tab->view().load_from_user_input(ak_url_from_qurl(urls[0]));
@@ -1099,6 +1162,7 @@ void BrowserWindow::set_current_tab(Tab* tab)
 
     reposition_page_cards();
     Application::the().report_active_view();
+    update_mcp_banner();
 }
 
 void BrowserWindow::show_page_card(PageCardSlot slot, QString const& title, QString const& text, Vector<PageCard::Button> buttons)

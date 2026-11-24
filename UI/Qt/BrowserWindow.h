@@ -44,6 +44,7 @@ class TabBarButton;
 class WebContentView;
 class BrowserWindow;
 class DevToolsBanner;
+class MCPBanner;
 
 class ExitFullscreenButton : public QPushButton {
     Q_OBJECT
@@ -254,6 +255,8 @@ public:
 
     void on_devtools_enabled();
     void on_devtools_disabled();
+    void on_mcp_enabled();
+    void on_mcp_disabled();
 
     void set_window_rect(Optional<Web::DevicePixels> x, Optional<Web::DevicePixels> y, Optional<Web::DevicePixels> width, Optional<Web::DevicePixels> height);
     // Returns the rect made no larger than the bounds, and moved to be inside them.
@@ -334,6 +337,7 @@ private:
     void toggle_window_maximized();
     bool start_window_move();
     void set_always_on_top(bool);
+    void update_mcp_banner();
 
     QIcon icon_for_page_mute_state(Tab&) const;
     QString tool_tip_for_page_mute_state(Tab&) const;
@@ -348,6 +352,7 @@ private:
     QPointer<WebContentView> m_page_cards_view;
     Vector<QPointer<Tab>> m_background_tabs_from_current_tab;
     DevToolsBanner* m_devtools_banner { nullptr };
+    MCPBanner* m_mcp_banner { nullptr };
 
     QWidget* m_menu_bar_window_controls { nullptr };
     QToolButton* m_menu_bar_minimize_window_button { nullptr };

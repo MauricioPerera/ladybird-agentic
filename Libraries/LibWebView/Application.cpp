@@ -7,9 +7,11 @@
 #include <AK/AnyOf.h>
 #include <AK/Checked.h>
 #include <AK/Debug.h>
+#include <AK/Hex.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/Math.h>
+#include <AK/Random.h>
 #include <AK/ScopeGuard.h>
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
@@ -33,6 +35,7 @@
 #include <LibHTTP/Cookie/IncludeCredentials.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibIPC/TransportHandle.h>
+#include <LibMCP/MCPServer.h>
 #include <LibRequests/NetworkError.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
@@ -225,6 +228,9 @@ OwnPtr<MediaSessionPlatformBackend> Application::create_media_session_platform_b
 
 Application::~Application()
 {
+    m_mcp.clear();
+    fail_all_mcp_requests("Browser shutting down"sv);
+
 #if !defined(AK_OS_WINDOWS)
     // No event loop runs the handlers during teardown, so a signal from here on takes its default action again.
     for (auto handler : m_session_signal_handlers)
@@ -339,6 +345,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_scripting = false;
     bool disable_sql_database = false;
     Optional<u16> devtools_port;
+    Optional<u16> mcp_port;
+    Optional<StringView> mcp_token;
     Vector<StringView> debug_processes;
     Optional<StringView> profile_process;
     Optional<StringView> profile_tool;
@@ -535,6 +543,21 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
             return devtools_port.has_value();
         },
     });
+    args_parser.add_option(Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
+        .help_string = "Enable the embedded MCP server, with an optional port",
+        .long_name = "mcp",
+        .value_name = "port",
+        .accept_value = [&](StringView value) {
+            if (value.is_empty())
+                mcp_port = WebView::default_mcp_port;
+            else
+                mcp_port = value.to_number<u16>();
+
+            return mcp_port.has_value();
+        },
+    });
+    args_parser.add_option(mcp_token, "Authentication token for the embedded MCP server", "mcp-token", 0, "token");
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -598,6 +621,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                           : DNSSettings(DNSOverUDP(dns_server_address.release_value(), *dns_server_port, validate_dnssec_locally)) }
                 : OptionalNone()),
         .devtools_port = devtools_port,
+        .mcp_port = mcp_port,
+        .mcp_token = mcp_token.has_value() ? Optional<String> { TRY(String::from_utf8(*mcp_token)) } : OptionalNone {},
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
         .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
         .force_video_decoder_server = force_video_decoder_server ? ForceVideoDecoderServer::Yes : ForceVideoDecoderServer::No,
@@ -1388,6 +1413,9 @@ Optional<u64> Application::webdriver_page_load_timeout() const
 
 void Application::complete_webdriver_content_command(u64 command_id, Web::WebDriver::Response response)
 {
+    if (did_complete_mcp_content_command(command_id, response))
+        return;
+
     if (auto* webdriver_bidi = WebDriverBiDi::the(); webdriver_bidi && webdriver_bidi->did_complete_content_command(command_id, response))
         return;
 
@@ -2017,6 +2045,14 @@ ErrorOr<void> Application::launch_services()
         Core::deferred_invoke([this]() {
             if (auto result = launch_devtools_server(); result.is_error())
                 warnln("Unable to launch devtools server: {}", result.error());
+        });
+    }
+
+    if (m_browser_options.mcp_port.has_value()) {
+        // Defer launching MCP until the entire application is initialized.
+        Core::deferred_invoke([this]() {
+            if (auto result = launch_mcp_server(); result.is_error())
+                warnln("Unable to launch MCP server: {}", result.error());
         });
     }
 
@@ -4394,6 +4430,765 @@ void Application::did_disconnect_devtools_client(DevTools::TabDescription const&
 void Application::did_close_devtools_connection()
 {
     m_devtools_client.clear();
+}
+
+static MCP::ToolCallResult mcp_error_result(StringView message)
+{
+    return {
+        .is_error = true,
+        .text = String::from_utf8_without_validation(message.bytes()),
+    };
+}
+
+static MCP::ToolCallResult mcp_ok_json(JsonValue const& value)
+{
+    return {
+        .is_error = false,
+        .text = value.serialized(),
+    };
+}
+
+static constexpr auto mcp_denied_message = "Tab not found or MCP access denied"sv;
+static constexpr auto mcp_webdriver_element_key = "element-6066-11e4-a52e-4f735466cecf"sv;
+
+static Optional<ViewImplementation&> find_allowed_mcp_view(u64 tab_id)
+{
+    auto view = ViewImplementation::find_view_by_id(tab_id);
+    if (!view.has_value() || view->owner_view_id().has_value() || !view->is_mcp_access_allowed())
+        return {};
+    return view;
+}
+
+static ErrorOr<URL::URL> validate_mcp_url(StringView raw_url)
+{
+    auto parsed = URL::Parser::basic_parse(raw_url);
+    if (!parsed.has_value())
+        return Error::from_string_literal("Invalid URL");
+    if (parsed->scheme() == "http"sv || parsed->scheme() == "https"sv || *parsed == URL::about_blank())
+        return parsed.release_value();
+    return Error::from_string_literal("Only http:, https:, and about:blank URLs are allowed");
+}
+
+static MCP::TabInfo view_to_mcp_tab_info(ViewImplementation const& view, Optional<u64> active_view_id)
+{
+    return {
+        .id = view.view_id(),
+        .title = view.title().to_well_formed_utf8(),
+        .url = view.url().to_string(),
+        .is_loading = view.is_loading(),
+        .is_active = active_view_id.has_value() && *active_view_id == view.view_id(),
+    };
+}
+
+static Optional<String> extract_mcp_element_id(JsonValue const& value)
+{
+    if (!value.is_object())
+        return {};
+    if (auto id = value.as_object().get_string(mcp_webdriver_element_key); id.has_value())
+        return *id;
+    return {};
+}
+
+static MCP::ToolCallResult format_mcp_webdriver_error(Web::WebDriver::Error const& error)
+{
+    return mcp_error_result(MUST(String::formatted("{}: {}", error.error, error.message)));
+}
+
+Optional<u16> Application::mcp_port() const
+{
+    if (!m_mcp)
+        return {};
+    return m_mcp->local_port();
+}
+
+ErrorOr<void> Application::launch_mcp_server()
+{
+    VERIFY(!m_mcp);
+
+    String token;
+    if (m_browser_options.mcp_token.has_value() && !m_browser_options.mcp_token->is_empty()) {
+        token = *m_browser_options.mcp_token;
+    } else {
+        Array<u8, 32> random_bytes;
+        fill_with_random(random_bytes);
+        token = TRY(String::from_byte_string(encode_hex(random_bytes)));
+    }
+
+    auto requested_port = m_browser_options.mcp_port.value_or(WebView::default_mcp_port);
+    auto server = TRY(MCP::MCPServer::create(*this, requested_port, token));
+    auto actual_port = server->local_port().value_or(requested_port);
+
+    m_mcp_token = move(token);
+    m_mcp = move(server);
+
+    outln("MCP server listening on http://127.0.0.1:{}/mcp (token: {})", actual_port, *m_mcp_token);
+    (void)fflush(stdout);
+
+    on_mcp_enabled(actual_port, *m_mcp_token);
+    return {};
+}
+
+ErrorOr<void> Application::toggle_mcp_enabled()
+{
+    if (m_mcp) {
+        fail_all_mcp_requests("MCP server disabled"sv);
+        m_mcp.clear();
+        m_mcp_token.clear();
+        on_mcp_disabled();
+    } else {
+        TRY(launch_mcp_server());
+    }
+    return {};
+}
+
+void Application::did_revoke_mcp_access_for_view(u64 view_id)
+{
+    fail_mcp_requests_for_view(view_id, mcp_denied_message);
+}
+
+void Application::did_close_mcp_view(u64 view_id)
+{
+    fail_mcp_requests_for_view(view_id, "Tab closed"sv);
+    m_mcp_content_queues.remove(view_id);
+}
+
+void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
+{
+    if (auto queue_entry = m_mcp_content_queues.get(view_id); queue_entry.has_value()) {
+        auto& queue = *queue_entry.value();
+        if (queue.in_flight_timer) {
+            queue.in_flight_timer->stop();
+            queue.in_flight_timer.clear();
+        }
+        if (auto callback = move(queue.in_flight_callback))
+            callback(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, String::from_utf8_without_validation(message.bytes())));
+        auto queued = move(queue.queued);
+        for (auto& cmd : queued) {
+            if (cmd.on_complete)
+                cmd.on_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, String::from_utf8_without_validation(message.bytes())));
+        }
+    }
+
+    Vector<u64> nav_ids;
+    for (auto const& [wait_id, wait] : m_mcp_nav_waits) {
+        if (wait->view_id == view_id)
+            nav_ids.append(wait_id);
+    }
+    for (auto wait_id : nav_ids)
+        finish_mcp_navigation_wait(wait_id, mcp_error_result(message));
+
+    Vector<u64> tree_ids;
+    for (auto const& [wait_id, wait] : m_mcp_tree_waits) {
+        if (wait->view_id == view_id)
+            tree_ids.append(wait_id);
+    }
+    for (auto wait_id : tree_ids)
+        finish_mcp_tree_wait(wait_id, mcp_error_result(message));
+}
+
+void Application::fail_all_mcp_requests(StringView message)
+{
+    Vector<u64> view_ids;
+    for (auto const& [view_id, _] : m_mcp_content_queues)
+        view_ids.append(view_id);
+    for (auto const& [_, wait] : m_mcp_nav_waits) {
+        if (!view_ids.contains_slow(wait->view_id))
+            view_ids.append(wait->view_id);
+    }
+    for (auto const& [_, wait] : m_mcp_tree_waits) {
+        if (!view_ids.contains_slow(wait->view_id))
+            view_ids.append(wait->view_id);
+    }
+    for (auto view_id : view_ids)
+        fail_mcp_requests_for_view(view_id, message);
+}
+
+void Application::enqueue_mcp_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, Function<void(Web::WebDriver::Response)> on_complete)
+{
+    if (!find_allowed_mcp_view(view_id).has_value()) {
+        on_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, String::from_utf8_without_validation(mcp_denied_message.bytes())));
+        return;
+    }
+
+    auto& queue = m_mcp_content_queues.ensure(view_id, [] { return make<MCPViewQueue>(); });
+    queue->queued.append({ move(name), move(payload), move(arguments), move(on_complete) });
+    if (!queue->in_flight_command_id.has_value())
+        dispatch_next_mcp_content_command(view_id);
+}
+
+void Application::dispatch_next_mcp_content_command(u64 view_id)
+{
+    auto queue_entry = m_mcp_content_queues.get(view_id);
+    if (!queue_entry.has_value())
+        return;
+    auto& queue = *queue_entry.value();
+
+    while (!queue.in_flight_command_id.has_value() && !queue.queued.is_empty()) {
+        auto command = queue.queued.take_first();
+        auto view = find_allowed_mcp_view(view_id);
+        if (!view.has_value()) {
+            if (command.on_complete)
+                command.on_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, String::from_utf8_without_validation(mcp_denied_message.bytes())));
+            continue;
+        }
+
+        auto command_id = m_next_mcp_command_id++;
+        queue.in_flight_command_id = command_id;
+        queue.in_flight_callback = move(command.on_complete);
+        m_mcp_command_to_view.set(command_id, view_id);
+
+        queue.in_flight_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(15), [this, view_id, command_id] {
+            auto entry = m_mcp_content_queues.get(view_id);
+            if (!entry.has_value())
+                return;
+            auto& q = *entry.value();
+            if (q.in_flight_command_id != command_id)
+                return;
+            q.in_flight_timer.clear();
+            if (auto cb = move(q.in_flight_callback))
+                cb(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "MCP command timed out"sv));
+        });
+        queue.in_flight_timer->start();
+
+        view->run_webdriver_content_command(command_id, Web::WebDriver::SessionBrowsingContext::CurrentTopLevel, command.name, move(command.payload), move(command.arguments));
+    }
+}
+
+bool Application::did_complete_mcp_content_command(u64 command_id, Web::WebDriver::Response& response)
+{
+    auto view_id = m_mcp_command_to_view.take(command_id);
+    if (!view_id.has_value())
+        return false;
+
+    auto queue_entry = m_mcp_content_queues.get(*view_id);
+    if (!queue_entry.has_value())
+        return true;
+
+    auto& queue = *queue_entry.value();
+    if (queue.in_flight_command_id != command_id)
+        return true;
+
+    if (queue.in_flight_timer) {
+        queue.in_flight_timer->stop();
+        queue.in_flight_timer.clear();
+    }
+    queue.in_flight_command_id.clear();
+
+    if (auto callback = move(queue.in_flight_callback))
+        callback(move(response));
+
+    Core::deferred_invoke([this, view_id = *view_id] {
+        dispatch_next_mcp_content_command(view_id);
+    });
+    return true;
+}
+
+void Application::wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(view_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto wait_id = m_next_mcp_wait_id++;
+    auto wait = make<PendingMCPNavigationWait>();
+    wait->view_id = view_id;
+    wait->on_complete = move(on_complete);
+
+    ViewImplementation::NavigationListener listener;
+    listener.on_load_finish = [this, wait_id](URL::URL const&) {
+        Core::deferred_invoke([this, wait_id] {
+            auto entry = m_mcp_nav_waits.get(wait_id);
+            if (!entry.has_value())
+                return;
+            auto allowed_view = find_allowed_mcp_view(entry.value()->view_id);
+            if (!allowed_view.has_value()) {
+                finish_mcp_navigation_wait(wait_id, mcp_error_result(mcp_denied_message));
+                return;
+            }
+            JsonObject result;
+            result.set("tab_id"sv, allowed_view->view_id());
+            result.set("url"sv, allowed_view->url().to_string());
+            result.set("title"sv, allowed_view->title().to_well_formed_utf8());
+            result.set("is_loading"sv, allowed_view->is_loading());
+            finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { move(result) }));
+        });
+    };
+    wait->listener_id = view->add_navigation_listener(move(listener));
+
+    wait->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(15), [this, wait_id] {
+        finish_mcp_navigation_wait(wait_id, mcp_error_result("Timed out waiting for page load"sv));
+    });
+    wait->timer->start();
+
+    m_mcp_nav_waits.set(wait_id, move(wait));
+}
+
+void Application::finish_mcp_navigation_wait(u64 wait_id, MCP::ToolCallResult result)
+{
+    auto wait = m_mcp_nav_waits.take(wait_id);
+    if (!wait.has_value())
+        return;
+
+    if (wait.value()->timer) {
+        wait.value()->timer->stop();
+        wait.value()->timer.clear();
+    }
+
+    auto view_id = wait.value()->view_id;
+    auto listener_id = wait.value()->listener_id;
+    Core::deferred_invoke([view_id, listener_id] {
+        if (auto view = ViewImplementation::find_view_by_id(view_id); view.has_value())
+            view->remove_navigation_listener(listener_id);
+    });
+
+    if (auto callback = move(wait.value()->on_complete))
+        callback(move(result));
+}
+
+void Application::finish_mcp_tree_wait(u64 wait_id, MCP::ToolCallResult result)
+{
+    auto wait = m_mcp_tree_waits.take(wait_id);
+    if (!wait.has_value())
+        return;
+
+    if (wait.value()->timer) {
+        wait.value()->timer->stop();
+        wait.value()->timer.clear();
+    }
+
+    if (auto view = ViewImplementation::find_view_by_id(wait.value()->view_id); view.has_value()) {
+        if (wait.value()->is_accessibility)
+            view->on_received_accessibility_tree = nullptr;
+        else
+            view->on_received_dom_tree = nullptr;
+    }
+
+    if (auto callback = move(wait.value()->on_complete))
+        callback(move(result));
+}
+
+Vector<MCP::TabInfo> Application::list_allowed_tabs() const
+{
+    auto active_view = active_web_view();
+    Optional<u64> active_id = active_view.has_value() ? Optional<u64> { active_view->view_id() } : OptionalNone {};
+
+    Vector<MCP::TabInfo> tabs;
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (!view.owner_view_id().has_value() && view.is_mcp_access_allowed())
+            tabs.append(view_to_mcp_tab_info(view, active_id));
+        return IterationDecision::Continue;
+    });
+    return tabs;
+}
+
+Optional<MCP::TabInfo> Application::active_allowed_tab() const
+{
+    auto active_view = active_web_view();
+    if (!active_view.has_value() || active_view->owner_view_id().has_value() || !active_view->is_mcp_access_allowed())
+        return {};
+    return view_to_mcp_tab_info(*active_view, active_view->view_id());
+}
+
+void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, MCP::OnToolCallComplete on_complete)
+{
+    Optional<URL::URL> parsed_url;
+    if (url.has_value() && !url->is_empty()) {
+        auto maybe_url = validate_mcp_url(*url);
+        if (maybe_url.is_error()) {
+            on_complete(mcp_error_result(maybe_url.error().string_literal()));
+            return;
+        }
+        parsed_url = maybe_url.release_value();
+    }
+
+    auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result("UI unavailable to open tab"sv));
+        return;
+    }
+
+    view->set_mcp_access_allowed(true);
+
+    if (!parsed_url.has_value() || *parsed_url == URL::about_blank()) {
+        JsonObject result;
+        result.set("tab_id"sv, view->view_id());
+        result.set("url"sv, view->url().to_string());
+        result.set("title"sv, view->title().to_well_formed_utf8());
+        result.set("mcp_access_allowed"sv, true);
+        on_complete(mcp_ok_json(JsonValue { move(result) }));
+        return;
+    }
+
+    if (wait_for_load) {
+        wait_for_mcp_navigation(view->view_id(), move(on_complete));
+        view->load_from_browser_ui(*parsed_url);
+        return;
+    }
+
+    view->load_from_browser_ui(*parsed_url);
+    JsonObject result;
+    result.set("tab_id"sv, view->view_id());
+    result.set("url"sv, parsed_url->to_string());
+    result.set("mcp_access_allowed"sv, true);
+    result.set("is_loading"sv, true);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::switch_tab(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    if (view->on_activate_tab)
+        view->on_activate_tab();
+
+    JsonObject result;
+    result.set("switched"sv, true);
+    result.set("tab_id"sv, tab_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::close_tab(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    view->force_close();
+
+    JsonObject result;
+    result.set("closed"sv, true);
+    result.set("tab_id"sv, tab_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto maybe_url = validate_mcp_url(url);
+    if (maybe_url.is_error()) {
+        on_complete(mcp_error_result(maybe_url.error().string_literal()));
+        return;
+    }
+    auto parsed_url = maybe_url.release_value();
+
+    if (wait_for_load && parsed_url != URL::about_blank()) {
+        wait_for_mcp_navigation(tab_id, move(on_complete));
+        view->load_from_browser_ui(parsed_url);
+        return;
+    }
+
+    view->load_from_browser_ui(parsed_url);
+    JsonObject result;
+    result.set("tab_id"sv, tab_id);
+    result.set("url"sv, parsed_url.to_string());
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::reload_tab(u64 tab_id, bool wait_for_load, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    if (wait_for_load) {
+        wait_for_mcp_navigation(tab_id, move(on_complete));
+        view->reload();
+        return;
+    }
+
+    view->reload();
+    JsonObject result;
+    result.set("tab_id"sv, tab_id);
+    result.set("reloading"sv, true);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::go_back(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    view->traverse_the_history_by_delta(-1);
+    JsonObject result;
+    result.set("ok"sv, true);
+    result.set("tab_id"sv, tab_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::go_forward(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    view->traverse_the_history_by_delta(1);
+    JsonObject result;
+    result.set("ok"sv, true);
+    result.set("tab_id"sv, tab_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::get_accessibility_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto wait_id = m_next_mcp_wait_id++;
+    auto wait = make<PendingMCPTreeWait>();
+    wait->view_id = tab_id;
+    wait->is_accessibility = true;
+    wait->on_complete = move(on_complete);
+    wait->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(10), [this, wait_id] {
+        finish_mcp_tree_wait(wait_id, mcp_error_result("Timed out waiting for accessibility tree"sv));
+    });
+    wait->timer->start();
+    m_mcp_tree_waits.set(wait_id, move(wait));
+
+    view->on_received_accessibility_tree = [this, wait_id](JsonObject tree) {
+        Core::deferred_invoke([this, wait_id, tree = move(tree)]() mutable {
+            finish_mcp_tree_wait(wait_id, mcp_ok_json(JsonValue { move(tree) }));
+        });
+    };
+    view->inspect_accessibility_tree();
+}
+
+void Application::get_dom_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto wait_id = m_next_mcp_wait_id++;
+    auto wait = make<PendingMCPTreeWait>();
+    wait->view_id = tab_id;
+    wait->is_accessibility = false;
+    wait->on_complete = move(on_complete);
+    wait->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(10), [this, wait_id] {
+        finish_mcp_tree_wait(wait_id, mcp_error_result("Timed out waiting for DOM tree"sv));
+    });
+    wait->timer->start();
+    m_mcp_tree_waits.set(wait_id, move(wait));
+
+    view->on_received_dom_tree = [this, wait_id](JsonObject tree) {
+        Core::deferred_invoke([this, wait_id, tree = move(tree)]() mutable {
+            finish_mcp_tree_wait(wait_id, mcp_ok_json(JsonValue { move(tree) }));
+        });
+    };
+    view->inspect_dom_tree();
+}
+
+void Application::get_page_source(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    enqueue_mcp_webdriver_command(tab_id, "get_source"_string, JsonValue {}, {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        auto const& value = response.value();
+        on_complete({
+            .is_error = false,
+            .text = value.is_string() ? value.as_string() : value.serialized(),
+        });
+    });
+}
+
+void Application::find_elements(u64 tab_id, String selector, String strategy, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject payload;
+    payload.set("using"sv, move(strategy));
+    payload.set("value"sv, move(selector));
+
+    enqueue_mcp_webdriver_command(tab_id, "find_elements"_string, move(payload), {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+
+        JsonArray elements;
+        if (response.value().is_array()) {
+            for (auto const& entry : response.value().as_array().values()) {
+                JsonObject item;
+                if (auto uuid = extract_mcp_element_id(entry); uuid.has_value())
+                    item.set("element_id"sv, *uuid);
+                item.set("raw"sv, entry);
+                elements.must_append(move(item));
+            }
+        }
+
+        JsonObject result;
+        result.set("elements"sv, move(elements));
+        on_complete(mcp_ok_json(JsonValue { move(result) }));
+    });
+}
+
+void Application::click_element(u64 tab_id, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete on_complete)
+{
+    auto do_click = [this, tab_id](String resolved_element_id, MCP::OnToolCallComplete cb) {
+        Vector<String> args;
+        args.append(resolved_element_id);
+        enqueue_mcp_webdriver_command(tab_id, "element_click"_string, JsonValue {}, move(args), [resolved_element_id = move(resolved_element_id), cb = move(cb)](Web::WebDriver::Response response) {
+            if (response.is_error()) {
+                cb(format_mcp_webdriver_error(response.error()));
+                return;
+            }
+            JsonObject result;
+            result.set("clicked"sv, true);
+            result.set("element_id"sv, resolved_element_id);
+            cb(mcp_ok_json(JsonValue { move(result) }));
+        });
+    };
+
+    if (element_id.has_value() && !element_id->is_empty()) {
+        do_click(*element_id, move(on_complete));
+        return;
+    }
+
+    if (!selector.has_value() || selector->is_empty()) {
+        on_complete(mcp_error_result("Either 'selector' or 'element_id' must be provided"sv));
+        return;
+    }
+
+    JsonObject find_payload;
+    find_payload.set("using"sv, move(strategy));
+    find_payload.set("value"sv, move(*selector));
+
+    enqueue_mcp_webdriver_command(tab_id, "find_element"_string, move(find_payload), {}, [do_click = move(do_click), on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        auto uuid = extract_mcp_element_id(response.value());
+        if (!uuid.has_value()) {
+            on_complete(mcp_error_result("Matched element response missing element handle"sv));
+            return;
+        }
+        do_click(*uuid, move(on_complete));
+    });
+}
+
+void Application::type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete on_complete)
+{
+    auto do_type = [this, tab_id, text = move(text), clear_first](String resolved_element_id, MCP::OnToolCallComplete cb) mutable {
+        auto send_keys = [this, tab_id, text = move(text)](String elem_id, MCP::OnToolCallComplete send_cb) mutable {
+            JsonObject payload;
+            payload.set("text"sv, move(text));
+            Vector<String> args;
+            args.append(elem_id);
+            enqueue_mcp_webdriver_command(tab_id, "element_send_keys"_string, move(payload), move(args), [elem_id = move(elem_id), send_cb = move(send_cb)](Web::WebDriver::Response response) {
+                if (response.is_error()) {
+                    send_cb(format_mcp_webdriver_error(response.error()));
+                    return;
+                }
+                JsonObject result;
+                result.set("typed"sv, true);
+                result.set("element_id"sv, elem_id);
+                send_cb(mcp_ok_json(JsonValue { move(result) }));
+            });
+        };
+
+        if (clear_first) {
+            Vector<String> clear_args;
+            clear_args.append(resolved_element_id);
+            enqueue_mcp_webdriver_command(tab_id, "element_clear"_string, JsonValue {}, move(clear_args), [send_keys = move(send_keys), resolved_element_id = move(resolved_element_id), cb = move(cb)](Web::WebDriver::Response response) mutable {
+                if (response.is_error()) {
+                    cb(format_mcp_webdriver_error(response.error()));
+                    return;
+                }
+                send_keys(move(resolved_element_id), move(cb));
+            });
+            return;
+        }
+
+        send_keys(move(resolved_element_id), move(cb));
+    };
+
+    if (element_id.has_value() && !element_id->is_empty()) {
+        do_type(*element_id, move(on_complete));
+        return;
+    }
+
+    if (!selector.has_value() || selector->is_empty()) {
+        on_complete(mcp_error_result("Either 'selector' or 'element_id' must be provided"sv));
+        return;
+    }
+
+    JsonObject find_payload;
+    find_payload.set("using"sv, move(strategy));
+    find_payload.set("value"sv, move(*selector));
+
+    enqueue_mcp_webdriver_command(tab_id, "find_element"_string, move(find_payload), {}, [do_type = move(do_type), on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        auto uuid = extract_mcp_element_id(response.value());
+        if (!uuid.has_value()) {
+            on_complete(mcp_error_result("Matched element response missing element handle"sv));
+            return;
+        }
+        do_type(*uuid, move(on_complete));
+    });
+}
+
+void Application::evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject payload;
+    payload.set("script"sv, move(script));
+    payload.set("args"sv, JsonArray {});
+
+    enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        JsonObject result;
+        result.set("value"sv, response.value());
+        on_complete(mcp_ok_json(JsonValue { move(result) }));
+    });
+}
+
+void Application::take_screenshot(u64 tab_id, MCP::OnToolCallComplete on_complete)
+{
+    enqueue_mcp_webdriver_command(tab_id, "take_screenshot"_string, JsonValue {}, {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        if (!response.value().is_string()) {
+            on_complete(mcp_error_result("Screenshot response was not a base64 PNG string"sv));
+            return;
+        }
+        on_complete({
+            .is_error = false,
+            .text = {},
+            .image_base64_png = response.value().as_string(),
+        });
+    });
 }
 
 }

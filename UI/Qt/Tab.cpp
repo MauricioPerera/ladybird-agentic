@@ -599,6 +599,8 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_state_change = [this](Hub::ViewState const& previous_state) {
         if (previous_state.page_mute_state != view().page_mute_state())
             emit audio_state_changed(tab_index());
+        if (previous_state.mcp_access_allowed != view().is_mcp_access_allowed())
+            emit mcp_access_changed(tab_index());
     };
 
     view().on_tab_indicator_change = [this](WebView::TabIndicator indicator, bool visible) {
@@ -911,6 +913,12 @@ void Tab::create_tab_context_menu()
             view().toggle_page_mute_state();
     });
 
+    auto* mcp_access_action = new QAction("Allow &MCP Access", this);
+    QObject::connect(mcp_access_action, &QAction::triggered, this, [this]() {
+        if (is_loaded())
+            view().set_mcp_access_allowed(!view().is_mcp_access_allowed());
+    });
+
     auto* move_to_new_window_action = new QAction("Move to New &Window", this);
     QObject::connect(move_to_new_window_action, &QAction::triggered, this, [this]() {
         m_window->detach_tab_to_new_window(tab_index(), m_window->mapToGlobal(QPoint(m_window->width() / 4, m_window->height() / 4)));
@@ -962,6 +970,7 @@ void Tab::create_tab_context_menu()
     m_context_menu->addAction(duplicate_tab_action);
     m_context_menu->addAction(m_pin_tab_action);
     m_context_menu->addAction(mute_tab_action);
+    m_context_menu->addAction(mcp_access_action);
     m_context_menu->addSeparator();
     m_context_menu->addAction(move_to_new_window_action);
     m_context_menu->addAction(copy_link_action);
@@ -972,7 +981,7 @@ void Tab::create_tab_context_menu()
     m_context_menu->addSeparator();
     m_context_menu->addAction(Application::the().reopen_recently_closed_tab_action());
 
-    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, close_following_tabs_action, mute_tab_action, move_to_new_window_action]() {
+    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, close_following_tabs_action, mute_tab_action, mcp_access_action, move_to_new_window_action]() {
         auto is_horizontal = m_window->tab_widget().tab_bar()->tab_layout() == TabLayout::Horizontal;
         new_tab_action->setText(is_horizontal ? "New Tab to the &Right" : "New Tab &Below");
         close_following_tabs_action->setText(is_horizontal ? "Close Tabs to the R&ight" : "Close Tabs B&elow");
@@ -980,6 +989,8 @@ void Tab::create_tab_context_menu()
         // A tab that hasn't loaded has no page to mute yet.
         mute_tab_action->setEnabled(is_loaded());
         mute_tab_action->setText(is_loaded() && view().page_mute_state() == Web::HTML::MuteState::Muted ? "Un&mute Tab" : "&Mute Tab");
+        mcp_access_action->setEnabled(is_loaded());
+        mcp_access_action->setText(is_loaded() && view().is_mcp_access_allowed() ? "Revoke &MCP Access" : "Allow &MCP Access");
         move_to_new_window_action->setEnabled(m_window->tab_count() > 1);
     });
 }

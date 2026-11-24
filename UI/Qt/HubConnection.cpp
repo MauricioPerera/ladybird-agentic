@@ -323,6 +323,16 @@ void HubConnection::app_did_disable_devtools()
     Application::the().did_disable_devtools();
 }
 
+void HubConnection::app_did_enable_mcp(u16 port, String token)
+{
+    Application::the().did_enable_mcp(port, move(token));
+}
+
+void HubConnection::app_did_disable_mcp()
+{
+    Application::the().did_disable_mcp();
+}
+
 void HubConnection::app_gpu_painting_changed(bool gpu_painting_enabled)
 {
     Application::the().did_change_gpu_painting(gpu_painting_enabled);

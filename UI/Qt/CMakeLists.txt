@@ -32,6 +32,7 @@ add_library(ladybird_impl STATIC
     ContextMenus.cpp
     CrashReportReviewWidget.cpp
     DevToolsBanner.cpp
+    MCPBanner.cpp
     ElidedLabel.cpp
     EventLoopImplementationQt.cpp
     EventLoopImplementationQtEventTarget.cpp

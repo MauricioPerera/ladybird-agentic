@@ -151,6 +151,8 @@ ViewImplementation::ViewImplementation(IsPrivate is_private)
 
 ViewImplementation::~ViewImplementation()
 {
+    if (Application::is_initialized())
+        Application::the().did_close_mcp_view(view_id());
     stop_counting_as_owned_view();
     Application::the().media_session_coordinator().remove_view(view_id());
     // The frontend may be torn down already, so clearing the ongoing navigation must not report a URL change to it, nor
@@ -861,6 +863,17 @@ void ViewImplementation::set_pinned(bool pinned)
         m_discard_requested = false;
         TabDiscarder::did_hide_a_tab();
     }
+}
+
+void ViewImplementation::set_mcp_access_allowed(bool allowed)
+{
+    if (m_mcp_access_allowed == allowed)
+        return;
+
+    m_mcp_access_allowed = allowed;
+    if (!allowed && Application::is_initialized())
+        Application::the().did_revoke_mcp_access_for_view(view_id());
+    did_change_state();
 }
 
 URL::Origin ViewImplementation::permission_origin() const

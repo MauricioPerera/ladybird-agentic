@@ -977,6 +977,12 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
     m_browser_options.devtools_port = state.devtools_port;
     if (state.devtools_enabled)
         m_devtools_port = state.devtools_port;
+    m_browser_options.mcp_port = state.mcp_port;
+    m_browser_options.mcp_token = state.mcp_token;
+    if (state.mcp_enabled) {
+        m_mcp_port = state.mcp_port;
+        m_mcp_token = state.mcp_token;
+    }
     m_gpu_painting_enabled = state.gpu_painting_enabled;
     m_profile_is_temporary = state.profile_is_temporary;
 #    if defined(AK_OS_MACOS)
@@ -988,6 +994,7 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
         .scripting_enabled = state.scripting_enabled,
         .blocks_pop_ups = state.blocks_pop_ups,
         .devtools_enabled = state.devtools_enabled,
+        .mcp_enabled = state.mcp_enabled,
     });
     RemoteDownloads::the().set_downloads(state.downloads);
 
@@ -1149,6 +1156,10 @@ Application::~Application()
             m_hub_connection->transport().close();
         m_hub_connection = nullptr;
 #ifndef LADYBIRD_HUB_IN_OWN_PROCESS
+        if (m_connection_from_ui) {
+            m_connection_from_ui->detach_from_application();
+            m_connection_from_ui->transport().close();
+        }
         m_connection_from_ui = nullptr;
         if (m_hub)
             m_hub->detach_from_host();
@@ -1297,9 +1308,14 @@ void Application::create_platform_actions()
         .scripting_enabled = hub.scripting_enabled(),
         .blocks_pop_ups = hub.blocks_pop_ups(),
         .devtools_enabled = hub.devtools_enabled(),
+        .mcp_enabled = hub.mcp_enabled(),
     });
     if (hub.devtools_enabled())
         m_devtools_port = WebView::Application::browser_options().devtools_port;
+    if (hub.mcp_enabled()) {
+        m_mcp_port = hub.mcp_port();
+        m_mcp_token = hub.mcp_token();
+    }
     m_gpu_painting_enabled = hub.compositor_gpu_painting_enabled();
 
     RemoteDownloads::the().set_downloads(Hub::ConnectionFromUI::downloads());
@@ -1765,7 +1781,7 @@ void Application::offer_to_restore_unexpectedly_closed_tabs(BrowserWindow& windo
         QPointer<Tab> new_tab_page;
         if (window && window->tab_count() == 1) {
             auto* tab = window->tab_at(0);
-            if (tab->view().url() == Application::settings().new_tab_page_url() && !tab->view().navigate_back_action().enabled())
+            if (tab && tab->is_loaded() && tab->view().url() == Application::settings().new_tab_page_url() && !tab->view().navigate_back_action().enabled())
                 new_tab_page = tab;
         }
 
@@ -3081,6 +3097,30 @@ void Application::did_disable_devtools()
     for (auto* widget : QApplication::topLevelWidgets()) {
         if (auto* window = as_if<BrowserWindow>(widget))
             window->on_devtools_disabled();
+    }
+}
+
+void Application::did_enable_mcp(u16 port, String token)
+{
+    m_mcp_port = port;
+    m_mcp_token = move(token);
+    if (m_application_actions)
+        m_application_actions->mcp_enabled_changed(true);
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->on_mcp_enabled();
+    }
+}
+
+void Application::did_disable_mcp()
+{
+    m_mcp_port = {};
+    m_mcp_token = {};
+    if (m_application_actions)
+        m_application_actions->mcp_enabled_changed(false);
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->on_mcp_disabled();
     }
 }
 

@@ -244,6 +244,8 @@ public:
     // Whether discarding the view would let a process exit, which is how its memory comes back.
     bool discarding_ends_a_process() const;
     void set_pinned(bool pinned);
+    bool is_mcp_access_allowed() const { return m_mcp_access_allowed; }
+    void set_mcp_access_allowed(bool);
     void set_current_tab_of_window(bool current_tab_of_window);
     // When the user last stopped seeing the view, if they don't see it now.
     Optional<MonotonicTime> hidden_since() const { return m_hidden_since; }
@@ -1382,6 +1384,7 @@ protected:
     bool m_changed_favicon_while_hidden { false };
     RefPtr<Gfx::Bitmap const> m_favicon;
     bool m_pinned { false };
+    bool m_mcp_access_allowed { false };
     // NB: The current tab of a minimized window is hidden, but the user sees it again as soon as they bring the window
     //     back.
     bool m_current_tab_of_window { false };

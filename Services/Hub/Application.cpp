@@ -144,6 +144,34 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     return view;
 }
 
+Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab) const
+{
+    auto* ui = ConnectionFromUI::the();
+    if (!ui)
+        return {};
+
+    View::InitialState initial_state;
+    if (auto active_view = active_web_view(); active_view.has_value()) {
+        initial_state = static_cast<View&>(*active_view).initial_state_for_related_view();
+    } else {
+        WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation& candidate) {
+            if (!candidate.owner_view_id().has_value()) {
+                initial_state = static_cast<View const&>(candidate).initial_state_for_related_view();
+                return IterationDecision::Break;
+            }
+            return IterationDecision::Continue;
+        });
+    }
+    initial_state.is_private = WebView::IsPrivate::No;
+    initial_state.owner_view_id = {};
+    initial_state.is_tab = true;
+
+    auto& view = const_cast<Application&>(*this).create_view(move(initial_state));
+    view.set_mcp_access_allowed(true);
+    ui->async_app_open_view_in_new_tab(view.view_id(), {}, WebView::IsPrivate::No, activate_tab);
+    return view;
+}
+
 // NB: Which window a tab goes to must not depend on what is active once the UI reads the message. A tab must stay in
 //     the browsing session of the page that opened it. With no such page, the active view here is the one that was
 //     active when the UI sent what led to this, since the UI's messages arrive in order.
@@ -244,7 +272,7 @@ void Application::display_download_confirmation_dialog(StringView download_name,
 void Application::display_error_dialog(StringView error_message) const
 {
     if (auto* ui = ConnectionFromUI::the())
-        ui->async_app_display_error_dialog(MUST(String::from_utf8(error_message)));
+        ui->async_app_display_error_dialog(String::from_utf8_with_replacement_character(error_message));
     else
         WebView::Application::display_error_dialog(error_message);
 }
@@ -412,6 +440,20 @@ void Application::on_devtools_disabled() const
     WebView::Application::on_devtools_disabled();
     if (auto* ui = ConnectionFromUI::the())
         ui->async_app_did_disable_devtools();
+}
+
+void Application::on_mcp_enabled(u16 port, String const& token) const
+{
+    WebView::Application::on_mcp_enabled(port, token);
+    if (auto* ui = ConnectionFromUI::the())
+        ui->async_app_did_enable_mcp(port, token);
+}
+
+void Application::on_mcp_disabled() const
+{
+    WebView::Application::on_mcp_disabled();
+    if (auto* ui = ConnectionFromUI::the())
+        ui->async_app_did_disable_mcp();
 }
 
 void Application::on_compositor_gpu_painting_changed() const

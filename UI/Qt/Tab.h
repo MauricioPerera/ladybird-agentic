@@ -183,6 +183,7 @@ signals:
     void title_changed(int id, QString const&);
     void favicon_changed(int id, QIcon const&);
     void audio_state_changed(int id);
+    void mcp_access_changed(int id);
     void microphone_in_use_changed();
     void loading_changed();
     void performance_stats_changed();

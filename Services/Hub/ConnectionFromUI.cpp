@@ -54,14 +54,28 @@ ConnectionFromUI::ConnectionFromUI(NonnullOwnPtr<IPC::Transport> transport)
     browser_process.on_new_window = [this](auto const& urls) { async_app_open_new_window(urls); };
 }
 
+void ConnectionFromUI::detach_from_application()
+{
+    if (m_detached_from_application)
+        return;
+    m_detached_from_application = true;
+
+    WebView::ApplicationWebUI::set_callbacks({});
+    if (auto* settings = WebView::Application::settings_if_initialized())
+        settings->on_persist = nullptr;
+    if (WebView::Application::is_initialized()) {
+        if (auto* browser_process = Application::the().browser_process_if_initialized()) {
+            browser_process->on_new_tab = nullptr;
+            browser_process->on_new_window = nullptr;
+        }
+    }
+    if (s_the == this)
+        s_the = nullptr;
+}
+
 ConnectionFromUI::~ConnectionFromUI()
 {
-    WebView::ApplicationWebUI::set_callbacks({});
-    Application::settings().on_persist = nullptr;
-    auto& browser_process = Application::the().browser_process();
-    browser_process.on_new_tab = nullptr;
-    browser_process.on_new_window = nullptr;
-    s_the = nullptr;
+    detach_from_application();
 }
 
 ConnectionFromUI* ConnectionFromUI::the()
@@ -613,6 +627,9 @@ Messages::HubServer::InitializeResponse ConnectionFromUI::initialize()
     state.raw_urls = options.raw_urls;
     state.crash_report_directory = WebView::CrashReportStore::the().directory();
     state.devtools_port = options.devtools_port;
+    state.mcp_enabled = Application::the().mcp_enabled();
+    state.mcp_port = Application::the().mcp_port();
+    state.mcp_token = Application::the().mcp_token();
     auto const& profile = Application::profile();
     state.config_directory = profile.paths().config;
     state.data_directory = profile.paths().data;
@@ -751,7 +768,13 @@ void ConnectionFromUI::skip_update_version([[maybe_unused]] String version)
 void ConnectionFromUI::toggle_devtools_enabled()
 {
     if (auto result = Application::the().toggle_devtools_enabled(); result.is_error())
-        static_cast<WebView::Application&>(Application::the()).display_error_dialog(MUST(String::formatted("Unable to start DevTools: {}", result.error())));
+        static_cast<WebView::Application&>(Application::the()).display_error_dialog(String::from_utf8_with_replacement_character(ByteString::formatted("Unable to start DevTools: {}", result.error())));
+}
+
+void ConnectionFromUI::toggle_mcp_enabled()
+{
+    if (auto result = Application::the().toggle_mcp_enabled(); result.is_error())
+        static_cast<WebView::Application&>(Application::the()).display_error_dialog(String::from_utf8_with_replacement_character(ByteString::formatted("Unable to start MCP server: {}", result.error())));
 }
 
 void ConnectionFromUI::set_preferred_contrast(Web::CSS::PreferredContrast contrast)
@@ -1081,6 +1104,12 @@ void ConnectionFromUI::view_set_pinned(u64 view_id, bool pinned)
 {
     if (auto* view = find_view(view_id))
         view->set_pinned(pinned);
+}
+
+void ConnectionFromUI::view_set_mcp_access_allowed(u64 view_id, bool allowed)
+{
+    if (auto* view = find_view(view_id))
+        view->set_mcp_access_allowed(allowed);
 }
 
 void ConnectionFromUI::view_set_current_tab_of_window(u64 view_id, bool current_tab_of_window)
