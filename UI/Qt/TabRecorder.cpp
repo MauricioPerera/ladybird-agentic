@@ -96,12 +96,12 @@ Optional<String> wide_to_utf8(WCHAR const* wide)
     int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
     if (needed <= 1)
         return {};
-    auto buffer_or_err = ByteBuffer::create_uninitialized(static_cast<size_t>(needed - 1));
+    auto buffer_or_err = ByteBuffer::create_uninitialized(static_cast<size_t>(needed));
     if (buffer_or_err.is_error())
         return {};
     auto buffer = buffer_or_err.release_value();
     int written = WideCharToMultiByte(CP_UTF8, 0, wide, -1, reinterpret_cast<char*>(buffer.data()), needed, nullptr, nullptr);
-    if (written <= 1)
+    if (written <= 1 || written > needed)
         return {};
     auto str_or_err = String::from_utf8(StringView { reinterpret_cast<char const*>(buffer.data()), static_cast<size_t>(written - 1) });
     if (str_or_err.is_error())
