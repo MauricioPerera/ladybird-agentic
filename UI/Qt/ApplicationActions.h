@@ -106,6 +106,7 @@ private:
     RefPtr<Action> m_view_source_action;
     RefPtr<Action> m_toggle_devtools_action;
     RefPtr<Action> m_toggle_mcp_action;
+    RefPtr<Action> m_open_flows_page_action;
     RefPtr<Action> m_report_website_issue_action;
     RefPtr<Action> m_show_tab_performance_monitor_action;
     RefPtr<Action> m_show_line_box_borders_action;

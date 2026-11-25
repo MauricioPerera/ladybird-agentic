@@ -49,6 +49,9 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/Automation/FlowRunner.h>
+#include <LibWebView/Automation/FlowStore.h>
+#include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/CompositorClient.h>
 #include <LibWebView/CompositorPresentationClient.h>
@@ -228,6 +231,10 @@ OwnPtr<MediaSessionPlatformBackend> Application::create_media_session_platform_b
 
 Application::~Application()
 {
+    if (m_flow_runner)
+        m_flow_runner->cancel_all_runs("Browser shutting down"sv);
+    m_flow_runner.clear();
+    m_flow_store.clear();
     m_mcp.clear();
     fail_all_mcp_requests("Browser shutting down"sv);
 
@@ -4548,6 +4555,8 @@ void Application::did_revoke_mcp_access_for_view(u64 view_id)
 
 void Application::did_close_mcp_view(u64 view_id)
 {
+    if (m_flow_runner)
+        m_flow_runner->did_close_view(view_id);
     fail_mcp_requests_for_view(view_id, "Tab closed"sv);
     m_mcp_content_queues.remove(view_id);
 }
@@ -4605,13 +4614,18 @@ void Application::fail_all_mcp_requests(StringView message)
 
 void Application::enqueue_mcp_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, Function<void(Web::WebDriver::Response)> on_complete)
 {
-    if (!find_allowed_mcp_view(view_id).has_value()) {
+    enqueue_automation_webdriver_command(view_id, move(name), move(payload), move(arguments), true, move(on_complete));
+}
+
+void Application::enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete)
+{
+    if (!find_automation_view(view_id, require_mcp_permission).has_value()) {
         on_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, String::from_utf8_without_validation(mcp_denied_message.bytes())));
         return;
     }
 
     auto& queue = m_mcp_content_queues.ensure(view_id, [] { return make<MCPViewQueue>(); });
-    queue->queued.append({ move(name), move(payload), move(arguments), move(on_complete) });
+    queue->queued.append({ move(name), move(payload), move(arguments), require_mcp_permission, move(on_complete) });
     if (!queue->in_flight_command_id.has_value())
         dispatch_next_mcp_content_command(view_id);
 }
@@ -4625,7 +4639,7 @@ void Application::dispatch_next_mcp_content_command(u64 view_id)
 
     while (!queue.in_flight_command_id.has_value() && !queue.queued.is_empty()) {
         auto command = queue.queued.take_first();
-        auto view = find_allowed_mcp_view(view_id);
+        auto view = find_automation_view(view_id, command.require_mcp_permission);
         if (!view.has_value()) {
             if (command.on_complete)
                 command.on_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, String::from_utf8_without_validation(mcp_denied_message.bytes())));
@@ -4745,6 +4759,105 @@ void Application::finish_mcp_navigation_wait(u64 wait_id, MCP::ToolCallResult re
 
     if (auto callback = move(wait.value()->on_complete))
         callback(move(result));
+    if (auto auto_callback = move(wait.value()->on_automation_complete)) {
+        if (result.is_error)
+            auto_callback(Error::from_string_literal("Navigation timed out or failed"));
+        else
+            auto_callback({});
+    }
+}
+
+FlowStore& Application::flow_store()
+{
+    if (!m_flow_store) {
+        auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
+        auto flows_dir = LexicalPath::join(base_dir, "flows"sv).string();
+        m_flow_store = make<FlowStore>(move(flows_dir));
+    }
+    return *m_flow_store;
+}
+
+FlowRunner& Application::flow_runner()
+{
+    if (!m_flow_runner)
+        m_flow_runner = make<FlowRunner>(*this, flow_store());
+    return *m_flow_runner;
+}
+
+Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool require_mcp_permission) const
+{
+    auto view = ViewImplementation::find_view_by_id(tab_id);
+    if (!view.has_value() || view->owner_view_id().has_value())
+        return {};
+    if (require_mcp_permission && !view->is_mcp_access_allowed())
+        return {};
+    return view;
+}
+
+Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::ActivateTab activate_tab) const
+{
+    auto view = open_mcp_new_tab(activate_tab);
+    if (view.has_value())
+        view->set_mcp_access_allowed(true);
+    return view;
+}
+
+u64 Application::start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete)
+{
+    auto view = find_automation_view(view_id, require_mcp_permission);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Target tab not found or permission denied"));
+        return 0;
+    }
+
+    auto wait_id = m_next_mcp_wait_id++;
+    auto wait = make<PendingMCPNavigationWait>();
+    wait->view_id = view_id;
+    wait->require_mcp_permission = require_mcp_permission;
+    wait->on_automation_complete = move(on_complete);
+
+    ViewImplementation::NavigationListener listener;
+    listener.on_load_finish = [this, wait_id](URL::URL const&) {
+        Core::deferred_invoke([this, wait_id] {
+            auto entry = m_mcp_nav_waits.get(wait_id);
+            if (!entry.has_value())
+                return;
+            auto allowed_view = find_automation_view(entry.value()->view_id, entry.value()->require_mcp_permission);
+            if (!allowed_view.has_value()) {
+                finish_mcp_navigation_wait(wait_id, mcp_error_result(mcp_denied_message));
+                return;
+            }
+            finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { JsonObject {} }));
+        });
+    };
+    wait->listener_id = view->add_navigation_listener(move(listener));
+
+    wait->timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(timeout_ms), [this, wait_id] {
+        finish_mcp_navigation_wait(wait_id, mcp_error_result("Timed out waiting for page load"sv));
+    });
+    wait->timer->start();
+
+    m_mcp_nav_waits.set(wait_id, move(wait));
+    return wait_id;
+}
+
+void Application::cancel_automation_navigation_wait(u64 wait_id)
+{
+    auto wait = m_mcp_nav_waits.take(wait_id);
+    if (!wait.has_value())
+        return;
+
+    if (wait.value()->timer) {
+        wait.value()->timer->stop();
+        wait.value()->timer.clear();
+    }
+
+    auto view_id = wait.value()->view_id;
+    auto listener_id = wait.value()->listener_id;
+    Core::deferred_invoke([view_id, listener_id] {
+        if (auto view = ViewImplementation::find_view_by_id(view_id); view.has_value())
+            view->remove_navigation_listener(listener_id);
+    });
 }
 
 void Application::finish_mcp_tree_wait(u64 wait_id, MCP::ToolCallResult result)
@@ -5189,6 +5302,121 @@ void Application::take_screenshot(u64 tab_id, MCP::OnToolCallComplete on_complet
             .image_base64_png = response.value().as_string(),
         });
     });
+}
+
+void Application::list_flows(MCP::OnToolCallComplete on_complete)
+{
+    JsonArray flows;
+    for (auto const& flow : flow_store().list_flows())
+        flows.must_append(serialize_flow_summary(flow));
+
+    JsonObject result;
+    result.set("flows"sv, move(flows));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::get_flow(String flow_id, MCP::OnToolCallComplete on_complete)
+{
+    auto flow = flow_store().get_flow(flow_id);
+    if (!flow.has_value()) {
+        on_complete(mcp_error_result("Flow not found"sv));
+        return;
+    }
+    on_complete(mcp_ok_json(JsonValue { serialize_flow_definition(*flow) }));
+}
+
+void Application::save_flow(JsonValue flow_json, MCP::OnToolCallComplete on_complete)
+{
+    auto parsed = parse_flow_definition(flow_json);
+    if (parsed.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Invalid flow definition: {}", parsed.error()))));
+        return;
+    }
+    auto saved = flow_store().save_flow(parsed.release_value());
+    if (saved.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed to save flow: {}", saved.error()))));
+        return;
+    }
+    JsonObject result;
+    result.set("saved"sv, true);
+    result.set("flow"sv, serialize_flow_definition(saved.value()));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::delete_flow(String flow_id, MCP::OnToolCallComplete on_complete)
+{
+    auto existing = flow_store().get_flow(flow_id);
+    if (!existing.has_value()) {
+        on_complete(mcp_error_result("Flow not found"sv));
+        return;
+    }
+    if (auto res = flow_store().delete_flow(flow_id); res.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed to delete flow: {}", res.error()))));
+        return;
+    }
+    JsonObject result;
+    result.set("deleted"sv, true);
+    result.set("flow_id"sv, flow_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, MCP::OnToolCallComplete on_complete)
+{
+    FlowRunRequest request;
+    request.flow_id = move(flow_id);
+    request.tab_id = tab_id;
+    request.require_mcp_permission = true;
+    request.open_new_tab = open_new_tab;
+
+    if (inline_flow.has_value()) {
+        auto parsed = parse_flow_definition(*inline_flow);
+        if (parsed.is_error()) {
+            on_complete(mcp_error_result(MUST(String::formatted("Invalid inline flow: {}", parsed.error()))));
+            return;
+        }
+        request.inline_flow = parsed.release_value();
+    }
+
+    variables.for_each_member([&](String const& key, JsonValue const& val) {
+        if (val.is_string())
+            request.variables.set(key, val.as_string());
+        else if (val.is_number() || val.is_bool())
+            request.variables.set(key, val.serialized());
+    });
+
+    auto completion = [on_complete = move(on_complete)](FlowRunRecord const& record) {
+        on_complete({
+            .is_error = record.status != "passed"sv,
+            .text = JsonValue { serialize_flow_run(record) }.serialized(),
+        });
+    };
+
+    auto started = flow_runner().start_run(move(request), move(completion));
+    if (started.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Could not start flow run: {}", started.error()))));
+    }
+}
+
+void Application::list_flow_runs(Optional<String> flow_id, size_t limit, MCP::OnToolCallComplete on_complete)
+{
+    auto runs = flow_store().list_runs(flow_id.has_value() ? Optional<StringView> { *flow_id } : OptionalNone {}, limit);
+    JsonArray array;
+    for (auto const& run : runs)
+        array.must_append(serialize_flow_run(run));
+
+    JsonObject result;
+    result.set("runs"sv, move(array));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::get_flow_run(String run_id, MCP::OnToolCallComplete on_complete)
+{
+    auto run = flow_store().get_run(run_id);
+    if (!run.has_value()) {
+        on_complete(mcp_error_result("Flow run not found"sv));
+        return;
+    }
+    on_complete(mcp_ok_json(JsonValue { serialize_flow_run(*run) }));
 }
 
 }

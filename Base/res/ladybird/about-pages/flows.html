@@ -1,0 +1,1177 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Automation Flows</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
+        <style>
+            body {
+                max-width: 1120px;
+                padding: 36px 24px 64px 24px;
+            }
+
+            header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            header h1 {
+                flex: none;
+            }
+
+            .meta-bar {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                min-width: 220px;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: var(--control);
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 500;
+            }
+
+            .badge.on {
+                color: #16a34a;
+            }
+
+            .header-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            button {
+                height: 30px;
+                padding: 0 12px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--control-hover);
+            }
+
+            button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+
+            button.primary {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            button.primary:hover:not(:disabled) {
+                background: #1d4ed8;
+            }
+
+            button.danger {
+                color: #ef4444;
+            }
+
+            input[type="text"],
+            input[type="number"],
+            select,
+            textarea {
+                width: 100%;
+                padding: 6px 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+            }
+
+            textarea.code {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                min-height: 340px;
+                resize: vertical;
+            }
+
+            .status-banner {
+                margin-bottom: 14px;
+                padding: 10px 14px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                font-size: 13px;
+            }
+
+            .status-banner.hidden {
+                display: none;
+            }
+
+            .status-banner.error {
+                border-color: #ef4444;
+                color: #ef4444;
+            }
+
+            .layout {
+                display: grid;
+                grid-template-columns: 320px 1fr;
+                gap: 18px;
+                align-items: start;
+            }
+
+            @media (max-width: 860px) {
+                .layout {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .panel {
+                background: var(--card-background-color);
+                border: 1px solid var(--border-color);
+                border-radius: var(--card-radius);
+                padding: 16px;
+            }
+
+            .sidebar-header {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                margin-bottom: 12px;
+            }
+
+            .sidebar-header .search-container {
+                width: 100%;
+            }
+
+            .flow-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .flow-item {
+                padding: 10px 12px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                cursor: pointer;
+            }
+
+            .flow-item.selected {
+                border-color: #2563eb;
+                box-shadow: 0 0 0 1px #2563eb;
+            }
+
+            .flow-item-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 8px;
+            }
+
+            .flow-item-name {
+                font-weight: 600;
+                font-size: 13px;
+            }
+
+            .flow-item-steps {
+                color: var(--muted);
+                font-size: 11px;
+                white-space: nowrap;
+            }
+
+            .flow-item-id {
+                color: var(--muted);
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 11px;
+                margin-top: 2px;
+            }
+
+            .flow-item-desc {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 4px;
+            }
+
+            .flow-item-actions {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+                flex-wrap: wrap;
+            }
+
+            .flow-item-actions button {
+                height: 24px;
+                padding: 0 8px;
+                font-size: 12px;
+            }
+
+            .tabs {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 14px;
+                border-bottom: 1px solid var(--border-color);
+                padding-bottom: 10px;
+            }
+
+            .tab-btn.active {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            .hidden {
+                display: none !important;
+            }
+
+            .grid-2 {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+
+            @media (max-width: 640px) {
+                .grid-2 {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .field {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                margin-bottom: 10px;
+            }
+
+            .field label {
+                font-size: 12px;
+                font-weight: 500;
+                color: var(--muted);
+            }
+
+            .section-title {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin: 14px 0 8px 0;
+                font-size: 13px;
+                font-weight: 600;
+            }
+
+            .var-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr auto;
+                gap: 8px;
+                margin-bottom: 6px;
+            }
+
+            .step-card {
+                border: 1px solid var(--border-color);
+                border-radius: 9px;
+                padding: 10px 12px;
+                background: var(--tile);
+                margin-bottom: 8px;
+            }
+
+            .step-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 8px;
+                flex-wrap: wrap;
+            }
+
+            .step-num {
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--muted);
+                min-width: 24px;
+            }
+
+            .step-header select {
+                width: auto;
+                min-width: 140px;
+            }
+
+            .step-header .step-label-input {
+                flex: 1;
+                min-width: 140px;
+            }
+
+            .step-controls {
+                display: flex;
+                gap: 4px;
+            }
+
+            .step-controls button {
+                height: 26px;
+                padding: 0 8px;
+                font-size: 12px;
+            }
+
+            .step-body {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+                gap: 8px;
+            }
+
+            .run-bar {
+                margin-top: 14px;
+                padding-top: 14px;
+                border-top: 1px solid var(--border-color);
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .run-controls {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+            }
+
+            .run-controls select {
+                flex: 1;
+                min-width: 220px;
+            }
+
+            .run-card {
+                border: 1px solid var(--border-color);
+                border-radius: 9px;
+                padding: 12px;
+                background: var(--tile);
+                margin-bottom: 10px;
+            }
+
+            .run-card-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            .pill {
+                display: inline-block;
+                padding: 2px 8px;
+                border-radius: 999px;
+                font-size: 11px;
+                font-weight: 600;
+                background: var(--control);
+            }
+
+            .pill.passed {
+                color: #16a34a;
+            }
+
+            .pill.failed {
+                color: #ef4444;
+            }
+
+            .pill.running {
+                color: #2563eb;
+            }
+
+            .steps-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 8px;
+                font-size: 12px;
+            }
+
+            .steps-table th,
+            .steps-table td {
+                text-align: left;
+                padding: 5px 6px;
+                border-bottom: 1px solid var(--border-color);
+                vertical-align: top;
+            }
+
+            pre.output-json {
+                margin: 8px 0 0 0;
+                padding: 8px 10px;
+                border-radius: 7px;
+                background: var(--page);
+                border: 1px solid var(--border-color);
+                font-size: 11px;
+                overflow-x: auto;
+            }
+
+            .muted {
+                color: var(--muted);
+                font-size: 12px;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Automation Flows</h1>
+            <div class="meta-bar">
+                <span id="flow-count" class="badge">0 flows</span>
+                <span id="mcp-badge" class="badge">MCP: disabled</span>
+            </div>
+            <div class="header-actions">
+                <button id="btn-example" type="button">+ Example Flow</button>
+                <button id="btn-new" class="primary" type="button">+ New Flow</button>
+            </div>
+        </header>
+
+        <div id="status-banner" class="status-banner hidden"></div>
+
+        <div class="layout">
+            <aside class="panel">
+                <div class="sidebar-header">
+                    <label class="search-container">
+                        <input id="search-input" class="search-input" type="text" placeholder="Filter flows..." />
+                    </label>
+                    <div id="storage-path" class="muted"></div>
+                </div>
+                <div id="flow-list" class="flow-list"></div>
+                <div id="empty-flows" class="muted hidden">No flows saved yet. Click <b>+ Example Flow</b> or <b>+ New Flow</b>.</div>
+            </aside>
+
+            <main class="panel">
+                <div class="tabs">
+                    <button id="tab-visual" class="tab-btn active" type="button">Visual Builder</button>
+                    <button id="tab-json" class="tab-btn" type="button">JSON Editor</button>
+                    <button id="tab-runs" class="tab-btn" type="button">Run History (<span id="runs-count">0</span>)</button>
+                </div>
+
+                <section id="view-visual">
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="f-id">Flow ID (slug: lowercase a-z, 0-9, -, _)</label>
+                            <input id="f-id" type="text" placeholder="my-login-flow" />
+                        </div>
+                        <div class="field">
+                            <label for="f-name">Name</label>
+                            <input id="f-name" type="text" placeholder="Login Smoke Check" />
+                        </div>
+                    </div>
+
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="f-desc">Description</label>
+                            <input id="f-desc" type="text" placeholder="Optional summary of what this flow verifies" />
+                        </div>
+                        <div class="field">
+                            <label for="f-timeout">Default Step Timeout (ms)</label>
+                            <input id="f-timeout" type="number" min="100" max="120000" value="10000" />
+                        </div>
+                    </div>
+
+                    <div class="section-title">
+                        <span>Variables (use as <code>{{var}}</code> in URL, locator, text, assertions)</span>
+                        <button id="btn-add-var" type="button">+ Add Variable</button>
+                    </div>
+                    <div id="vars-list"></div>
+
+                    <div class="section-title">
+                        <span>Steps</span>
+                        <button id="btn-add-step" type="button">+ Add Step</button>
+                    </div>
+                    <div id="steps-list"></div>
+
+                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                        <button id="btn-save-visual" class="primary" type="button">Save Flow</button>
+                    </div>
+                </section>
+
+                <section id="view-json" class="hidden">
+                    <div class="field">
+                        <label for="json-editor">Declarative Flow JSON</label>
+                        <textarea id="json-editor" class="code" spellcheck="false"></textarea>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button id="btn-save-json" class="primary" type="button">Validate &amp; Save JSON</button>
+                        <button id="btn-apply-json" type="button">Apply to Visual Builder</button>
+                    </div>
+                </section>
+
+                <section id="view-runs" class="hidden">
+                    <div id="runs-list"></div>
+                    <div id="empty-runs" class="muted hidden">No flow runs recorded yet.</div>
+                </section>
+
+                <div class="run-bar">
+                    <div class="section-title" style="margin: 0;">
+                        <span>Execute Current Flow</span>
+                    </div>
+                    <div class="run-controls">
+                        <select id="run-tab-select">
+                            <option value="0">Open new tab (recommended)</option>
+                        </select>
+                        <button id="btn-run-current" class="primary" type="button">Run Flow</button>
+                    </div>
+                    <div id="latest-run-box" class="hidden"></div>
+                </div>
+            </main>
+        </div>
+
+        <script>
+            const ACTIONS = [
+                "open", "wait_for", "click", "fill", "press",
+                "assert_text", "assert_visible", "assert_url",
+                "extract", "eval", "sleep", "screenshot",
+                "reload", "back", "forward"
+            ];
+            const LOCATOR_KINDS = ["css", "role", "label", "placeholder", "text", "test_id", "xpath"];
+            const NEEDS_LOCATOR = new Set(["click", "fill", "wait_for", "assert_visible", "assert_text", "extract"]);
+
+            let state = { flows: [], runs: [], tabs: [], mcp: { enabled: false }, storageDirectory: "" };
+            let selectedFlowId = null;
+            let activeTab = "visual";
+            let draft = createBlankDraft();
+
+            const statusBanner = document.getElementById("status-banner");
+            const flowListEl = document.getElementById("flow-list");
+            const emptyFlowsEl = document.getElementById("empty-flows");
+            const searchInput = document.getElementById("search-input");
+            const varsListEl = document.getElementById("vars-list");
+            const stepsListEl = document.getElementById("steps-list");
+            const jsonEditorEl = document.getElementById("json-editor");
+            const runsListEl = document.getElementById("runs-list");
+            const emptyRunsEl = document.getElementById("empty-runs");
+            const latestRunBox = document.getElementById("latest-run-box");
+
+            function createBlankDraft() {
+                return {
+                    schema_version: 1,
+                    id: "new-flow",
+                    name: "New Automation Flow",
+                    description: "",
+                    default_timeout_ms: 10000,
+                    variables: {},
+                    steps: [
+                        { action: "open", label: "Open target page", url: "https://example.com", wait_for_load: true },
+                        { action: "wait_for", label: "Wait for heading", locator: { kind: "role", role: "heading", name: "Example Domain" } },
+                        { action: "assert_text", label: "Check heading text", locator: { kind: "css", value: "h1" }, contains: "Example Domain" }
+                    ]
+                };
+            }
+
+            function clone(obj) {
+                return JSON.parse(JSON.stringify(obj));
+            }
+
+            function showBanner(msg, isError) {
+                if (!msg) {
+                    statusBanner.classList.add("hidden");
+                    return;
+                }
+                statusBanner.textContent = msg;
+                statusBanner.classList.toggle("error", Boolean(isError));
+                statusBanner.classList.remove("hidden");
+            }
+
+            function formatDuration(ms) {
+                if (ms < 1000) return `${ms} ms`;
+                return `${(ms / 1000).toFixed(2)} s`;
+            }
+
+            function syncMetaFromInputs() {
+                draft.id = document.getElementById("f-id").value.trim();
+                draft.name = document.getElementById("f-name").value.trim();
+                draft.description = document.getElementById("f-desc").value;
+                draft.default_timeout_ms = Number(document.getElementById("f-timeout").value) || 10000;
+            }
+
+            function renderEditor() {
+                document.getElementById("f-id").value = draft.id || "";
+                document.getElementById("f-name").value = draft.name || "";
+                document.getElementById("f-desc").value = draft.description || "";
+                document.getElementById("f-timeout").value = draft.default_timeout_ms || 10000;
+                renderVars();
+                renderSteps();
+                jsonEditorEl.value = JSON.stringify(draft, null, 2);
+            }
+
+            function renderVars() {
+                varsListEl.innerHTML = "";
+                const entries = Object.entries(draft.variables || {});
+                if (entries.length === 0) {
+                    const p = document.createElement("div");
+                    p.className = "muted";
+                    p.textContent = "No variables defined.";
+                    varsListEl.appendChild(p);
+                    return;
+                }
+                entries.forEach(([key, val]) => {
+                    const row = document.createElement("div");
+                    row.className = "var-row";
+                    const keyInput = document.createElement("input");
+                    keyInput.type = "text";
+                    keyInput.value = key;
+                    keyInput.placeholder = "key";
+                    const valInput = document.createElement("input");
+                    valInput.type = "text";
+                    valInput.value = val;
+                    valInput.placeholder = "value";
+
+                    keyInput.addEventListener("change", () => {
+                        const newKey = keyInput.value.trim();
+                        if (!newKey || newKey === key) return;
+                        delete draft.variables[key];
+                        draft.variables[newKey] = valInput.value;
+                        renderEditor();
+                    });
+                    valInput.addEventListener("input", () => {
+                        draft.variables[keyInput.value.trim() || key] = valInput.value;
+                        jsonEditorEl.value = JSON.stringify(draft, null, 2);
+                    });
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "danger";
+                    delBtn.textContent = "Remove";
+                    delBtn.addEventListener("click", () => {
+                        delete draft.variables[key];
+                        renderEditor();
+                    });
+
+                    row.append(keyInput, valInput, delBtn);
+                    varsListEl.appendChild(row);
+                });
+            }
+
+            function addInputField(container, labelText, value, onInput, placeholder = "", type = "text") {
+                const wrap = document.createElement("div");
+                wrap.className = "field";
+                const lbl = document.createElement("label");
+                lbl.textContent = labelText;
+                const inp = document.createElement("input");
+                inp.type = type;
+                inp.value = value ?? "";
+                if (placeholder) inp.placeholder = placeholder;
+                inp.addEventListener("input", () => {
+                    onInput(type === "number" ? (inp.value === "" ? undefined : Number(inp.value)) : inp.value);
+                    jsonEditorEl.value = JSON.stringify(draft, null, 2);
+                });
+                wrap.append(lbl, inp);
+                container.appendChild(wrap);
+            }
+
+            function addSelectField(container, labelText, options, value, onChange) {
+                const wrap = document.createElement("div");
+                wrap.className = "field";
+                const lbl = document.createElement("label");
+                lbl.textContent = labelText;
+                const sel = document.createElement("select");
+                options.forEach(opt => {
+                    const o = document.createElement("option");
+                    o.value = opt;
+                    o.textContent = opt;
+                    o.selected = opt === value;
+                    sel.appendChild(o);
+                });
+                sel.addEventListener("change", () => {
+                    onChange(sel.value);
+                    renderEditor();
+                });
+                wrap.append(lbl, sel);
+                container.appendChild(wrap);
+            }
+
+            function renderSteps() {
+                stepsListEl.innerHTML = "";
+                (draft.steps || []).forEach((step, index) => {
+                    const card = document.createElement("div");
+                    card.className = "step-card";
+
+                    const head = document.createElement("div");
+                    head.className = "step-header";
+
+                    const num = document.createElement("span");
+                    num.className = "step-num";
+                    num.textContent = `#${index + 1}`;
+
+                    const actionSel = document.createElement("select");
+                    ACTIONS.forEach(a => {
+                        const o = document.createElement("option");
+                        o.value = a;
+                        o.textContent = a;
+                        o.selected = a === step.action;
+                        actionSel.appendChild(o);
+                    });
+                    actionSel.addEventListener("change", () => {
+                        const nextAction = actionSel.value;
+                        const prevLabel = step.label;
+                        const newStep = { action: nextAction };
+                        if (prevLabel) newStep.label = prevLabel;
+                        if (nextAction === "open") {
+                            newStep.url = step.url || "https://example.com";
+                            newStep.wait_for_load = true;
+                        } else if (NEEDS_LOCATOR.has(nextAction)) {
+                            newStep.locator = step.locator || { kind: "css", value: "body" };
+                            if (nextAction === "fill") { newStep.text = ""; newStep.clear = true; }
+                            if (nextAction === "assert_text") newStep.contains = "";
+                            if (nextAction === "extract") newStep.save_as = "value";
+                        } else if (nextAction === "press") {
+                            newStep.key = "Enter";
+                        } else if (nextAction === "assert_url") {
+                            newStep.contains = "https://";
+                        } else if (nextAction === "eval") {
+                            newStep.script = "return document.title;";
+                            newStep.save_as = "result";
+                        } else if (nextAction === "sleep") {
+                            newStep.ms = 500;
+                        }
+                        draft.steps[index] = newStep;
+                        renderEditor();
+                    });
+
+                    const labelInp = document.createElement("input");
+                    labelInp.type = "text";
+                    labelInp.className = "step-label-input";
+                    labelInp.placeholder = "Step description (optional)";
+                    labelInp.value = step.label || "";
+                    labelInp.addEventListener("input", () => {
+                        if (labelInp.value) step.label = labelInp.value;
+                        else delete step.label;
+                        jsonEditorEl.value = JSON.stringify(draft, null, 2);
+                    });
+
+                    const controls = document.createElement("div");
+                    controls.className = "step-controls";
+
+                    const upBtn = document.createElement("button");
+                    upBtn.type = "button";
+                    upBtn.textContent = "Up";
+                    upBtn.disabled = index === 0;
+                    upBtn.addEventListener("click", () => {
+                        [draft.steps[index - 1], draft.steps[index]] = [draft.steps[index], draft.steps[index - 1]];
+                        renderEditor();
+                    });
+
+                    const downBtn = document.createElement("button");
+                    downBtn.type = "button";
+                    downBtn.textContent = "Down";
+                    downBtn.disabled = index === draft.steps.length - 1;
+                    downBtn.addEventListener("click", () => {
+                        [draft.steps[index + 1], draft.steps[index]] = [draft.steps[index], draft.steps[index + 1]];
+                        renderEditor();
+                    });
+
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "danger";
+                    delBtn.textContent = "Delete";
+                    delBtn.disabled = draft.steps.length <= 1;
+                    delBtn.addEventListener("click", () => {
+                        draft.steps.splice(index, 1);
+                        renderEditor();
+                    });
+
+                    controls.append(upBtn, downBtn, delBtn);
+                    head.append(num, actionSel, labelInp, controls);
+                    card.appendChild(head);
+
+                    const body = document.createElement("div");
+                    body.className = "step-body";
+
+                    if (step.action === "open") {
+                        addInputField(body, "URL", step.url, v => { step.url = v; }, "https://example.com");
+                    }
+
+                    if (NEEDS_LOCATOR.has(step.action) || (step.action === "press" && step.locator)) {
+                        if (!step.locator) step.locator = { kind: "css", value: "" };
+                        addSelectField(body, "Locator Kind", LOCATOR_KINDS, step.locator.kind || "css", v => {
+                            step.locator.kind = v;
+                            if (v === "role") {
+                                step.locator.role = step.locator.role || "button";
+                                delete step.locator.value;
+                            } else {
+                                step.locator.value = step.locator.value || "";
+                                delete step.locator.role;
+                            }
+                        });
+                        if (step.locator.kind === "role") {
+                            addInputField(body, "Role", step.locator.role, v => { step.locator.role = v; }, "button, link, textbox, heading");
+                            addInputField(body, "Accessible Name", step.locator.name, v => {
+                                if (v) step.locator.name = v;
+                                else delete step.locator.name;
+                            }, "Optional label/text");
+                        } else {
+                            addInputField(body, "Locator Value", step.locator.value, v => { step.locator.value = v; }, "Selector, label, placeholder, text, testId");
+                        }
+                    }
+
+                    if (step.action === "fill") {
+                        addInputField(body, "Text to Type", step.text, v => { step.text = v; }, "Text or {{variable}}");
+                    } else if (step.action === "press") {
+                        addInputField(body, "Key", step.key, v => { step.key = v; }, "Enter, Tab, Escape");
+                    } else if (step.action === "assert_text" || step.action === "assert_url") {
+                        addInputField(body, "Contains", step.contains, v => {
+                            if (v) step.contains = v; else delete step.contains;
+                        }, "Expected substring");
+                        addInputField(body, "Equals (optional)", step.equals, v => {
+                            if (v) step.equals = v; else delete step.equals;
+                        }, "Exact expected match");
+                    } else if (step.action === "extract") {
+                        addInputField(body, "Save Output As", step.save_as, v => {
+                            if (v) step.save_as = v; else delete step.save_as;
+                        }, "extracted_key");
+                    } else if (step.action === "eval") {
+                        addInputField(body, "JS Function Body (uses return ...)", step.script, v => { step.script = v; }, "return document.title;");
+                        addInputField(body, "Save Output As", step.save_as, v => {
+                            if (v) step.save_as = v; else delete step.save_as;
+                        }, "result");
+                    } else if (step.action === "sleep") {
+                        addInputField(body, "Duration (ms)", step.ms, v => { step.ms = v ?? 250; }, "500", "number");
+                    }
+
+                    addInputField(body, "Timeout Override (ms)", step.timeout_ms, v => {
+                        if (v === undefined) delete step.timeout_ms;
+                        else step.timeout_ms = v;
+                    }, "Optional", "number");
+
+                    card.appendChild(body);
+                    stepsListEl.appendChild(card);
+                });
+            }
+
+            function renderFlowList() {
+                flowListEl.innerHTML = "";
+                const query = searchInput.value.trim().toLowerCase();
+                const visible = state.flows.filter(f =>
+                    !query || f.id.toLowerCase().includes(query) || f.name.toLowerCase().includes(query)
+                );
+                emptyFlowsEl.classList.toggle("hidden", visible.length > 0);
+                document.getElementById("flow-count").textContent = `${state.flows.length} flow${state.flows.length === 1 ? "" : "s"}`;
+
+                visible.forEach(flow => {
+                    const item = document.createElement("div");
+                    item.className = "flow-item" + (flow.id === selectedFlowId ? " selected" : "");
+                    item.addEventListener("click", () => {
+                        selectedFlowId = flow.id;
+                        draft = clone(flow);
+                        renderFlowList();
+                        renderEditor();
+                    });
+
+                    const top = document.createElement("div");
+                    top.className = "flow-item-top";
+                    const name = document.createElement("span");
+                    name.className = "flow-item-name";
+                    name.textContent = flow.name;
+                    const count = document.createElement("span");
+                    count.className = "flow-item-steps";
+                    count.textContent = `${flow.steps.length} step${flow.steps.length === 1 ? "" : "s"}`;
+                    top.append(name, count);
+
+                    const idLine = document.createElement("div");
+                    idLine.className = "flow-item-id";
+                    idLine.textContent = flow.id;
+
+                    const actions = document.createElement("div");
+                    actions.className = "flow-item-actions";
+
+                    const runBtn = document.createElement("button");
+                    runBtn.type = "button";
+                    runBtn.className = "primary";
+                    runBtn.textContent = "Run";
+                    runBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        selectedFlowId = flow.id;
+                        draft = clone(flow);
+                        renderFlowList();
+                        renderEditor();
+                        triggerRun({ flowId: flow.id });
+                    });
+
+                    const dupBtn = document.createElement("button");
+                    dupBtn.type = "button";
+                    dupBtn.textContent = "Duplicate";
+                    dupBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        selectedFlowId = null;
+                        draft = clone(flow);
+                        draft.id = `${flow.id}-copy`;
+                        draft.name = `${flow.name} (Copy)`;
+                        renderFlowList();
+                        renderEditor();
+                    });
+
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "danger";
+                    delBtn.textContent = "Delete";
+                    delBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        ladybird.sendMessage("deleteFlow", flow.id);
+                    });
+
+                    actions.append(runBtn, dupBtn, delBtn);
+                    item.append(top, idLine);
+                    if (flow.description) {
+                        const desc = document.createElement("div");
+                        desc.className = "flow-item-desc";
+                        desc.textContent = flow.description;
+                        item.appendChild(desc);
+                    }
+                    item.appendChild(actions);
+                    flowListEl.appendChild(item);
+                });
+            }
+
+            function renderRunCard(run) {
+                const card = document.createElement("div");
+                card.className = "run-card";
+
+                const head = document.createElement("div");
+                head.className = "run-card-head";
+                const left = document.createElement("div");
+                left.innerHTML = `<strong>${escapeHtml(run.flow_name)}</strong> <span class="muted">${escapeHtml(run.run_id)}</span>`;
+                const right = document.createElement("div");
+                right.style.display = "flex";
+                right.style.gap = "8px";
+                right.style.alignItems = "center";
+
+                const pill = document.createElement("span");
+                pill.className = `pill ${run.status}`;
+                pill.textContent = `${run.status.toUpperCase()} (${formatDuration(run.duration_ms || 0)})`;
+                right.appendChild(pill);
+
+                if (run.status === "running") {
+                    const cancelBtn = document.createElement("button");
+                    cancelBtn.type = "button";
+                    cancelBtn.className = "danger";
+                    cancelBtn.textContent = "Cancel";
+                    cancelBtn.addEventListener("click", () => ladybird.sendMessage("cancelRun", run.run_id));
+                    right.appendChild(cancelBtn);
+                }
+
+                head.append(left, right);
+                card.appendChild(head);
+
+                if (run.error) {
+                    const errEl = document.createElement("div");
+                    errEl.className = "muted";
+                    errEl.style.color = "#ef4444";
+                    errEl.style.marginTop = "6px";
+                    errEl.textContent = run.error;
+                    card.appendChild(errEl);
+                }
+
+                const table = document.createElement("table");
+                table.className = "steps-table";
+                table.innerHTML = "<thead><tr><th>#</th><th>Step</th><th>Status</th><th>Time</th><th>Details</th></tr></thead>";
+                const tbody = document.createElement("tbody");
+                (run.steps || []).forEach(s => {
+                    const tr = document.createElement("tr");
+                    const labelText = s.label ? `${s.action} — ${s.label}` : s.action;
+                    let detail = s.error || "";
+                    if (!detail && s.screenshot_path) detail = s.screenshot_path;
+                    else if (!detail && s.output !== undefined && s.output !== null) detail = typeof s.output === "string" ? s.output : JSON.stringify(s.output);
+                    tr.innerHTML = `<td>${s.index + 1}</td><td>${escapeHtml(labelText)}</td><td><span class="pill ${s.status}">${escapeHtml(s.status)}</span></td><td>${formatDuration(s.duration_ms || 0)}</td><td>${escapeHtml(detail)}</td>`;
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                card.appendChild(table);
+
+                if (run.outputs && Object.keys(run.outputs).length > 0) {
+                    const pre = document.createElement("pre");
+                    pre.className = "output-json";
+                    pre.textContent = JSON.stringify(run.outputs, null, 2);
+                    card.appendChild(pre);
+                }
+                return card;
+            }
+
+            function renderRuns() {
+                document.getElementById("runs-count").textContent = String(state.runs.length);
+                runsListEl.innerHTML = "";
+                emptyRunsEl.classList.toggle("hidden", state.runs.length > 0);
+                state.runs.forEach(run => runsListEl.appendChild(renderRunCard(run)));
+
+                latestRunBox.innerHTML = "";
+                if (state.runs.length > 0) {
+                    latestRunBox.classList.remove("hidden");
+                    latestRunBox.appendChild(renderRunCard(state.runs[0]));
+                } else {
+                    latestRunBox.classList.add("hidden");
+                }
+            }
+
+            function renderTabsDropdown() {
+                const sel = document.getElementById("run-tab-select");
+                const currentVal = sel.value;
+                sel.innerHTML = '<option value="0">Open new tab (recommended)</option>';
+                (state.tabs || []).forEach(t => {
+                    const opt = document.createElement("option");
+                    opt.value = String(t.id);
+                    const title = t.title || t.url || `Tab ${t.id}`;
+                    opt.textContent = `#${t.id}: ${title} (${t.url})`;
+                    sel.appendChild(opt);
+                });
+                if ([...sel.options].some(o => o.value === currentVal)) sel.value = currentVal;
+            }
+
+            function renderMcpAndMeta() {
+                const mcpBadge = document.getElementById("mcp-badge");
+                if (state.mcp && state.mcp.enabled) {
+                    mcpBadge.classList.add("on");
+                    mcpBadge.textContent = `MCP: ${state.mcp.endpoint}`;
+                } else {
+                    mcpBadge.classList.remove("on");
+                    mcpBadge.textContent = "MCP: disabled (Inspect -> Enable MCP Server)";
+                }
+                document.getElementById("storage-path").textContent = state.storageDirectory ? `Stored in: ${state.storageDirectory}` : "";
+            }
+
+            function escapeHtml(text) {
+                return String(text ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+            }
+
+            function setTab(tab) {
+                activeTab = tab;
+                document.getElementById("tab-visual").classList.toggle("active", tab === "visual");
+                document.getElementById("tab-json").classList.toggle("active", tab === "json");
+                document.getElementById("tab-runs").classList.toggle("active", tab === "runs");
+                document.getElementById("view-visual").classList.toggle("hidden", tab !== "visual");
+                document.getElementById("view-json").classList.toggle("hidden", tab !== "json");
+                document.getElementById("view-runs").classList.toggle("hidden", tab !== "runs");
+                if (tab === "json") {
+                    syncMetaFromInputs();
+                    jsonEditorEl.value = JSON.stringify(draft, null, 2);
+                }
+            }
+
+            function triggerRun(source) {
+                const tabId = Number(document.getElementById("run-tab-select").value) || 0;
+                const payload = { ...source };
+                if (tabId > 0) payload.tabId = tabId;
+                ladybird.sendMessage("runFlow", payload);
+            }
+
+            document.getElementById("tab-visual").addEventListener("click", () => setTab("visual"));
+            document.getElementById("tab-json").addEventListener("click", () => setTab("json"));
+            document.getElementById("tab-runs").addEventListener("click", () => setTab("runs"));
+            searchInput.addEventListener("input", renderFlowList);
+
+            document.getElementById("btn-example").addEventListener("click", () => {
+                ladybird.sendMessage("createExampleFlow");
+            });
+
+            document.getElementById("btn-new").addEventListener("click", () => {
+                selectedFlowId = null;
+                draft = createBlankDraft();
+                draft.id = `flow-${Date.now().toString(36)}`;
+                renderFlowList();
+                renderEditor();
+                setTab("visual");
+                showBanner("Editing new unsaved flow.", false);
+            });
+
+            document.getElementById("btn-add-var").addEventListener("click", () => {
+                syncMetaFromInputs();
+                let idx = 1;
+                while (draft.variables[`var_${idx}`] !== undefined) idx++;
+                draft.variables[`var_${idx}`] = "";
+                renderEditor();
+            });
+
+            document.getElementById("btn-add-step").addEventListener("click", () => {
+                syncMetaFromInputs();
+                draft.steps.push({ action: "wait_for", locator: { kind: "css", value: "body" } });
+                renderEditor();
+            });
+
+            document.getElementById("btn-save-visual").addEventListener("click", () => {
+                syncMetaFromInputs();
+                selectedFlowId = draft.id;
+                ladybird.sendMessage("saveFlow", draft);
+            });
+
+            document.getElementById("btn-apply-json").addEventListener("click", () => {
+                try {
+                    const parsed = JSON.parse(jsonEditorEl.value);
+                    draft = parsed;
+                    renderEditor();
+                    setTab("visual");
+                    showBanner("Applied JSON to Visual Builder (not saved yet).", false);
+                } catch (err) {
+                    showBanner(`Invalid JSON: ${err.message}`, true);
+                }
+            });
+
+            document.getElementById("btn-save-json").addEventListener("click", () => {
+                try {
+                    const parsed = JSON.parse(jsonEditorEl.value);
+                    draft = parsed;
+                    selectedFlowId = parsed.id || null;
+                    ladybird.sendMessage("saveFlow", parsed);
+                } catch (err) {
+                    showBanner(`Invalid JSON: ${err.message}`, true);
+                }
+            });
+
+            document.getElementById("btn-run-current").addEventListener("click", () => {
+                try {
+                    const flowToRun = activeTab === "json" ? JSON.parse(jsonEditorEl.value) : (syncMetaFromInputs(), draft);
+                    triggerRun({ flow: flowToRun });
+                } catch (err) {
+                    showBanner(`Invalid JSON: ${err.message}`, true);
+                }
+            });
+
+            document.addEventListener("WebUIMessage", event => {
+                if (event.detail.name === "stateUpdated") {
+                    state = event.detail.data;
+                    if (!selectedFlowId && state.flows.length > 0) {
+                        selectedFlowId = state.flows[0].id;
+                        draft = clone(state.flows[0]);
+                        renderEditor();
+                    } else if (selectedFlowId) {
+                        const match = state.flows.find(f => f.id === selectedFlowId);
+                        if (match && activeTab !== "json") {
+                            // Keep editor synced when an example or save comes back cleanly.
+                        }
+                    }
+                    renderMcpAndMeta();
+                    renderFlowList();
+                    renderTabsDropdown();
+                    renderRuns();
+                } else if (event.detail.name === "actionResult") {
+                    const res = event.detail.data;
+                    showBanner(res.message || (res.ok ? "Done" : "Failed"), !res.ok);
+                    if (res.ok && res.flowId) {
+                        selectedFlowId = res.flowId;
+                        const found = state.flows.find(f => f.id === res.flowId);
+                        if (found) {
+                            draft = clone(found);
+                            renderEditor();
+                            renderFlowList();
+                        }
+                    }
+                }
+            });
+
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) ladybird.sendMessage("loadState");
+            });
+
+            renderEditor();
+            document.addEventListener("WebUILoaded", () => ladybird.sendMessage("loadState"));
+        </script>
+    </body>
+</html>

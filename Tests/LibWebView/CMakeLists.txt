@@ -70,6 +70,7 @@ set(TEST_SOURCES
     TestAudioServerActivity.cpp
     TestAutocompleteMuxer.cpp
     TestAutocompleteRanker.cpp
+    TestAutomationFlows.cpp
     TestBackgroundNetworking.cpp
     TestCanonicalBrowsingContextGroup.cpp
     TestCookieJar.cpp

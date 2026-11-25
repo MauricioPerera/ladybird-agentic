@@ -284,6 +284,74 @@ static JsonArray build_tool_definitions()
             Array { "tab_id"sv }));
     }
 
+    tools.must_append(make_tool_schema(
+        "list_flows"sv,
+        "List saved browser automation flows with their IDs, names, descriptions, and step counts."sv,
+        JsonObject {}));
+
+    {
+        JsonObject props;
+        props.set("flow_id"sv, make_prop("string"sv, "ID of the saved automation flow."sv));
+        tools.must_append(make_tool_schema(
+            "get_flow"sv,
+            "Retrieve the full declarative JSON definition of a saved automation flow."sv,
+            move(props),
+            Array { "flow_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("flow"sv, make_prop("object"sv, "Declarative automation flow JSON object (schema_version, id, name, variables, steps)."sv));
+        tools.must_append(make_tool_schema(
+            "save_flow"sv,
+            "Validate and persist a declarative browser automation flow for repeated execution."sv,
+            move(props),
+            Array { "flow"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("flow_id"sv, make_prop("string"sv, "ID of the saved automation flow to delete."sv));
+        tools.must_append(make_tool_schema(
+            "delete_flow"sv,
+            "Delete a saved automation flow by ID."sv,
+            move(props),
+            Array { "flow_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("flow_id"sv, make_prop("string"sv, "ID of a saved automation flow to run (omit if providing inline 'flow')."sv));
+        props.set("flow"sv, make_prop("object"sv, "Inline declarative flow definition to run without saving first."sv));
+        props.set("tab_id"sv, make_prop("integer"sv, "Optional MCP-allowed tab ID to run the flow in."sv));
+        props.set("variables"sv, make_prop("object"sv, "Optional key-value variables overriding flow defaults for this run."sv));
+        props.set("open_new_tab"sv, make_prop("boolean"sv, "Open a new MCP-allowed tab when tab_id is omitted (default: true)."sv));
+        tools.must_append(make_tool_schema(
+            "run_flow"sv,
+            "Execute a saved or inline declarative automation flow in Ladybird and return step-by-step results and extracted outputs."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("flow_id"sv, make_prop("string"sv, "Optional flow ID filter."sv));
+        props.set("limit"sv, make_prop("integer"sv, "Maximum number of recent runs to return (default: 20)."sv));
+        tools.must_append(make_tool_schema(
+            "list_flow_runs"sv,
+            "List recent automation flow execution records."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("run_id"sv, make_prop("string"sv, "ID of a flow execution run."sv));
+        tools.must_append(make_tool_schema(
+            "get_flow_run"sv,
+            "Retrieve step-by-step details and outputs of a flow execution run."sv,
+            move(props),
+            Array { "run_id"sv }));
+    }
+
     return tools;
 }
 
@@ -755,6 +823,68 @@ private:
             if (!tab_id.has_value())
                 return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
             delegate.take_screenshot(*tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_flows"sv) {
+            delegate.list_flows(move(complete));
+            return;
+        }
+
+        if (tool_name == "get_flow"sv) {
+            auto flow_id = arguments.get_string("flow_id"sv);
+            if (!flow_id.has_value() || flow_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'flow_id'"sv);
+            delegate.get_flow(*flow_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "save_flow"sv) {
+            auto flow_obj = arguments.get_object("flow"sv);
+            if (!flow_obj.has_value())
+                return fail_invalid_params("Missing object parameter 'flow'"sv);
+            delegate.save_flow(JsonValue { *flow_obj }, move(complete));
+            return;
+        }
+
+        if (tool_name == "delete_flow"sv) {
+            auto flow_id = arguments.get_string("flow_id"sv);
+            if (!flow_id.has_value() || flow_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'flow_id'"sv);
+            delegate.delete_flow(*flow_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "run_flow"sv) {
+            Optional<String> flow_id;
+            if (auto maybe_flow_id = arguments.get_string("flow_id"sv); maybe_flow_id.has_value() && !maybe_flow_id->is_empty())
+                flow_id = *maybe_flow_id;
+            Optional<JsonValue> inline_flow;
+            if (auto maybe_flow_obj = arguments.get_object("flow"sv); maybe_flow_obj.has_value())
+                inline_flow = JsonValue { *maybe_flow_obj };
+            auto tab_id = arguments.get_u64("tab_id"sv);
+            JsonObject variables;
+            if (auto maybe_vars = arguments.get_object("variables"sv); maybe_vars.has_value())
+                variables = *maybe_vars;
+            bool open_new_tab = arguments.get_bool("open_new_tab"sv).value_or(true);
+            delegate.run_flow(move(flow_id), move(inline_flow), tab_id, move(variables), open_new_tab, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_flow_runs"sv) {
+            Optional<String> flow_id;
+            if (auto maybe_flow_id = arguments.get_string("flow_id"sv); maybe_flow_id.has_value() && !maybe_flow_id->is_empty())
+                flow_id = *maybe_flow_id;
+            auto limit = static_cast<size_t>(arguments.get_u64("limit"sv).value_or(20));
+            delegate.list_flow_runs(move(flow_id), limit, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_flow_run"sv) {
+            auto run_id = arguments.get_string("run_id"sv);
+            if (!run_id.has_value() || run_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'run_id'"sv);
+            delegate.get_flow_run(*run_id, move(complete));
             return;
         }
 

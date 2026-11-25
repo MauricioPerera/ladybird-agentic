@@ -7,6 +7,8 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
 #include <AK/Vector.h>
@@ -52,6 +54,14 @@ public:
     virtual void type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, OnToolCallComplete) = 0;
     virtual void evaluate_javascript(u64 tab_id, String script, OnToolCallComplete) = 0;
     virtual void take_screenshot(u64 tab_id, OnToolCallComplete) = 0;
+
+    virtual void list_flows(OnToolCallComplete) = 0;
+    virtual void get_flow(String flow_id, OnToolCallComplete) = 0;
+    virtual void save_flow(JsonValue flow_json, OnToolCallComplete) = 0;
+    virtual void delete_flow(String flow_id, OnToolCallComplete) = 0;
+    virtual void run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, OnToolCallComplete) = 0;
+    virtual void list_flow_runs(Optional<String> flow_id, size_t limit, OnToolCallComplete) = 0;
+    virtual void get_flow_run(String run_id, OnToolCallComplete) = 0;
 };
 
 }

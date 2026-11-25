@@ -415,6 +415,15 @@ public:
     ErrorOr<void> toggle_mcp_enabled();
     void did_revoke_mcp_access_for_view(u64 view_id);
     void did_close_mcp_view(u64 view_id);
+
+    FlowStore& flow_store();
+    FlowRunner& flow_runner();
+    Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
+    Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab) const;
+    void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
+    u64 start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete);
+    void cancel_automation_navigation_wait(u64 wait_id);
+
     void dump_cookies() const;
     void crash_compositor_process();
     bool has_compositor_process() const { return m_compositor_client; }
@@ -663,6 +672,13 @@ private:
     virtual void type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
     virtual void take_screenshot(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void list_flows(MCP::OnToolCallComplete) override;
+    virtual void get_flow(String flow_id, MCP::OnToolCallComplete) override;
+    virtual void save_flow(JsonValue flow_json, MCP::OnToolCallComplete) override;
+    virtual void delete_flow(String flow_id, MCP::OnToolCallComplete) override;
+    virtual void run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, MCP::OnToolCallComplete) override;
+    virtual void list_flow_runs(Optional<String> flow_id, size_t limit, MCP::OnToolCallComplete) override;
+    virtual void get_flow_run(String run_id, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
@@ -812,6 +828,8 @@ private:
 
     OwnPtr<MCP::MCPServer> m_mcp;
     Optional<String> m_mcp_token;
+    OwnPtr<FlowStore> m_flow_store;
+    OwnPtr<FlowRunner> m_flow_runner;
     u64 m_next_mcp_command_id { 0x8000'0000'0000'0001ULL };
     u64 m_next_mcp_wait_id { 1 };
 
@@ -819,6 +837,7 @@ private:
         String name;
         JsonValue payload;
         Vector<String> arguments;
+        bool require_mcp_permission { true };
         Function<void(Web::WebDriver::Response)> on_complete;
     };
     struct MCPViewQueue {
@@ -832,8 +851,10 @@ private:
         AK_ALLOC_WITH_KMALLOC;
         u64 view_id { 0 };
         u64 listener_id { 0 };
+        bool require_mcp_permission { true };
         RefPtr<Core::Timer> timer;
         MCP::OnToolCallComplete on_complete;
+        Function<void(ErrorOr<void>)> on_automation_complete;
     };
     struct PendingMCPTreeWait {
         AK_ALLOC_WITH_KMALLOC;

@@ -8,6 +8,9 @@ set(SOURCES
     AutocompleteMuxer.cpp
     AutocompleteRanker.cpp
     AutocompleteService.cpp
+    Automation/FlowRunner.cpp
+    Automation/FlowStore.cpp
+    Automation/FlowTypes.cpp
     BlobURLStore.cpp
     BrowsingSession.cpp
     CanonicalBrowsingContext.cpp
@@ -101,6 +104,7 @@ set(SOURCES
     WebUI/ApplicationWebUI.cpp
     WebUI/CertificateUI.cpp
     WebUI/CrashReportsUI.cpp
+    WebUI/FlowsUI.cpp
     WebUI/SupportUI.cpp
     WebUI/SettingsUI.cpp
     WebWorkerClient.cpp
