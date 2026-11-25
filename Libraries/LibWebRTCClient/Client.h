@@ -38,7 +38,7 @@ public:
     Function<void(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload)> on_encoded_audio_frame_event;
     Function<void(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload)> on_encoded_video_frame_event;
     Function<void(u64 pc_id, u64 sender_id, u32 ssrc)> on_audio_track_added_event;
-    Function<void(u64 pc_id, u64 sender_id, u32 ssrc)> on_video_track_added_event;
+    Function<void(u64 pc_id, u64 sender_id, u32 ssrc, String mime_type)> on_video_track_added_event;
     Function<void(u64 pc_id, u64 sender_id)> on_video_keyframe_requested_event;
 
     Function<void(u64 pc_id, u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message)> on_create_offer_completion;
@@ -73,7 +73,7 @@ private:
     virtual void on_encoded_audio_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload) override;
     virtual void on_encoded_video_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload) override;
     virtual void on_audio_track_added(u64 pc_id, u64 sender_id, u32 ssrc) override;
-    virtual void on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc) override;
+    virtual void on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc, String mime_type) override;
     virtual void on_video_keyframe_requested(u64 pc_id, u64 sender_id) override;
 
     virtual void on_create_offer_result(u64 pc_id, u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message) override;

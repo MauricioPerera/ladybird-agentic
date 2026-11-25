@@ -5,6 +5,8 @@
  */
 
 #include <AK/GenericShorthands.h>
+#include <AK/HashMap.h>
+#include <AK/Mutex.h>
 #include <AK/ScopeGuard.h>
 #include <LibGfx/Bitmap.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundation.h>
@@ -23,6 +25,22 @@ static constexpr GUID CLSID_CMSH264EncoderMFT_VALUE = {
     0x051a,
     0x4ded,
     { 0x97, 0x79, 0xa4, 0x33, 0x05, 0x16, 0x5e, 0x35 }
+};
+
+// MFVideoFormat_VP80 ({30385056-0000-0010-8000-00aa00389b71})
+static constexpr GUID MFVideoFormat_VP80_VALUE = {
+    0x30385056,
+    0x0000,
+    0x0010,
+    { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 }
+};
+
+// MFVideoFormat_VP90 ({30395056-0000-0010-8000-00aa00389b71})
+static constexpr GUID MFVideoFormat_VP90_VALUE = {
+    0x30395056,
+    0x0000,
+    0x0010,
+    { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 }
 };
 
 struct WindowsMediaFoundationVideoEncoder::State {
@@ -188,21 +206,42 @@ AnnexBInspection inspect_annex_b_nalus(ReadonlyBytes data)
     return result;
 }
 
-DecoderErrorOr<ComPtr<IMFTransform>> create_h264_encoder_transform()
+Optional<GUID> output_subtype_for_codec(CodecID codec_id)
+{
+    switch (codec_id) {
+    case CodecID::H264:
+        return MFVideoFormat_H264;
+    case CodecID::VP8:
+        return MFVideoFormat_VP80_VALUE;
+    case CodecID::VP9:
+        return MFVideoFormat_VP90_VALUE;
+    default:
+        return {};
+    }
+}
+
+DecoderErrorOr<ComPtr<IMFTransform>> create_encoder_transform(CodecID codec_id)
 {
     if (!ensure_media_foundation_started())
         return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Media Foundation could not be started"sv);
 
-    ComPtr<IMFTransform> transform;
-    if (SUCCEEDED(CoCreateInstance(CLSID_CMSH264EncoderMFT_VALUE, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform))) && transform)
-        return transform;
+    auto subtype = output_subtype_for_codec(codec_id);
+    if (!subtype.has_value())
+        return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Unsupported Media Foundation encoder codec"sv);
 
-    MFT_REGISTER_TYPE_INFO output_type_info { MFMediaType_Video, MFVideoFormat_H264 };
+    ComPtr<IMFTransform> transform;
+    if (codec_id == CodecID::H264
+        && SUCCEEDED(CoCreateInstance(CLSID_CMSH264EncoderMFT_VALUE, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform)))
+        && transform) {
+        return transform;
+    }
+
+    MFT_REGISTER_TYPE_INFO output_type_info { MFMediaType_Video, *subtype };
     IMFActivate** activates = nullptr;
     UINT32 activate_count = 0;
     auto flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER;
     if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, nullptr, &output_type_info, &activates, &activate_count)))
-        return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Media Foundation could not enumerate H.264 video encoders"sv);
+        return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Media Foundation could not enumerate video encoders"sv);
 
     ScopeGuard release_activates = [&] {
         for (UINT32 i = 0; i < activate_count; ++i)
@@ -215,7 +254,7 @@ DecoderErrorOr<ComPtr<IMFTransform>> create_h264_encoder_transform()
             return transform;
     }
 
-    return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "No Media Foundation H.264 encoder transform available"sv);
+    return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "No Media Foundation video encoder transform available"sv);
 }
 
 }
@@ -243,13 +282,29 @@ u32 WindowsMediaFoundationVideoEncoder::height() const
     return m_state->config.height;
 }
 
+bool WindowsMediaFoundationVideoEncoder::is_codec_supported(CodecID codec_id)
+{
+    static Mutex s_cache_mutex;
+    static HashMap<CodecID, bool> s_supported_cache;
+    {
+        MutexLocker locker(s_cache_mutex);
+        if (auto cached = s_supported_cache.get(codec_id); cached.has_value())
+            return *cached;
+    }
+
+    bool supported = !create_encoder_transform(codec_id).is_error();
+    MutexLocker locker(s_cache_mutex);
+    s_supported_cache.set(codec_id, supported);
+    return supported;
+}
+
 DecoderErrorOr<NonnullOwnPtr<WindowsMediaFoundationVideoEncoder>> WindowsMediaFoundationVideoEncoder::try_create(VideoEncoderConfig const& requested_config)
 {
     VideoEncoderConfig config = requested_config;
     config.width &= ~1u;
     config.height &= ~1u;
     if (config.width < 16 || config.height < 16)
-        return DecoderError::with_description(DecoderErrorCategory::Invalid, "H.264 encoder requires even dimensions of at least 16x16"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Invalid, "Video encoder requires even dimensions of at least 16x16"sv);
     if (config.framerate == 0)
         config.framerate = 30;
     if (config.bitrate_bps == 0)
@@ -257,7 +312,11 @@ DecoderErrorOr<NonnullOwnPtr<WindowsMediaFoundationVideoEncoder>> WindowsMediaFo
     if (config.keyframe_interval_frames == 0)
         config.keyframe_interval_frames = 60;
 
-    auto transform = TRY(create_h264_encoder_transform());
+    auto output_subtype = output_subtype_for_codec(config.codec_id);
+    if (!output_subtype.has_value())
+        return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Unsupported Media Foundation video encoder codec"sv);
+
+    auto transform = TRY(create_encoder_transform(config.codec_id));
 
     ComPtr<ICodecAPI> codec_api;
     (void)transform.As(&codec_api);
@@ -265,45 +324,47 @@ DecoderErrorOr<NonnullOwnPtr<WindowsMediaFoundationVideoEncoder>> WindowsMediaFo
     set_codec_api_ui4(codec_api.Get(), CODECAPI_AVEncCommonMeanBitRate, config.bitrate_bps);
     set_codec_api_ui4(codec_api.Get(), CODECAPI_AVEncMPVGOPSize, config.keyframe_interval_frames);
     set_codec_api_bool(codec_api.Get(), CODECAPI_AVLowLatencyMode, true);
-    set_codec_api_ui4(codec_api.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+    if (config.codec_id == CodecID::H264)
+        set_codec_api_ui4(codec_api.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
 
-    // CMSH264EncoderMFT requires SetOutputType BEFORE SetInputType.
+    // MFT encoders require SetOutputType BEFORE SetInputType.
     ComPtr<IMFMediaType> output_type;
     if (FAILED(MFCreateMediaType(&output_type)))
-        return DecoderError::with_description(DecoderErrorCategory::Memory, "Failed to allocate H.264 encoder output media type"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Memory, "Failed to allocate video encoder output media type"sv);
     if (FAILED(output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))
-        || FAILED(output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264))
+        || FAILED(output_type->SetGUID(MF_MT_SUBTYPE, *output_subtype))
         || FAILED(output_type->SetUINT32(MF_MT_AVG_BITRATE, config.bitrate_bps))
         || FAILED(MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, config.framerate, 1))
         || FAILED(MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, config.width, config.height))
         || FAILED(output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive))) {
-        return DecoderError::with_description(DecoderErrorCategory::Invalid, "Failed to populate H.264 encoder output media type"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Invalid, "Failed to populate video encoder output media type"sv);
     }
-    (void)output_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+    if (config.codec_id == CodecID::H264)
+        (void)output_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
 
     auto output_hr = transform->SetOutputType(0, output_type.Get(), 0);
     if (FAILED(output_hr))
-        return DecoderError::format(DecoderErrorCategory::Invalid, "H.264 encoder rejected output media type: {:#x}", static_cast<u32>(output_hr));
+        return DecoderError::format(DecoderErrorCategory::Invalid, "Video encoder rejected output media type: {:#x}", static_cast<u32>(output_hr));
 
     ComPtr<IMFMediaType> input_type;
     if (FAILED(MFCreateMediaType(&input_type)))
-        return DecoderError::with_description(DecoderErrorCategory::Memory, "Failed to allocate H.264 encoder input media type"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Memory, "Failed to allocate video encoder input media type"sv);
     if (FAILED(input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))
         || FAILED(input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12))
         || FAILED(MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, config.width, config.height))
         || FAILED(MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, config.framerate, 1))
         || FAILED(input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive))) {
-        return DecoderError::with_description(DecoderErrorCategory::Invalid, "Failed to populate H.264 encoder input media type"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Invalid, "Failed to populate video encoder input media type"sv);
     }
 
     auto input_hr = transform->SetInputType(0, input_type.Get(), 0);
     if (FAILED(input_hr))
-        return DecoderError::format(DecoderErrorCategory::Invalid, "H.264 encoder rejected NV12 input media type: {:#x}", static_cast<u32>(input_hr));
+        return DecoderError::format(DecoderErrorCategory::Invalid, "Video encoder rejected NV12 input media type: {:#x}", static_cast<u32>(input_hr));
 
-    if (FAILED(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0))
-        || FAILED(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) {
-        return DecoderError::with_description(DecoderErrorCategory::Unknown, "H.264 encoder failed to start streaming"sv);
-    }
+    auto begin_hr = transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    auto start_hr = transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if ((FAILED(begin_hr) && begin_hr != E_NOTIMPL) || (FAILED(start_hr) && start_hr != E_NOTIMPL))
+        return DecoderError::with_description(DecoderErrorCategory::Unknown, "Video encoder failed to start streaming"sv);
 
     auto state = DECODER_TRY_ALLOC(adopt_nonnull_own_or_enomem(new (nothrow) State));
     state->transform = move(transform);
@@ -318,16 +379,18 @@ DecoderErrorOr<NonnullOwnPtr<WindowsMediaFoundationVideoEncoder>> WindowsMediaFo
         state->output_info.sample_byte_count = max<u32>(256u * 1024u, config.width * config.height);
     }
 
-    // Seed cached parameter sets if the encoder already exposes MF_MT_MPEG_SEQUENCE_HEADER.
-    ComPtr<IMFMediaType> negotiated_output_type;
-    if (SUCCEEDED(state->transform->GetOutputCurrentType(0, &negotiated_output_type)) && negotiated_output_type) {
-        UINT32 seq_header_len = 0;
-        if (SUCCEEDED(negotiated_output_type->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &seq_header_len)) && seq_header_len > 0) {
-            if (auto header_buf = ByteBuffer::create_uninitialized(seq_header_len); !header_buf.is_error()) {
-                if (SUCCEEDED(negotiated_output_type->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, header_buf.value().data(), seq_header_len, &seq_header_len))) {
-                    auto inspection = inspect_annex_b_nalus(header_buf.value().bytes());
-                    if (!inspection.parameter_sets.is_empty())
-                        state->cached_parameter_sets = move(inspection.parameter_sets);
+    // Seed cached parameter sets if the H.264 encoder already exposes MF_MT_MPEG_SEQUENCE_HEADER.
+    if (config.codec_id == CodecID::H264) {
+        ComPtr<IMFMediaType> negotiated_output_type;
+        if (SUCCEEDED(state->transform->GetOutputCurrentType(0, &negotiated_output_type)) && negotiated_output_type) {
+            UINT32 seq_header_len = 0;
+            if (SUCCEEDED(negotiated_output_type->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &seq_header_len)) && seq_header_len > 0) {
+                if (auto header_buf = ByteBuffer::create_uninitialized(seq_header_len); !header_buf.is_error()) {
+                    if (SUCCEEDED(negotiated_output_type->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, header_buf.value().data(), seq_header_len, &seq_header_len))) {
+                        auto inspection = inspect_annex_b_nalus(header_buf.value().bytes());
+                        if (!inspection.parameter_sets.is_empty())
+                            state->cached_parameter_sets = move(inspection.parameter_sets);
+                    }
                 }
             }
         }
@@ -416,9 +479,10 @@ DecoderErrorOr<void> WindowsMediaFoundationVideoEncoder::encode_pixels_internal(
 
 DecoderErrorOr<void> WindowsMediaFoundationVideoEncoder::drain(Vector<EncodedVideoPacket>& out_packets)
 {
-    if (FAILED(m_state->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0))
+    auto eos_hr = m_state->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+    if ((FAILED(eos_hr) && eos_hr != E_NOTIMPL)
         || FAILED(m_state->transform->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0))) {
-        return DecoderError::with_description(DecoderErrorCategory::Unknown, "H.264 encoder drain message failed"sv);
+        return DecoderError::with_description(DecoderErrorCategory::Unknown, "Video encoder drain message failed"sv);
     }
     return collect_outputs(out_packets);
 }
@@ -461,14 +525,21 @@ DecoderErrorOr<void> WindowsMediaFoundationVideoEncoder::collect_outputs(Vector<
         bool is_clean_point = SUCCEEDED(sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point)) && clean_point != 0;
 
         ReadonlyBytes raw_bytes { data_ptr, data_len };
-        auto inspection = inspect_annex_b_nalus(raw_bytes);
-        if (inspection.has_sps && inspection.has_pps && !inspection.parameter_sets.is_empty())
-            m_state->cached_parameter_sets = inspection.parameter_sets;
-
-        bool is_keyframe = is_clean_point || inspection.has_idr || (inspection.has_sps && inspection.has_pps);
+        bool is_keyframe = false;
         ByteBuffer payload;
-        if (is_keyframe && !(inspection.has_sps && inspection.has_pps) && !m_state->cached_parameter_sets.is_empty())
-            DECODER_TRY_ALLOC(payload.try_append(m_state->cached_parameter_sets));
+        if (m_state->config.codec_id == CodecID::H264) {
+            auto inspection = inspect_annex_b_nalus(raw_bytes);
+            if (inspection.has_sps && inspection.has_pps && !inspection.parameter_sets.is_empty())
+                m_state->cached_parameter_sets = inspection.parameter_sets;
+
+            is_keyframe = is_clean_point || inspection.has_idr || (inspection.has_sps && inspection.has_pps);
+            if (is_keyframe && !(inspection.has_sps && inspection.has_pps) && !m_state->cached_parameter_sets.is_empty())
+                DECODER_TRY_ALLOC(payload.try_append(m_state->cached_parameter_sets));
+        } else if (m_state->config.codec_id == CodecID::VP8) {
+            is_keyframe = is_clean_point || (!raw_bytes.is_empty() && (raw_bytes[0] & 0x01) == 0);
+        } else {
+            is_keyframe = is_clean_point;
+        }
         DECODER_TRY_ALLOC(payload.try_append(raw_bytes));
 
         DECODER_TRY_ALLOC(out_packets.try_append(EncodedVideoPacket {

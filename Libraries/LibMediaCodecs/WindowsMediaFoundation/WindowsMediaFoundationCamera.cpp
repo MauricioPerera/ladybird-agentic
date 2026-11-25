@@ -6,18 +6,35 @@
 
 #include <AK/Atomic.h>
 #include <AK/ByteString.h>
+#include <AK/HashMap.h>
 #include <AK/Mutex.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/NumericLimits.h>
 #include <AK/ScopeGuard.h>
 #include <LibGfx/Bitmap.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundation.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationCamera.h>
 
+#include <math.h>
 #include <mfreadwrite.h>
 
 namespace Media::WindowsMediaFoundation {
 
-struct CameraWorkerState final : public AtomicRefCounted<CameraWorkerState> {
+struct CameraSubscriber final : public AtomicRefCounted<CameraSubscriber> {
     AK_ALLOC_WITH_KMALLOC;
+
+    u64 id { 0 };
+    Mutex callback_mutex;
+    VideoCaptureStream::FrameCallback on_frame;
+    VideoCaptureStream::ErrorCallback on_ended;
+    Atomic<bool> stopped { false };
+    Atomic<bool> ended_notified { false };
+};
+
+struct SharedCameraSession final : public AtomicRefCounted<SharedCameraSession> {
+    AK_ALLOC_WITH_KMALLOC;
+
+    String canonical_device_id;
 
     Mutex state_mutex;
     ComPtr<IMFMediaSource> source;
@@ -28,28 +45,64 @@ struct CameraWorkerState final : public AtomicRefCounted<CameraWorkerState> {
     i32 default_stride { 0 };
     double frame_rate { 30.0 };
 
-    Mutex callback_mutex;
-    VideoCaptureStream::FrameCallback on_frame;
-    VideoCaptureStream::ErrorCallback on_ended;
+    Mutex subscribers_mutex;
+    Vector<NonnullRefPtr<CameraSubscriber>> subscribers;
 
     Atomic<bool> stop_requested { false };
     Atomic<bool> is_running { false };
     Atomic<bool> logged_first_frame { false };
     Atomic<bool> logged_convert_failure { false };
+
+    void shutdown_hardware()
+    {
+        stop_requested.store(true, AK::MemoryOrder::memory_order_release);
+        is_running.store(false, AK::MemoryOrder::memory_order_release);
+
+        ComPtr<IMFSourceReader> local_reader;
+        ComPtr<IMFMediaSource> local_source;
+        {
+            MutexLocker state_locker(state_mutex);
+            local_reader = move(reader);
+            local_source = move(source);
+        }
+
+        if (local_reader) {
+            (void)local_reader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+            local_reader.Reset();
+        }
+        if (local_source) {
+            (void)local_source->Shutdown();
+            local_source.Reset();
+        }
+    }
 };
 
 struct VideoCaptureStream::Impl {
     AK_ALLOC_WITH_KMALLOC;
 
-    NonnullRefPtr<CameraWorkerState> worker;
+    NonnullRefPtr<SharedCameraSession> session;
+    NonnullRefPtr<CameraSubscriber> subscriber;
 
-    explicit Impl(NonnullRefPtr<CameraWorkerState> w)
-        : worker(move(w))
+    Impl(NonnullRefPtr<SharedCameraSession> s, NonnullRefPtr<CameraSubscriber> sub)
+        : session(move(s))
+        , subscriber(move(sub))
     {
     }
 };
 
 namespace {
+
+struct CameraHub {
+    Mutex mutex;
+    HashMap<String, NonnullRefPtr<SharedCameraSession>> sessions;
+    Atomic<u64> next_subscriber_id { 1 };
+};
+
+CameraHub& camera_hub()
+{
+    static NeverDestroyed<CameraHub> s_hub;
+    return *s_hub;
+}
 
 Optional<String> utf16_alloc_string_to_utf8(WCHAR const* wide, UINT32 length)
 {
@@ -193,10 +246,79 @@ HRESULT try_configure_reader_output(IMFSourceReader& reader, GUID const& subtype
     return reader.SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, media_type.Get());
 }
 
+struct NativeMediaSelection {
+    u32 width { 0 };
+    u32 height { 0 };
+};
+
+NativeMediaSelection try_select_native_media_type(IMFSourceReader& reader, u32 requested_width, u32 requested_height, u32 requested_fps)
+{
+    u32 target_width = requested_width > 0 ? requested_width : 640;
+    u32 target_height = requested_height > 0 ? requested_height : 480;
+    double target_fps = requested_fps > 0 ? static_cast<double>(requested_fps) : 30.0;
+
+    ComPtr<IMFMediaType> best_type;
+    u32 best_width = 0;
+    u32 best_height = 0;
+    i64 best_score = NumericLimits<i64>::max();
+
+    for (DWORD index = 0;; ++index) {
+        ComPtr<IMFMediaType> candidate;
+        HRESULT hr = reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, index, &candidate);
+        if (FAILED(hr) || !candidate)
+            break;
+
+        UINT32 w = 0;
+        UINT32 h = 0;
+        if (FAILED(MFGetAttributeSize(candidate.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0)
+            continue;
+
+        GUID subtype = GUID_NULL;
+        (void)candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
+
+        i64 w_diff = static_cast<i64>(w) - static_cast<i64>(target_width);
+        i64 h_diff = static_cast<i64>(h) - static_cast<i64>(target_height);
+        i64 dim_cost = (w_diff < 0 ? -w_diff : w_diff) + (h_diff < 0 ? -h_diff : h_diff);
+        if (target_width <= 640 && target_height <= 480 && (w > 1280 || h > 720))
+            dim_cost += 5000;
+
+        i64 fps_cost = 0;
+        UINT32 fps_num = 0;
+        UINT32 fps_den = 0;
+        if (SUCCEEDED(MFGetAttributeRatio(candidate.Get(), MF_MT_FRAME_RATE, &fps_num, &fps_den)) && fps_num > 0 && fps_den > 0) {
+            double mt_fps = static_cast<double>(fps_num) / static_cast<double>(fps_den);
+            if (mt_fps < 15.0)
+                fps_cost += 2000;
+            fps_cost += static_cast<i64>(fabs(mt_fps - target_fps) * 10.0);
+        }
+
+        i64 subtype_cost = 100;
+        if (subtype == MFVideoFormat_NV12 || subtype == MFVideoFormat_YUY2 || subtype == MFVideoFormat_RGB32)
+            subtype_cost = 0;
+        else if (subtype == MFVideoFormat_MJPG)
+            subtype_cost = 20;
+
+        i64 score = dim_cost * 10 + fps_cost + subtype_cost;
+        if (score < best_score) {
+            best_score = score;
+            best_type = move(candidate);
+            best_width = w;
+            best_height = h;
+        }
+    }
+
+    if (best_type) {
+        if (SUCCEEDED(reader.SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, best_type.Get())))
+            return { best_width, best_height };
+    }
+
+    return {};
+}
+
 class SourceReaderCallback final : public IMFSourceReaderCallback {
 public:
-    explicit SourceReaderCallback(NonnullRefPtr<CameraWorkerState> worker)
-        : m_worker(move(worker))
+    explicit SourceReaderCallback(NonnullRefPtr<SharedCameraSession> session)
+        : m_session(move(session))
     {
     }
 
@@ -228,20 +350,12 @@ public:
 
     STDMETHODIMP OnReadSample(HRESULT hr_status, DWORD, DWORD stream_flags, LONGLONG, IMFSample* sample) override
     {
-        if (m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
+        if (m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
             return S_OK;
 
         if (FAILED(hr_status) || (stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) != 0) {
             dbgln("WMF camera: OnReadSample ended hr=0x{:08x} flags=0x{:x}", static_cast<u32>(hr_status), static_cast<u32>(stream_flags));
-            m_worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
-            VideoCaptureStream::ErrorCallback ended_cb;
-            {
-                MutexLocker cb_locker(m_worker->callback_mutex);
-                ended_cb = move(m_worker->on_ended);
-                m_worker->on_frame = nullptr;
-            }
-            if (ended_cb && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
-                ended_cb();
+            notify_session_ended();
             return S_OK;
         }
 
@@ -251,8 +365,8 @@ public:
         i32 stride = 0;
         ComPtr<IMFSourceReader> reader;
         {
-            MutexLocker state_locker(m_worker->state_mutex);
-            reader = m_worker->reader;
+            MutexLocker state_locker(m_session->state_mutex);
+            reader = m_session->reader;
             if ((stream_flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0 && reader) {
                 ComPtr<IMFMediaType> updated_type;
                 if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &updated_type)) && updated_type) {
@@ -260,23 +374,23 @@ public:
                     UINT32 new_h = 0;
                     GUID new_sub = GUID_NULL;
                     if (SUCCEEDED(MFGetAttributeSize(updated_type.Get(), MF_MT_FRAME_SIZE, &new_w, &new_h)) && new_w > 0 && new_h > 0) {
-                        m_worker->width = new_w;
-                        m_worker->height = new_h;
+                        m_session->width = new_w;
+                        m_session->height = new_h;
                     }
                     if (SUCCEEDED(updated_type->GetGUID(MF_MT_SUBTYPE, &new_sub)))
-                        m_worker->subtype = new_sub;
+                        m_session->subtype = new_sub;
                     UINT32 new_stride = 0;
                     if (SUCCEEDED(updated_type->GetUINT32(MF_MT_DEFAULT_STRIDE, &new_stride)))
-                        m_worker->default_stride = static_cast<i32>(new_stride);
+                        m_session->default_stride = static_cast<i32>(new_stride);
                 }
             }
-            subtype = m_worker->subtype;
-            width = m_worker->width;
-            height = m_worker->height;
-            stride = m_worker->default_stride;
+            subtype = m_session->subtype;
+            width = m_session->width;
+            height = m_session->height;
+            stride = m_session->default_stride;
         }
 
-        if (sample && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+        if (sample && !m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
             ComPtr<IMFMediaBuffer> contiguous;
             if (SUCCEEDED(sample->ConvertToContiguousBuffer(&contiguous)) && contiguous) {
                 BYTE* ptr = nullptr;
@@ -287,33 +401,37 @@ public:
                         frame = convert_sample_to_frame({ ptr, len }, subtype, width, height, stride);
                     (void)contiguous->Unlock();
 
-                    if (!frame.has_value() && !m_worker->logged_convert_failure.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
+                    if (!frame.has_value() && !m_session->logged_convert_failure.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
                         dbgln("WMF camera: convert_sample_to_frame failed len={} {}x{} stride={}", len, width, height, stride);
 
-                    if (frame.has_value() && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
-                        if (!m_worker->logged_first_frame.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
+                    if (frame.has_value() && !m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+                        if (!m_session->logged_first_frame.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
                             dbgln("WMF camera: first frame delivered {}x{}", frame->width(), frame->height());
-                        MutexLocker cb_locker(m_worker->callback_mutex);
-                        if (m_worker->on_frame && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
-                            m_worker->on_frame(frame.release_value());
+
+                        Vector<NonnullRefPtr<CameraSubscriber>> subscribers;
+                        {
+                            MutexLocker sub_locker(m_session->subscribers_mutex);
+                            subscribers = m_session->subscribers;
+                        }
+                        for (auto const& subscriber : subscribers) {
+                            if (subscriber->stopped.load(AK::MemoryOrder::memory_order_acquire)
+                                || m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+                                continue;
+                            }
+                            MutexLocker cb_locker(subscriber->callback_mutex);
+                            if (subscriber->on_frame && !subscriber->stopped.load(AK::MemoryOrder::memory_order_acquire))
+                                subscriber->on_frame(*frame);
+                        }
                     }
                 }
             }
         }
 
-        if (!m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire) && reader) {
+        if (!m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire) && reader) {
             HRESULT next_hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
-            if (FAILED(next_hr) && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+            if (FAILED(next_hr) && !m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
                 dbgln("WMF camera: next ReadSample failed hr=0x{:08x}", static_cast<u32>(next_hr));
-                m_worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
-                VideoCaptureStream::ErrorCallback ended_cb;
-                {
-                    MutexLocker cb_locker(m_worker->callback_mutex);
-                    ended_cb = move(m_worker->on_ended);
-                    m_worker->on_frame = nullptr;
-                }
-                if (ended_cb)
-                    ended_cb();
+                notify_session_ended();
             }
         }
 
@@ -333,8 +451,42 @@ public:
 private:
     ~SourceReaderCallback() = default;
 
+    void notify_session_ended()
+    {
+        m_session->is_running.store(false, AK::MemoryOrder::memory_order_release);
+
+        {
+            MutexLocker hub_locker(camera_hub().mutex);
+            if (auto existing = camera_hub().sessions.get(m_session->canonical_device_id);
+                existing.has_value() && existing.value() == m_session.ptr()) {
+                camera_hub().sessions.remove(m_session->canonical_device_id);
+            }
+        }
+
+        Vector<NonnullRefPtr<CameraSubscriber>> subscribers;
+        {
+            MutexLocker sub_locker(m_session->subscribers_mutex);
+            subscribers = move(m_session->subscribers);
+        }
+
+        for (auto const& subscriber : subscribers) {
+            if (subscriber->stopped.load(AK::MemoryOrder::memory_order_acquire)
+                || subscriber->ended_notified.exchange(true, AK::MemoryOrder::memory_order_acq_rel)) {
+                continue;
+            }
+            VideoCaptureStream::ErrorCallback ended_cb;
+            {
+                MutexLocker cb_locker(subscriber->callback_mutex);
+                ended_cb = move(subscriber->on_ended);
+                subscriber->on_frame = nullptr;
+            }
+            if (ended_cb && !m_session->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
+                ended_cb();
+        }
+    }
+
     Atomic<ULONG> m_ref_count { 1 };
-    NonnullRefPtr<CameraWorkerState> m_worker;
+    NonnullRefPtr<SharedCameraSession> m_session;
 };
 
 }
@@ -391,9 +543,49 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
     FrameCallback on_frame,
     ErrorCallback on_ended)
 {
-    (void)requested_fps;
     if (!ensure_media_foundation_started())
         return Error::from_string_literal("Media Foundation could not be started");
+
+    auto subscriber = TRY(try_make_ref_counted<CameraSubscriber>());
+    subscriber->id = camera_hub().next_subscriber_id.fetch_add(1, AK::MemoryOrder::memory_order_relaxed);
+    subscriber->on_frame = move(on_frame);
+    subscriber->on_ended = move(on_ended);
+
+    auto try_attach_existing_session = [&](StringView lookup_id) -> RefPtr<SharedCameraSession> {
+        if (lookup_id.is_empty())
+            return nullptr;
+        MutexLocker hub_locker(camera_hub().mutex);
+        auto existing = camera_hub().sessions.get(lookup_id);
+        if (!existing.has_value())
+            return nullptr;
+        auto session = *existing;
+        if (session->stop_requested.load(AK::MemoryOrder::memory_order_acquire)
+            || !session->is_running.load(AK::MemoryOrder::memory_order_acquire)) {
+            return nullptr;
+        }
+        size_t subscriber_count = 0;
+        {
+            MutexLocker sub_locker(session->subscribers_mutex);
+            session->subscribers.append(subscriber);
+            subscriber_count = session->subscribers.size();
+        }
+        u32 w = 0;
+        u32 h = 0;
+        {
+            MutexLocker state_locker(session->state_mutex);
+            w = session->width;
+            h = session->height;
+        }
+        dbgln("WMF camera: reusing shared session {} ({}x{}, subscribers={})", session->canonical_device_id, w, h, subscriber_count);
+        return session;
+    };
+
+    if (!device_id.is_empty()) {
+        if (auto reused = try_attach_existing_session(device_id)) {
+            auto impl = TRY(adopt_nonnull_own_or_enomem(new (nothrow) Impl(reused.release_nonnull(), subscriber)));
+            return TRY(adopt_nonnull_ref_or_enomem(new (nothrow) VideoCaptureStream(move(impl))));
+        }
+    }
 
     ComPtr<IMFAttributes> attributes;
     if (FAILED(MFCreateAttributes(&attributes, 1))
@@ -415,9 +607,18 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
     if (count == 0)
         return Error::from_errno(ENOENT);
 
+    auto canonical_id_for_index = [&](UINT32 index) -> String {
+        auto sym_link = read_allocated_string_attribute(*activates[index], MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+        return sym_link.has_value() && !sym_link->is_empty()
+            ? MUST(String::formatted("wmf:video:{}", *sym_link))
+            : MUST(String::formatted("wmf:video:index:{}", index));
+    };
+
     Optional<UINT32> selected_index;
+    String canonical_device_id;
     if (device_id.is_empty()) {
         selected_index = 0;
+        canonical_device_id = canonical_id_for_index(0);
     } else {
         for (UINT32 i = 0; i < count; ++i) {
             auto sym_link = read_allocated_string_attribute(*activates[i], MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
@@ -426,6 +627,7 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
                 : MUST(String::formatted("wmf:video:index:{}", i));
             if (candidate_id == device_id || (sym_link.has_value() && sym_link.value() == device_id)) {
                 selected_index = i;
+                canonical_device_id = move(candidate_id);
                 break;
             }
         }
@@ -434,19 +636,20 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
     if (!selected_index.has_value())
         return Error::from_errno(ENOENT);
 
+    if (auto reused = try_attach_existing_session(canonical_device_id)) {
+        auto impl = TRY(adopt_nonnull_own_or_enomem(new (nothrow) Impl(reused.release_nonnull(), subscriber)));
+        return TRY(adopt_nonnull_ref_or_enomem(new (nothrow) VideoCaptureStream(move(impl))));
+    }
+
     ComPtr<IMFMediaSource> source;
     if (FAILED(activates[*selected_index]->ActivateObject(IID_PPV_ARGS(&source))) || !source)
         return Error::from_errno(EIO);
 
-    auto worker = TRY(try_make_ref_counted<CameraWorkerState>());
-    {
-        MutexLocker cb_locker(worker->callback_mutex);
-        worker->on_frame = move(on_frame);
-        worker->on_ended = move(on_ended);
-    }
+    auto session = TRY(try_make_ref_counted<SharedCameraSession>());
+    session->canonical_device_id = canonical_device_id;
 
     ComPtr<SourceReaderCallback> callback;
-    callback.Attach(new (nothrow) SourceReaderCallback(worker));
+    callback.Attach(new (nothrow) SourceReaderCallback(session));
     if (!callback) {
         (void)source->Shutdown();
         return Error::from_errno(ENOMEM);
@@ -469,7 +672,11 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
     (void)reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     (void)reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
 
-    HRESULT format_hr = try_configure_reader_output(*reader.Get(), MFVideoFormat_RGB32, requested_width, requested_height);
+    auto native_selection = try_select_native_media_type(*reader.Get(), requested_width, requested_height, requested_fps);
+    u32 output_width = native_selection.width > 0 ? native_selection.width : requested_width;
+    u32 output_height = native_selection.height > 0 ? native_selection.height : requested_height;
+
+    HRESULT format_hr = try_configure_reader_output(*reader.Get(), MFVideoFormat_RGB32, output_width, output_height);
     if (FAILED(format_hr))
         format_hr = try_configure_reader_output(*reader.Get(), MFVideoFormat_RGB32, 0, 0);
     if (FAILED(format_hr))
@@ -509,34 +716,59 @@ ErrorOr<NonnullRefPtr<VideoCaptureStream>> VideoCaptureStream::create(
         fps = static_cast<double>(fps_num) / static_cast<double>(fps_den);
 
     {
-        MutexLocker state_locker(worker->state_mutex);
-        worker->source = source;
-        worker->reader = reader;
-        worker->subtype = actual_subtype;
-        worker->width = actual_width;
-        worker->height = actual_height;
-        worker->default_stride = default_stride;
-        worker->frame_rate = fps;
+        MutexLocker state_locker(session->state_mutex);
+        session->source = source;
+        session->reader = reader;
+        session->subtype = actual_subtype;
+        session->width = actual_width;
+        session->height = actual_height;
+        session->default_stride = default_stride;
+        session->frame_rate = fps;
     }
 
-    worker->is_running.store(true, AK::MemoryOrder::memory_order_release);
+    RefPtr<SharedCameraSession> raced_session;
+    {
+        MutexLocker hub_locker(camera_hub().mutex);
+        if (auto existing = camera_hub().sessions.get(canonical_device_id);
+            existing.has_value()
+            && !(*existing)->stop_requested.load(AK::MemoryOrder::memory_order_acquire)
+            && (*existing)->is_running.load(AK::MemoryOrder::memory_order_acquire)) {
+            raced_session = *existing;
+            MutexLocker sub_locker(raced_session->subscribers_mutex);
+            raced_session->subscribers.append(subscriber);
+        } else {
+            MutexLocker sub_locker(session->subscribers_mutex);
+            session->subscribers.append(subscriber);
+            session->is_running.store(true, AK::MemoryOrder::memory_order_release);
+            camera_hub().sessions.set(canonical_device_id, session);
+        }
+    }
+
+    if (raced_session) {
+        session->shutdown_hardware();
+        auto impl = TRY(adopt_nonnull_own_or_enomem(new (nothrow) Impl(raced_session.release_nonnull(), subscriber)));
+        return TRY(adopt_nonnull_ref_or_enomem(new (nothrow) VideoCaptureStream(move(impl))));
+    }
+
+    dbgln("WMF camera: opened {}x{} @ {:.1f}fps", actual_width, actual_height, fps);
     HRESULT read_hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
     if (FAILED(read_hr)) {
-        worker->stop_requested.store(true, AK::MemoryOrder::memory_order_release);
-        worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
         {
-            MutexLocker state_locker(worker->state_mutex);
-            worker->reader.Reset();
-            worker->source.Reset();
+            MutexLocker hub_locker(camera_hub().mutex);
+            if (auto existing = camera_hub().sessions.get(canonical_device_id);
+                existing.has_value() && existing.value() == session.ptr()) {
+                camera_hub().sessions.remove(canonical_device_id);
+            }
         }
-        (void)reader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-        reader.Reset();
-        (void)source->Shutdown();
-        source.Reset();
+        {
+            MutexLocker sub_locker(session->subscribers_mutex);
+            session->subscribers.clear();
+        }
+        session->shutdown_hardware();
         return Error::from_errno(EIO);
     }
 
-    auto impl = TRY(adopt_nonnull_own_or_enomem(new (nothrow) Impl(worker)));
+    auto impl = TRY(adopt_nonnull_own_or_enomem(new (nothrow) Impl(move(session), move(subscriber))));
     return TRY(adopt_nonnull_ref_or_enomem(new (nothrow) VideoCaptureStream(move(impl))));
 }
 
@@ -552,54 +784,57 @@ VideoCaptureStream::~VideoCaptureStream()
 
 void VideoCaptureStream::stop()
 {
-    m_impl->worker->stop_requested.store(true, AK::MemoryOrder::memory_order_release);
-    m_impl->worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
+    auto const& subscriber = m_impl->subscriber;
+    auto const& session = m_impl->session;
+    if (subscriber->stopped.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
+        return;
 
     {
-        MutexLocker cb_locker(m_impl->worker->callback_mutex);
-        m_impl->worker->on_frame = nullptr;
-        m_impl->worker->on_ended = nullptr;
+        MutexLocker cb_locker(subscriber->callback_mutex);
+        subscriber->on_frame = nullptr;
+        subscriber->on_ended = nullptr;
     }
 
-    ComPtr<IMFSourceReader> reader;
-    ComPtr<IMFMediaSource> source;
+    bool should_shutdown = false;
     {
-        MutexLocker state_locker(m_impl->worker->state_mutex);
-        reader = move(m_impl->worker->reader);
-        source = move(m_impl->worker->source);
+        MutexLocker hub_locker(camera_hub().mutex);
+        MutexLocker sub_locker(session->subscribers_mutex);
+        session->subscribers.remove_first_matching([&](auto const& existing) { return existing.ptr() == subscriber.ptr(); });
+        if (session->subscribers.is_empty()) {
+            if (auto existing = camera_hub().sessions.get(session->canonical_device_id);
+                existing.has_value() && existing.value() == session.ptr()) {
+                camera_hub().sessions.remove(session->canonical_device_id);
+            }
+            should_shutdown = true;
+        }
     }
 
-    if (reader) {
-        (void)reader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-        reader.Reset();
-    }
-    if (source) {
-        (void)source->Shutdown();
-        source.Reset();
-    }
+    if (should_shutdown)
+        session->shutdown_hardware();
 }
 
 u32 VideoCaptureStream::width() const
 {
-    MutexLocker state_locker(m_impl->worker->state_mutex);
-    return m_impl->worker->width;
+    MutexLocker state_locker(m_impl->session->state_mutex);
+    return m_impl->session->width;
 }
 
 u32 VideoCaptureStream::height() const
 {
-    MutexLocker state_locker(m_impl->worker->state_mutex);
-    return m_impl->worker->height;
+    MutexLocker state_locker(m_impl->session->state_mutex);
+    return m_impl->session->height;
 }
 
 double VideoCaptureStream::frame_rate() const
 {
-    MutexLocker state_locker(m_impl->worker->state_mutex);
-    return m_impl->worker->frame_rate;
+    MutexLocker state_locker(m_impl->session->state_mutex);
+    return m_impl->session->frame_rate;
 }
 
 bool VideoCaptureStream::is_running() const
 {
-    return m_impl->worker->is_running.load(AK::MemoryOrder::memory_order_acquire);
+    return !m_impl->subscriber->stopped.load(AK::MemoryOrder::memory_order_acquire)
+        && m_impl->session->is_running.load(AK::MemoryOrder::memory_order_acquire);
 }
 
 }

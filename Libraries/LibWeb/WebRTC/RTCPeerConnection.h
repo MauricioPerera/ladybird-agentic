@@ -135,7 +135,7 @@ public:
     void on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload);
     void on_encoded_video_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload);
     void on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc);
-    void on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc);
+    void on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc, String mime_type);
     void on_video_keyframe_requested(u64 sender_id);
     void on_create_offer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
     void on_create_answer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
@@ -296,6 +296,7 @@ private:
 
         RefPtr<MediaCapture::VideoFrameSink> sink;
         GC::Ptr<MediaCapture::MediaStreamTrack> track;
+        Media::CodecID codec_id {};
 #ifdef AK_OS_WINDOWS
         OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder> encoder;
 #endif
@@ -303,12 +304,14 @@ private:
         Optional<MonotonicTime> last_frame_time;
         AK::Duration next_timestamp { AK::Duration::zero() };
         bool force_keyframe { true };
+        bool encoder_failed { false };
         u32 encoded_width { 0 };
         u32 encoded_height { 0 };
     };
     HashMap<u64, NonnullOwnPtr<OutgoingVideoPipeline>> m_outgoing_video_pipelines;
     HashTable<u64> m_requested_video_senders;
     HashTable<u64> m_ready_video_senders;
+    HashMap<u64, Media::CodecID> m_video_sender_codecs;
     void start_outgoing_video_for_sender(GC::Ref<RTCRtpSender>);
     void encode_and_send_outgoing_video_frame(u64 sender_id, Gfx::DecodedImageFrame);
 };

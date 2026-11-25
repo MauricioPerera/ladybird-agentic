@@ -225,6 +225,12 @@ RTCRtpSendParameters RTCRtpSender::get_parameters()
             opus.payload_type = 111;
             result.codecs.append(move(opus));
         } else {
+            RTCRtpCodecParameters vp8;
+            vp8.clock_rate = 90000;
+            vp8.mime_type = "video/VP8"_utf16;
+            vp8.payload_type = 96;
+            result.codecs.append(move(vp8));
+
             RTCRtpCodecParameters h264;
             h264.clock_rate = 90000;
             h264.mime_type = "video/H264"_utf16;

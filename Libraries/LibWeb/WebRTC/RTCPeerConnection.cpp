@@ -237,6 +237,7 @@ void RTCPeerConnection::close_the_connection_algorithm(bool disappear)
     m_outgoing_video_pipelines.clear();
     m_requested_video_senders.clear();
     m_ready_video_senders.clear();
+    m_video_sender_codecs.clear();
     m_last_operation = nullptr;
     m_pending_void_requests.clear();
     m_pending_description_requests.clear();
@@ -1302,6 +1303,7 @@ void RTCPeerConnection::stop_sender(RTCRtpSender& sender)
     m_ready_audio_senders.remove(id);
     m_requested_video_senders.remove(id);
     m_ready_video_senders.remove(id);
+    m_video_sender_codecs.remove(id);
 }
 
 WebIDL::ExceptionOr<void> RTCPeerConnection::remove_track(GC::Ref<RTCRtpSender> sender)
@@ -1363,8 +1365,15 @@ void RTCPeerConnection::on_sender_track_changed(RTCRtpSender& sender)
         if (m_requested_video_senders.contains(sender_id))
             return;
         m_requested_video_senders.set(sender_id);
+#ifdef AK_OS_WINDOWS
+        auto preferred_mime = Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder::is_codec_supported(Media::CodecID::VP8)
+            ? "auto"_string
+            : "video/H264"_string;
+#else
+        auto preferred_mime = "video/H264"_string;
+#endif
         if (auto* client = WebRTCAgent::the().existing_client())
-            client->async_add_video_track(m_pc_id, sender_id, "video/H264"_string);
+            client->async_add_video_track(m_pc_id, sender_id, move(preferred_mime));
     }
 }
 
@@ -1392,7 +1401,9 @@ void RTCPeerConnection::on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc)
     start_outgoing_audio_for_sender(*sender);
 }
 
-void RTCPeerConnection::on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc)
+static Media::CodecID codec_id_from_video_mime_type(StringView mime_type);
+
+void RTCPeerConnection::on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc, String mime_type)
 {
     if (m_is_closed)
         return;
@@ -1411,6 +1422,11 @@ void RTCPeerConnection::on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc)
         return;
     if (ssrc != 0)
         sender->set_ssrc(ssrc);
+    auto codec_id = codec_id_from_video_mime_type(mime_type);
+    if (codec_id == Media::CodecID::Unknown)
+        codec_id = Media::CodecID::H264;
+    m_video_sender_codecs.set(sender_id, codec_id);
+    dbgln("RTCPeerConnection: video sender_id={} ready ssrc={} codec={}", sender_id, ssrc, mime_type);
     m_ready_video_senders.set(sender_id);
     if (m_outgoing_video_pipelines.contains(sender_id))
         return;
@@ -1438,6 +1454,7 @@ void RTCPeerConnection::start_outgoing_video_for_sender(GC::Ref<RTCRtpSender> se
     auto producer = adopt_ref(*new OutgoingVideoProducerState);
     pipeline->generation = WebRTCAgent::the().next_request_id();
     pipeline->track = track;
+    pipeline->codec_id = m_video_sender_codecs.get(sender_id).value_or(Media::CodecID::H264);
     pipeline->force_keyframe = true;
 
     auto main_loop_weak = Core::EventLoop::current_weak();
@@ -1491,7 +1508,10 @@ void RTCPeerConnection::encode_and_send_outgoing_video_frame(u64 sender_id, Gfx:
         return;
 
     if (!pipeline.encoder || pipeline.encoded_width != target_width || pipeline.encoded_height != target_height) {
+        if (pipeline.encoder_failed && pipeline.encoded_width == target_width && pipeline.encoded_height == target_height)
+            return;
         Media::WindowsMediaFoundation::VideoEncoderConfig config {
+            .codec_id = pipeline.codec_id,
             .width = target_width,
             .height = target_height,
             .framerate = 30,
@@ -1500,10 +1520,15 @@ void RTCPeerConnection::encode_and_send_outgoing_video_frame(u64 sender_id, Gfx:
         };
         auto encoder_or_err = Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder::try_create(config);
         if (encoder_or_err.is_error()) {
-            dbgln("RTCPeerConnection: H.264 encoder init failed for sender_id={}: {}", sender_id, encoder_or_err.error().description());
+            pipeline.encoder.clear();
+            pipeline.encoder_failed = true;
+            pipeline.encoded_width = target_width;
+            pipeline.encoded_height = target_height;
+            dbgln("RTCPeerConnection: video encoder init failed for sender_id={} codec={}: {}", sender_id, Media::codec_id_to_string(pipeline.codec_id), encoder_or_err.error().description());
             return;
         }
         pipeline.encoder = encoder_or_err.release_value();
+        pipeline.encoder_failed = false;
         pipeline.encoded_width = target_width;
         pipeline.encoded_height = target_height;
         pipeline.force_keyframe = true;

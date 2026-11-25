@@ -84,58 +84,145 @@ struct VideoSender {
     track: Arc<TrackLocalStaticSample>,
 }
 
-/// Placeholder send track attached to sendonly/sendrecv video transceivers so WebRTC offers
-/// populate media SSRCs, RTX `a=ssrc-group:FID` lines, and `a=msid` attributes needed by apps
-/// such as Google Meet before local camera encoding is wired up.
-fn h264_send_codecs() -> Vec<webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters> {
-    use webrtc::api::media_engine::MIME_TYPE_H264;
-    use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
-    vec![
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_H264.to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 102,
-            ..Default::default()
-        },
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "video/rtx".to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "apt=102".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 103,
-            ..Default::default()
-        },
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_H264.to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 125,
-            ..Default::default()
-        },
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "video/rtx".to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "apt=125".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 124,
-            ..Default::default()
-        },
-    ]
+fn normalize_video_mime(mime: &str) -> String {
+    let trimmed = mime.trim();
+    if trimmed.eq_ignore_ascii_case("video/vp8") {
+        webrtc::api::media_engine::MIME_TYPE_VP8.to_owned()
+    } else if trimmed.eq_ignore_ascii_case("video/vp9") {
+        webrtc::api::media_engine::MIME_TYPE_VP9.to_owned()
+    } else if trimmed.eq_ignore_ascii_case("video/h264") {
+        webrtc::api::media_engine::MIME_TYPE_H264.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn negotiated_video_mimes_for_transceiver(
+    remote: Option<&RTCSessionDescription>,
+    target_mid: Option<&str>,
+) -> Vec<String> {
+    let Some(sdp) = remote.map(|desc| desc.sdp.as_str()) else {
+        return Vec::new();
+    };
+
+    let mut in_video = false;
+    let mut section_mid: Option<&str> = None;
+    let mut formats: Vec<&str> = Vec::new();
+    let mut pt_to_mime: HashMap<&str, String> = HashMap::new();
+
+    let flush_section = |in_video: bool,
+                         section_mid: Option<&str>,
+                         formats: &[&str],
+                         pt_to_mime: &HashMap<&str, String>|
+     -> Option<Vec<String>> {
+        if !in_video {
+            return None;
+        }
+        if let Some(expected_mid) = target_mid
+            && section_mid != Some(expected_mid)
+        {
+            return None;
+        }
+        let mut mimes = Vec::new();
+        for pt in formats {
+            if let Some(mime) = pt_to_mime.get(pt)
+                && !mimes.iter().any(|existing: &String| existing.eq_ignore_ascii_case(mime))
+            {
+                mimes.push(mime.clone());
+            }
+        }
+        (!mimes.is_empty()).then_some(mimes)
+    };
+
+    for raw_line in sdp.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("m=") {
+            if let Some(found) = flush_section(in_video, section_mid, &formats, &pt_to_mime) {
+                return found;
+            }
+            in_video = line.starts_with("m=video ");
+            section_mid = None;
+            formats.clear();
+            pt_to_mime.clear();
+            if in_video {
+                formats.extend(line.split_ascii_whitespace().skip(3));
+            }
+            continue;
+        }
+        if !in_video {
+            continue;
+        }
+        if let Some(mid) = line.strip_prefix("a=mid:") {
+            section_mid = Some(mid.trim());
+        } else if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            let mut parts = rest.split_ascii_whitespace();
+            let (Some(pt), Some(codec_spec)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let codec_name = codec_spec.split('/').next().unwrap_or("").trim();
+            if codec_name.is_empty()
+                || codec_name.eq_ignore_ascii_case("rtx")
+                || codec_name.eq_ignore_ascii_case("red")
+                || codec_name.eq_ignore_ascii_case("ulpfec")
+            {
+                continue;
+            }
+            pt_to_mime.insert(pt, normalize_video_mime(&format!("video/{codec_name}")));
+        }
+    }
+
+    flush_section(in_video, section_mid, &formats, &pt_to_mime).unwrap_or_default()
+}
+
+fn select_video_send_codecs(requested_mime: &str, negotiated_media: &[String]) -> Vec<String> {
+    use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_VP8, MIME_TYPE_VP9};
+    let preferred_supported = [MIME_TYPE_VP8, MIME_TYPE_H264, MIME_TYPE_VP9];
+    let mut result: Vec<String> = Vec::new();
+    let mut push_unique = |mime: &str| {
+        if !mime.is_empty()
+            && !result.iter().any(|existing| existing.eq_ignore_ascii_case(mime))
+        {
+            result.push(mime.to_owned());
+        }
+    };
+
+    let requested = requested_mime.trim();
+    let is_auto = requested.is_empty() || requested.eq_ignore_ascii_case("auto");
+    if !is_auto {
+        let normalized_req = normalize_video_mime(requested);
+        if negotiated_media.is_empty()
+            || negotiated_media
+                .iter()
+                .any(|mime| mime.eq_ignore_ascii_case(&normalized_req))
+        {
+            push_unique(&normalized_req);
+            for mime in negotiated_media {
+                if preferred_supported.iter().any(|s| s.eq_ignore_ascii_case(mime)) {
+                    push_unique(mime);
+                }
+            }
+            return result;
+        }
+        for supported in preferred_supported {
+            if negotiated_media.iter().any(|m| m.eq_ignore_ascii_case(supported)) {
+                push_unique(supported);
+            }
+        }
+        push_unique(&normalized_req);
+        return result;
+    }
+
+    if !negotiated_media.is_empty() {
+        for supported in preferred_supported {
+            if negotiated_media.iter().any(|m| m.eq_ignore_ascii_case(supported)) {
+                push_unique(supported);
+            }
+        }
+    }
+    for supported in preferred_supported {
+        push_unique(supported);
+    }
+    result
 }
 
 struct PlaceholderVideoTrack {
@@ -160,30 +247,38 @@ impl webrtc::track::track_local::TrackLocal for PlaceholderVideoTrack {
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        use webrtc::api::media_engine::MIME_TYPE_H264;
+        use webrtc::api::media_engine::MIME_TYPE_VP8;
         use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
         let codec = t
             .codec_parameters()
             .iter()
-            .find(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H264"))
+            .find(|c| c.capability.mime_type.eq_ignore_ascii_case("video/VP8"))
             .cloned()
+            .or_else(|| {
+                t.codec_parameters()
+                    .iter()
+                    .find(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H264"))
+                    .cloned()
+            })
             .or_else(|| {
                 t.codec_parameters()
                     .iter()
                     .find(|c| {
                         let mime = c.capability.mime_type.as_str();
-                        !mime.eq_ignore_ascii_case("video/rtx") && !mime.eq_ignore_ascii_case("video/ulpfec")
+                        !mime.eq_ignore_ascii_case("video/rtx")
+                            && !mime.eq_ignore_ascii_case("video/red")
+                            && !mime.eq_ignore_ascii_case("video/ulpfec")
                     })
                     .cloned()
             })
             .or_else(|| t.codec_parameters().first().cloned())
             .unwrap_or_else(|| RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_H264.to_owned(),
+                    mime_type: MIME_TYPE_VP8.to_owned(),
                     clock_rate: 90000,
                     ..Default::default()
                 },
-                payload_type: 102,
+                payload_type: 96,
                 ..Default::default()
             });
         Box::pin(async move { Ok(codec) })
@@ -995,7 +1090,7 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         id: format!("video-{}", req.transceiver_id),
                         stream_id: format!("ladybird-stream-{}", req.pc_id),
                     });
-                    let transceiver = pc
+                    pc
                         .add_transceiver_from_track(
                             track,
                             Some(webrtc::rtp_transceiver::RTCRtpTransceiverInit {
@@ -1003,11 +1098,7 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                                 send_encodings: Vec::new(),
                             }),
                         )
-                        .await?;
-                    if let Err(e) = transceiver.set_codec_preferences(h264_send_codecs()).await {
-                        log::warn!("set_codec_preferences(H264) for send video failed: {e}");
-                    }
-                    transceiver
+                        .await?
                 } else {
                     // Audio needs a placeholder encoding so a microphone can be attached
                     // later. Receive-only video has no send pipeline; leave its sender empty. A dummy
@@ -1199,37 +1290,58 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                 }
             }
             if let Some(pc) = find_pc(state, req.pc_id).await {
-                use webrtc::api::media_engine::MIME_TYPE_H264;
                 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
                 let requested_mime = to_string(req.mime_type);
-                let normalized_mime = if requested_mime.eq_ignore_ascii_case("video/h264") {
-                    MIME_TYPE_H264.to_owned()
-                } else {
-                    requested_mime
-                };
-                let track = Arc::new(TrackLocalStaticSample::new(
-                    RTCRtpCodecCapability {
-                        mime_type: normalized_mime,
-                        clock_rate: 90000,
-                        channels: 0,
-                        sdp_fmtp_line: String::new(),
-                        rtcp_feedback: vec![],
-                    },
-                    format!("video-{}", req.sender_id),
-                    format!("ladybird-stream-{}", req.pc_id),
-                ));
                 let existing = state.registry.lock().await.transceivers.get(&req.sender_id).cloned();
-                let added = if let Some((owner, transceiver)) = existing {
-                    if owner != req.pc_id {
+                let target_mid = if let Some((owner, transceiver)) = &existing {
+                    if *owner != req.pc_id {
                         return Err(anyhow!("Sender belongs to another peer"));
                     }
-                    let sender = transceiver.sender().await;
-                    sender.replace_track(Some(track.clone())).await.map(|()| sender)
+                    transceiver.mid().map(|mid| mid.to_string())
                 } else {
-                    pc.add_track(track.clone()).await
+                    None
                 };
+                let remote_desc = pc.remote_description().await;
+                let negotiated_mimes = negotiated_video_mimes_for_transceiver(remote_desc.as_ref(), target_mid.as_deref());
+                let candidate_mimes = select_video_send_codecs(&requested_mime, &negotiated_mimes);
+
+                let mut added: Option<(
+                    Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
+                    Arc<TrackLocalStaticSample>,
+                    String,
+                )> = None;
+                let mut last_error: Option<webrtc::Error> = None;
+                for candidate_mime in candidate_mimes {
+                    let track = Arc::new(TrackLocalStaticSample::new(
+                        RTCRtpCodecCapability {
+                            mime_type: candidate_mime.clone(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: String::new(),
+                            rtcp_feedback: vec![],
+                        },
+                        format!("video-{}", req.sender_id),
+                        format!("ladybird-stream-{}", req.pc_id),
+                    ));
+                    let attempt = if let Some((_, transceiver)) = &existing {
+                        let sender = transceiver.sender().await;
+                        sender.replace_track(Some(track.clone())).await.map(|()| sender)
+                    } else {
+                        pc.add_track(track.clone()).await
+                    };
+                    match attempt {
+                        Ok(rtp_sender) => {
+                            added = Some((rtp_sender, track, candidate_mime));
+                            break;
+                        }
+                        Err(e) => {
+                            log::debug!("AddVideoTrack candidate {candidate_mime} failed: {e}");
+                            last_error = Some(e);
+                        }
+                    }
+                }
                 match added {
-                    Ok(rtp_sender) => {
+                    Some((rtp_sender, track, chosen_mime)) => {
                         for transceiver in pc.get_transceivers().await {
                             if Arc::ptr_eq(&transceiver.sender().await, &rtp_sender) {
                                 state
@@ -1279,10 +1391,11 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                             },
                         );
                         log::info!(
-                            "AddVideoTrack pc_id={} sender_id={} ssrc={}",
+                            "AddVideoTrack pc_id={} sender_id={} ssrc={} mime_type={}",
                             req.pc_id,
                             req.sender_id,
-                            ssrc
+                            ssrc,
+                            chosen_mime
                         );
                         send(
                             &state.writer,
@@ -1290,10 +1403,15 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                                 pc_id: req.pc_id,
                                 sender_id: req.sender_id,
                                 ssrc,
+                                mime_type: chosen_mime.into(),
                             },
                         )?;
                     }
-                    Err(e) => log::warn!("pc.add_track (video): {e}"),
+                    None => {
+                        if let Some(e) = last_error {
+                            log::warn!("pc.add_track (video): {e}");
+                        }
+                    }
                 }
             }
         }
@@ -2523,7 +2641,8 @@ mod tests {
             .sdp
             .replacen("a=rtpmap:102 H264/90000", "a=rtpmap:102 H264/90000\r\na=rtcp-fb:102 rrtr", 1);
         assert_ne!(munged_sdp, offer.sdp, "offer must include H264 rtpmap");
-        assert!(!offer.sdp.contains("VP8/90000"), "sendonly video offer must restrict to H264");
+        assert!(offer.sdp.contains("VP8/90000"), "sendonly video offer must include VP8");
+        assert!(offer.sdp.contains("H264/90000"), "sendonly video offer must include H264");
         let (munged_ok, err_kind, err_msg) = apply_description(&state, 1, "offer", munged_sdp, true).await;
         assert!(munged_ok, "valid munged offer SDP failed: {err_kind} {err_msg}");
 
@@ -2911,6 +3030,7 @@ mod tests {
                 assert_eq!(added.pc_id, 1);
                 assert_eq!(added.sender_id, 42);
                 assert_ne!(added.ssrc, 0);
+                assert!(to_string(added.mime_type).eq_ignore_ascii_case("video/h264"));
                 break added.ssrc;
             }
         };
@@ -3102,6 +3222,248 @@ mod tests {
         assert!(assembled.is_keyframe);
         assert!(!assembled.data.is_empty());
         assert!(received_pli, "expected RTCP PLI to trigger OnVideoKeyframeRequested");
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
+        command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;
+        drop(msg_rx);
+        drop(rx_frame_rx);
+        drop(state);
+        drop(reader_thread);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sendonly_video_offer_negotiates_vp8_when_remote_drops_h264() {
+        use std::time::Duration;
+        use webrtc::api::APIBuilder;
+        use webrtc::api::media_engine::MediaEngine;
+        use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+        use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+        use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
+        use crate::ipc::ClientMessage;
+        use crate::video_rx::{VideoCodec, VideoFrameAssembler};
+
+        let (state, renderer) = new_state(NetworkAccess::Allowed);
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reader_thread = std::thread::spawn(move || {
+            while let Some(received) = renderer.receive() {
+                let (bytes, _) = received.into_parts();
+                if let Ok(message) = ClientMessage::decode(bytes.as_ref(), Vec::new())
+                    && msg_tx.send(message).is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        command(
+            &state,
+            Server::CreatePeerConnection {
+                pc_id: 1,
+                configuration: CONFIG.to_owned().into(),
+            },
+        )
+        .await;
+        command(
+            &state,
+            Server::AddTransceiver {
+                pc_id: 1,
+                transceiver_id: 1,
+                kind: "video".to_owned().into(),
+                direction: "sendonly".to_owned().into(),
+            },
+        )
+        .await;
+        command(
+            &state,
+            Server::CreateOffer {
+                pc_id: 1,
+                request_id: 1,
+                ice_restart: false,
+            },
+        )
+        .await;
+        let offer_sdp = loop {
+            if let ClientMessage::OnCreateOfferResult(res) = tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+                .await
+                .expect("timed out waiting for CreateOfferResult")
+                .expect("IPC channel closed")
+            {
+                assert!(res.ok, "create_offer failed: {}", to_string(res.error_message));
+                break to_string(res.sdp);
+            }
+        };
+        assert!(offer_sdp.contains("VP8/90000"), "offer missing VP8: {offer_sdp}");
+        assert!(offer_sdp.contains("H264/90000"), "offer missing H264: {offer_sdp}");
+        assert!(offer_sdp.contains("rtx/90000"), "offer missing RTX: {offer_sdp}");
+        assert!(offer_sdp.contains("a=rtcp-fb:"), "offer missing rtcp-fb: {offer_sdp}");
+        assert!(offer_sdp.contains("nack"), "offer missing nack feedback: {offer_sdp}");
+
+        command(
+            &state,
+            Server::SetLocalDescription {
+                pc_id: 1,
+                request_id: 2,
+                sdp_type: "offer".to_owned().into(),
+                sdp: offer_sdp.clone().into(),
+            },
+        )
+        .await;
+
+        let mut media = MediaEngine::default();
+        media
+            .register_codec(
+                RTCRtpCodecParameters {
+                    capability: RTCRtpCodecCapability {
+                        mime_type: "video/VP8".to_owned(),
+                        clock_rate: 90000,
+                        ..Default::default()
+                    },
+                    payload_type: 96,
+                    ..Default::default()
+                },
+                RTPCodecType::Video,
+            )
+            .unwrap();
+        let remote_api = APIBuilder::new().with_media_engine(media).build();
+        let remote = Arc::new(
+            remote_api
+                .new_peer_connection(RTCConfiguration::default())
+                .await
+                .unwrap(),
+        );
+
+        let (rx_frame_tx, mut rx_frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        remote.on_track(Box::new(move |track, _, _| {
+            let rx_frame_tx = rx_frame_tx.clone();
+            Box::pin(async move {
+                let mut assembler = VideoFrameAssembler::new(VideoCodec::Vp8);
+                while let Ok((pkt, _)) = track.read_rtp().await {
+                    for frame in assembler.push_packet(pkt).frames {
+                        let _ = rx_frame_tx.send(frame);
+                    }
+                }
+            })
+        }));
+
+        let state_for_ice = Arc::clone(&state);
+        remote.on_ice_candidate(Box::new(move |candidate| {
+            let state = Arc::clone(&state_for_ice);
+            Box::pin(async move {
+                let Some(candidate) = candidate else {
+                    return;
+                };
+                let Ok(json) = candidate.to_json() else {
+                    return;
+                };
+                command(
+                    &state,
+                    Server::AddIceCandidate {
+                        pc_id: 1,
+                        request_id: 10,
+                        candidate: json.candidate.into(),
+                        sdp_mid: json.sdp_mid.map(Into::into),
+                        sdp_mline_index: json.sdp_mline_index.map(u32::from),
+                        ufrag: json.username_fragment.map(Into::into),
+                    },
+                )
+                .await;
+            })
+        }));
+
+        remote
+            .set_remote_description(RTCSessionDescription::offer(offer_sdp).unwrap())
+            .await
+            .unwrap();
+        let answer = remote.create_answer(None).await.unwrap();
+        assert!(answer.sdp.contains("VP8/90000"));
+        assert!(!answer.sdp.contains("H264/90000"));
+        remote.set_local_description(answer.clone()).await.unwrap();
+
+        command(
+            &state,
+            Server::SetRemoteDescription {
+                pc_id: 1,
+                request_id: 3,
+                sdp_type: "answer".to_owned().into(),
+                sdp: answer.sdp.into(),
+            },
+        )
+        .await;
+
+        command(
+            &state,
+            Server::AddVideoTrack {
+                pc_id: 1,
+                sender_id: 1,
+                mime_type: "auto".to_owned().into(),
+            },
+        )
+        .await;
+
+        loop {
+            if let ClientMessage::OnVideoTrackAdded(added) = tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+                .await
+                .expect("timed out waiting for OnVideoTrackAdded")
+                .expect("IPC channel closed")
+            {
+                assert_eq!(added.pc_id, 1);
+                assert_eq!(added.sender_id, 1);
+                assert_ne!(added.ssrc, 0);
+                let mime_type = to_string(added.mime_type);
+                assert!(
+                    mime_type.eq_ignore_ascii_case("video/vp8"),
+                    "expected negotiated VP8, got {mime_type}"
+                );
+                break;
+            }
+        }
+
+        let vp8_keyframe = [0x10u8, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0x10, 0x00, 0x10, 0x00];
+        let mut received_assembled = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+
+        while tokio::time::Instant::now() < deadline && received_assembled.is_none() {
+            tokio::select! {
+                _ = tick.tick() => {
+                    command(
+                        &state,
+                        Server::VideoTrackEncodedFrame {
+                            sender_id: 1,
+                            duration_micros: 33_000,
+                            payload: vp8_keyframe.to_vec(),
+                        },
+                    )
+                    .await;
+                }
+                maybe_frame = rx_frame_rx.recv() => {
+                    if let Some(frame) = maybe_frame {
+                        received_assembled = Some(frame);
+                    }
+                }
+                maybe_msg = msg_rx.recv() => {
+                    let Some(msg) = maybe_msg else {
+                        break;
+                    };
+                    if let ClientMessage::OnIceCandidate(cand) = msg
+                        && let Some(c) = to_optional_string(cand.candidate)
+                    {
+                        let _ = remote
+                            .add_ice_candidate(RTCIceCandidateInit {
+                                candidate: c,
+                                sdp_mid: to_optional_string(cand.sdp_mid),
+                                sdp_mline_index: cand.sdp_mline_index.map(|v| v as u16),
+                                ..Default::default()
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+
+        let assembled = received_assembled.expect("expected assembled VP8 frame at remote peer");
+        assert!(assembled.is_keyframe);
+        assert_eq!(assembled.data, vp8_keyframe);
 
         let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
         command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;

@@ -11,6 +11,7 @@
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/YUVData.h>
 #include <LibMediaCodecs/CodedFrame.h>
+#include <LibMediaCodecs/FFmpeg/FFmpegVideoDecoder.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationCamera.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.h>
@@ -210,4 +211,151 @@ TEST_CASE(video_capture_open_and_stop_does_not_deadlock)
         stream->stop();
         EXPECT(!stream->is_running());
     }
+}
+
+TEST_CASE(vp8_encode_and_decode_roundtrip)
+{
+    constexpr u32 WIDTH = 320;
+    constexpr u32 HEIGHT = 240;
+
+    Media::WindowsMediaFoundation::VideoEncoderConfig config {
+        .codec_id = Media::CodecID::VP8,
+        .width = WIDTH,
+        .height = HEIGHT,
+        .framerate = 30,
+        .bitrate_bps = 800'000,
+        .keyframe_interval_frames = 30,
+    };
+
+    auto encoder_or_err = Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder::try_create(config);
+    if (encoder_or_err.is_error()) {
+        warnln("Media Foundation VP8 encoder unavailable ({}), skipping", encoder_or_err.error().description());
+        return;
+    }
+    auto encoder = encoder_or_err.release_value();
+
+    auto decoder_or_err = Media::FFmpeg::FFmpegVideoDecoder::try_create(Media::CodecID::VP8, {});
+    if (decoder_or_err.is_error()) {
+        warnln("FFmpeg VP8 decoder unavailable ({}), skipping", decoder_or_err.error().description());
+        return;
+    }
+    auto decoder = decoder_or_err.release_value();
+
+    Vector<Media::WindowsMediaFoundation::EncodedVideoPacket> encoded_packets;
+    auto bitmap = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRx8888, { static_cast<int>(WIDTH), static_cast<int>(HEIGHT) }));
+
+    for (u32 frame_idx = 0; frame_idx < 10; ++frame_idx) {
+        for (int y = 0; y < static_cast<int>(HEIGHT); ++y) {
+            auto* scanline = bitmap->scanline_u8(y);
+            for (int x = 0; x < static_cast<int>(WIDTH); ++x) {
+                scanline[x * 4 + 0] = static_cast<u8>((x + frame_idx * 16) & 0xFF);
+                scanline[x * 4 + 1] = static_cast<u8>((y + frame_idx * 8) & 0xFF);
+                scanline[x * 4 + 2] = static_cast<u8>(((x ^ y) + frame_idx * 12) & 0xFF);
+                scanline[x * 4 + 3] = 0xFF;
+            }
+        }
+        auto frame = MUST(Gfx::DecodedImageFrame::create(*bitmap));
+        auto pts = AK::Duration::from_milliseconds(static_cast<i64>(frame_idx) * 33);
+        auto dur = AK::Duration::from_milliseconds(33);
+        bool force_key = (frame_idx == 0 || frame_idx == 5);
+        MUST(encoder->encode_frame(frame, pts, dur, force_key, encoded_packets));
+    }
+    MUST(encoder->drain(encoded_packets));
+
+    EXPECT(!encoded_packets.is_empty());
+    bool saw_keyframe = false;
+    size_t decoded_frames = 0;
+
+    auto drain_decoder = [&] {
+        while (true) {
+            auto out = decoder->take_next_output({});
+            if (out.is_error())
+                break;
+            auto decoded = out.release_value();
+            EXPECT_EQ(decoded->size(), (Gfx::Size<u32> { WIDTH, HEIGHT }));
+            decoded_frames++;
+        }
+    };
+
+    for (auto const& packet : encoded_packets) {
+        EXPECT(!packet.data.is_empty());
+        if (packet.is_keyframe)
+            saw_keyframe = true;
+
+        auto raw_fixed = MUST(FixedArray<u8>::create(packet.data.bytes()));
+        Media::CodedFrame coded_frame {
+            Media::CodecID::VP8,
+            packet.timestamp,
+            packet.timestamp,
+            packet.duration.is_zero() ? AK::Duration::from_milliseconds(33) : packet.duration,
+            packet.is_keyframe ? Media::FrameFlags::Keyframe : Media::FrameFlags::None,
+            move(raw_fixed),
+        };
+        MUST(decoder->receive_coded_data(coded_frame, Media::DecodeIntent::Output));
+        drain_decoder();
+    }
+    decoder->signal_end_of_stream();
+    drain_decoder();
+
+    EXPECT(saw_keyframe);
+    EXPECT(decoded_frames >= 1u);
+}
+
+TEST_CASE(video_capture_concurrent_streams_share_device)
+{
+    auto devices = Media::WindowsMediaFoundation::enumerate_video_capture_devices();
+    if (devices.is_empty())
+        return;
+
+    auto const& device_id = devices[0].device_id;
+    Atomic<size_t> frames1 { 0 };
+    Atomic<size_t> frames2 { 0 };
+    Atomic<size_t> ended1 { 0 };
+    Atomic<size_t> ended2 { 0 };
+
+    auto stream1_or_err = Media::WindowsMediaFoundation::VideoCaptureStream::create(
+        device_id,
+        640,
+        480,
+        30,
+        [&](Gfx::DecodedImageFrame) { frames1.fetch_add(1, AK::MemoryOrder::memory_order_relaxed); },
+        [&]() { ended1.fetch_add(1, AK::MemoryOrder::memory_order_relaxed); });
+    if (stream1_or_err.is_error())
+        return;
+    auto stream1 = stream1_or_err.release_value();
+
+    auto stream2_or_err = Media::WindowsMediaFoundation::VideoCaptureStream::create(
+        device_id,
+        640,
+        480,
+        30,
+        [&](Gfx::DecodedImageFrame) { frames2.fetch_add(1, AK::MemoryOrder::memory_order_relaxed); },
+        [&]() { ended2.fetch_add(1, AK::MemoryOrder::memory_order_relaxed); });
+    EXPECT(!stream2_or_err.is_error());
+    auto stream2 = stream2_or_err.release_value();
+
+    EXPECT(stream1->is_running());
+    EXPECT(stream2->is_running());
+
+    for (int attempt = 0; attempt < 40 && (frames1.load(AK::MemoryOrder::memory_order_relaxed) == 0 || frames2.load(AK::MemoryOrder::memory_order_relaxed) == 0); ++attempt)
+        MUST(Core::System::sleep_ms(50));
+
+    EXPECT(frames1.load(AK::MemoryOrder::memory_order_relaxed) >= 1u);
+    EXPECT(frames2.load(AK::MemoryOrder::memory_order_relaxed) >= 1u);
+    EXPECT_EQ(ended1.load(AK::MemoryOrder::memory_order_relaxed), 0u);
+    EXPECT_EQ(ended2.load(AK::MemoryOrder::memory_order_relaxed), 0u);
+
+    stream1->stop();
+    EXPECT(!stream1->is_running());
+    EXPECT(stream2->is_running());
+
+    auto frames2_before = frames2.load(AK::MemoryOrder::memory_order_relaxed);
+    for (int attempt = 0; attempt < 20 && frames2.load(AK::MemoryOrder::memory_order_relaxed) == frames2_before; ++attempt)
+        MUST(Core::System::sleep_ms(50));
+    EXPECT(frames2.load(AK::MemoryOrder::memory_order_relaxed) > frames2_before);
+
+    stream2->stop();
+    EXPECT(!stream2->is_running());
+    EXPECT_EQ(ended1.load(AK::MemoryOrder::memory_order_relaxed), 0u);
+    EXPECT_EQ(ended2.load(AK::MemoryOrder::memory_order_relaxed), 0u);
 }

@@ -13,12 +13,14 @@
 #include <AK/Vector.h>
 #include <AK/kmalloc.h>
 #include <LibGfx/DecodedImageFrame.h>
+#include <LibMediaCodecs/CodecID.h>
 #include <LibMediaCodecs/DecoderError.h>
 #include <LibMediaCodecs/Export.h>
 
 namespace Media::WindowsMediaFoundation {
 
 struct VideoEncoderConfig {
+    CodecID codec_id { CodecID::H264 };
     u32 width { 640 };
     u32 height { 480 };
     u32 framerate { 30 };
@@ -40,6 +42,7 @@ class MEDIACODECS_API WindowsMediaFoundationVideoEncoder final {
 public:
     AK_ALLOC_WITH_KMALLOC;
 
+    static bool is_codec_supported(CodecID);
     static DecoderErrorOr<NonnullOwnPtr<WindowsMediaFoundationVideoEncoder>> try_create(VideoEncoderConfig const&);
     ~WindowsMediaFoundationVideoEncoder();
 

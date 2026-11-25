@@ -17,7 +17,7 @@ endpoint WebRTCClientClient
     on_encoded_video_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload) =|
 
     on_audio_track_added(u64 pc_id, u64 sender_id, u32 ssrc) =|
-    on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc) =|
+    on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc, String mime_type) =|
     on_video_keyframe_requested(u64 pc_id, u64 sender_id) =|
 
     on_create_offer_result(u64 pc_id, u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message) =|

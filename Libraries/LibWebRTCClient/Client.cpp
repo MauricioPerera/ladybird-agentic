@@ -98,10 +98,10 @@ void Client::on_audio_track_added(u64 pc_id, u64 sender_id, u32 ssrc)
         on_audio_track_added_event(pc_id, sender_id, ssrc);
 }
 
-void Client::on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc)
+void Client::on_video_track_added(u64 pc_id, u64 sender_id, u32 ssrc, String mime_type)
 {
     if (on_video_track_added_event)
-        on_video_track_added_event(pc_id, sender_id, ssrc);
+        on_video_track_added_event(pc_id, sender_id, ssrc, move(mime_type));
 }
 
 void Client::on_video_keyframe_requested(u64 pc_id, u64 sender_id)
