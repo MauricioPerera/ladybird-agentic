@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+asyncTest(async done => {
+    try {
+        const initialStatus = await navigator.permissions.query({ name: "camera" });
+        println(`camera permission initial: ${initialStatus.state}`);
+
+        const iframe = document.createElement("iframe");
+        iframe.setAttribute("allow", "camera 'none'");
+        iframe.srcdoc = "<!DOCTYPE html>";
+        await new Promise(resolve => {
+            iframe.onload = resolve;
+            document.body.appendChild(iframe);
+        });
+
+        const blockedStatus = await iframe.contentWindow.navigator.permissions.query({ name: "camera" });
+        println(`camera permission with policy none: ${blockedStatus.state}`);
+
+        try {
+            await iframe.contentWindow.navigator.mediaDevices.getUserMedia({ video: true });
+            println("policy-blocked getUserMedia resolved unexpectedly");
+        } catch (error) {
+            println(`policy-blocked getUserMedia error: ${error.name}`);
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        println(`enumerateDevices is array: ${Array.isArray(devices)}`);
+
+        internals.setNextPermissionPromptOutcome("camera", "block");
+        try {
+            await navigator.mediaDevices.getUserMedia({ video: true });
+            println("prompt-blocked getUserMedia resolved unexpectedly");
+        } catch (error) {
+            println(`prompt-blocked getUserMedia rejected cleanly: ${error.name === "NotAllowedError" || error.name === "NotFoundError"}`);
+        }
+    } catch (error) {
+        println(`FAIL: ${error.name}: ${error.message}`);
+    } finally {
+        done();
+    }
+});
+</script>

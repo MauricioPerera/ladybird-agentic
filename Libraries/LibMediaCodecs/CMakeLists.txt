@@ -40,7 +40,9 @@ endif()
 if (WIN32)
     list(APPEND SOURCES
         WindowsMediaFoundation/WindowsMediaFoundation.cpp
+        WindowsMediaFoundation/WindowsMediaFoundationCamera.cpp
         WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.cpp
+        WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.cpp
     )
 endif()
 
@@ -81,7 +83,7 @@ if (APPLE)
 endif()
 
 if (WIN32)
-    target_link_libraries(LibMediaCodecs PRIVATE mfplat mfuuid)
+    target_link_libraries(LibMediaCodecs PRIVATE mfplat mfuuid mf mfreadwrite)
 endif()
 
 if (USE_VULKAN_DMABUF_IMAGES)

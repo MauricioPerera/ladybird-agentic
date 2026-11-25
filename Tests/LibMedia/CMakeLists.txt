@@ -60,6 +60,7 @@ if (WIN32)
     list(APPEND TEST_SOURCES
         TestWindowsMediaFoundationAudioDecode.cpp
         TestWindowsMediaFoundationDecode.cpp
+        TestWindowsMediaFoundationEncode.cpp
     )
 endif()
 if (LINUX)

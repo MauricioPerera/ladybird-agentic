@@ -5,11 +5,17 @@
  */
 
 #include <AK/ByteString.h>
+#include <AK/HashMap.h>
+#include <AK/NeverDestroyed.h>
 #include <LibAudio/RecordStream.h>
 #include <LibAudio/SampleSpecification.h>
+#include <LibCore/EventLoop.h>
 #include <LibGC/Heap.h>
 #include <LibGC/Weak.h>
 #include <LibGfx/Bitmap.h>
+#ifdef AK_OS_WINDOWS
+#    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationCamera.h>
+#endif
 #include <LibJS/Runtime/Value.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Event.h>
@@ -239,6 +245,7 @@ void MediaStreamTrack::stop()
     // 3. Notify track's source that track is ended.
     // NB: Every track of a device holds a stream of it, and the process keeps the device's capture open while any does.
     stop_audio_capture();
+    stop_video_capture();
 
     // 4. Set track's [[ReadyState]] to "ended".
     m_state = MediaStreamTrackState::Ended;
@@ -287,8 +294,17 @@ GC::Ref<MediaStreamTrack> MediaStreamTrack::clone() const
         media_devices->track_was_cloned({}, track_clone);
         track_clone->m_media_devices = m_media_devices;
     }
-    if (track_clone->m_state == MediaStreamTrackState::Live && device_id().has_value())
-        track_clone->start_audio_capture();
+    if (track_clone->m_state == MediaStreamTrackState::Live && device_id().has_value()) {
+        if (is_audio()) {
+            track_clone->start_audio_capture();
+        } else if (is_video()) {
+            u32 w = m_settings.width.value_or(640);
+            u32 h = m_settings.height.value_or(480);
+            u32 fps = static_cast<u32>(m_settings.frame_rate.value_or(30.0));
+            if (track_clone->start_video_capture(device_id()->to_byte_string(), w, h, fps).is_error())
+                track_clone->stop();
+        }
+    }
 
     // 9. Return trackClone.
     return track_clone;
@@ -471,8 +487,79 @@ void MediaStreamTrack::start_audio_capture(GC::Ptr<GC::Function<void(ErrorOr<voi
     });
 }
 
+static HashMap<u64, GC::Weak<MediaStreamTrack>>& live_video_capture_tracks()
+{
+    static NeverDestroyed<HashMap<u64, GC::Weak<MediaStreamTrack>>> s_tracks;
+    return *s_tracks;
+}
+
+ErrorOr<void> MediaStreamTrack::start_video_capture(StringView device_id, u32 requested_width, u32 requested_height, u32 requested_fps)
+{
+#ifdef AK_OS_WINDOWS
+    if (m_video_capture_stream)
+        return {};
+    if (m_state != MediaStreamTrackState::Live)
+        return Error::from_errno(EINVAL);
+
+    live_video_capture_tracks().set(m_provider_id, GC::Weak<MediaStreamTrack> { *this });
+    auto stream_or_err = Media::WindowsMediaFoundation::VideoCaptureStream::create(
+        device_id,
+        requested_width,
+        requested_height,
+        requested_fps,
+        [fanout = m_video_fanout](Gfx::DecodedImageFrame frame) {
+            fanout->deliver(move(frame));
+        },
+        [provider_id = m_provider_id, main_loop_weak = Core::EventLoop::current_weak()] {
+            auto strong = main_loop_weak->take();
+            if (!strong)
+                return;
+            strong->deferred_invoke([provider_id] {
+                if (auto track = live_video_capture_tracks().get(provider_id); track.has_value()) {
+                    if (auto ptr = track->ptr())
+                        ptr->video_source_ended();
+                }
+            });
+        });
+    if (stream_or_err.is_error()) {
+        live_video_capture_tracks().remove(m_provider_id);
+        return stream_or_err.release_error();
+    }
+
+    m_video_capture_stream = stream_or_err.release_value();
+    m_settings.width = m_video_capture_stream->width();
+    m_settings.height = m_video_capture_stream->height();
+    m_settings.frame_rate = m_video_capture_stream->frame_rate();
+    return {};
+#else
+    (void)device_id;
+    (void)requested_width;
+    (void)requested_height;
+    (void)requested_fps;
+    return Error::from_errno(ENOTSUP);
+#endif
+}
+
+void MediaStreamTrack::stop_video_capture()
+{
+    live_video_capture_tracks().remove(m_provider_id);
+#ifdef AK_OS_WINDOWS
+    if (m_video_capture_stream) {
+        m_video_capture_stream->stop();
+        m_video_capture_stream = nullptr;
+    }
+#endif
+}
+
 void MediaStreamTrack::audio_source_ended()
 {
+    if (auto media_devices = m_media_devices.ptr())
+        media_devices->track_source_ended({}, *this);
+}
+
+void MediaStreamTrack::video_source_ended()
+{
+    stop_video_capture();
     if (auto media_devices = m_media_devices.ptr())
         media_devices->track_source_ended({}, *this);
 }
@@ -492,6 +579,7 @@ void MediaStreamTrack::finalize()
     // the callback only references the atomically ref-counted fan-out, never this GC-managed
     // track.
     stop_audio_capture();
+    stop_video_capture();
 }
 
 }

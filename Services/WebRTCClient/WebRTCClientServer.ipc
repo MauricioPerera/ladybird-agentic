@@ -23,11 +23,13 @@ endpoint WebRTCClientServer
     stop_transceiver(u64 pc_id, u64 transceiver_id) =|
 
     add_audio_track(u64 pc_id, u64 sender_id) =|
+    add_video_track(u64 pc_id, u64 sender_id, String mime_type) =|
     remove_track(u64 pc_id, u64 sender_id) =|
 
     // Sends encoded (possibly E2E-encrypted via DAVE/SFrame) Opus bytes verbatim, bypassing the Rust encoder.
     // webrtc-rs advances the RTP timestamp by duration_micros, typically 20000 for a 20 ms frame.
     audio_track_encoded_frame(u64 sender_id, u32 duration_micros, ByteBuffer payload) =|
+    video_track_encoded_frame(u64 sender_id, u32 duration_micros, ByteBuffer payload) =|
     request_video_keyframe(u64 pc_id, u32 media_ssrc) =|
 
     add_data_channel(u64 pc_id, u64 channel_id, String label, bool ordered, Optional<u16> max_packet_life_time, Optional<u16> max_retransmits, String protocol, bool negotiated, Optional<u16> id) =|

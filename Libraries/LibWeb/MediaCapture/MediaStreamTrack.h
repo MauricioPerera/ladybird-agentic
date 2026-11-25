@@ -35,6 +35,14 @@ class RecordStream;
 
 }
 
+#ifdef AK_OS_WINDOWS
+namespace Media::WindowsMediaFoundation {
+
+class VideoCaptureStream;
+
+}
+#endif
+
 namespace Web::MediaCapture {
 
 using MediaStreamTrackKind = Bindings::MediaStreamTrackKind;
@@ -155,6 +163,7 @@ public:
     // A device-backed track captures from its device from here until it ends, whether or not anything consumes it.
     // Without on_started, a device that won't open ends the track.
     void start_audio_capture(GC::Ptr<GC::Function<void(ErrorOr<void>)>> on_started = {});
+    ErrorOr<void> start_video_capture(StringView device_id, u32 requested_width = 640, u32 requested_height = 480, u32 requested_fps = 30);
 
     void stop();
     void end();
@@ -198,7 +207,9 @@ private:
     void apply_constraints_impl(Optional<MediaTrackConstraints> constraints);
 
     void stop_audio_capture();
+    void stop_video_capture();
     void audio_source_ended();
+    void video_source_ended();
     void update_audio_silence_state()
     {
         bool inactive = !m_enabled || m_muted || m_state == MediaStreamTrackState::Ended;
@@ -224,6 +235,9 @@ private:
     NonnullRefPtr<AudioFrameFanout> m_audio_fanout;
     NonnullRefPtr<VideoFrameFanout> m_video_fanout;
     RefPtr<Audio::RecordStream> m_audio_capture_stream;
+#ifdef AK_OS_WINDOWS
+    RefPtr<Media::WindowsMediaFoundation::VideoCaptureStream> m_video_capture_stream;
+#endif
     bool m_audio_capture_start_pending { false };
     u64 m_audio_capture_request_id { 0 };
 };

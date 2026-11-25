@@ -25,6 +25,7 @@
 #include <LibMediaCodecs/VideoFrame.h>
 #ifdef AK_OS_WINDOWS
 #    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.h>
+#    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.h>
 #endif
 #include <LibWeb/Bindings/RTCPeerConnection.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
@@ -152,6 +153,8 @@ void RTCPeerConnection::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_remote_receivers_by_id);
     for (auto& [_, pipeline] : m_outgoing_audio_pipelines)
         visitor.visit(pipeline->track);
+    for (auto& [_, pipeline] : m_outgoing_video_pipelines)
+        visitor.visit(pipeline->track);
 }
 
 GC::Ref<WebIDL::Promise> RTCPeerConnection::chain_operation(GC::Ref<WebIDL::ReactionSteps> operation)
@@ -227,6 +230,13 @@ void RTCPeerConnection::close_the_connection_algorithm(bool disappear)
             pipeline->track->remove_audio_sink(*pipeline->sink);
     }
     m_outgoing_audio_pipelines.clear();
+    for (auto& [_, pipeline] : m_outgoing_video_pipelines) {
+        if (pipeline->track && pipeline->sink)
+            pipeline->track->remove_video_sink(*pipeline->sink);
+    }
+    m_outgoing_video_pipelines.clear();
+    m_requested_video_senders.clear();
+    m_ready_video_senders.clear();
     m_last_operation = nullptr;
     m_pending_void_requests.clear();
     m_pending_description_requests.clear();
@@ -1278,15 +1288,20 @@ GC::Ptr<MediaCapture::MediaStream> RTCPeerConnection::find_or_create_remote_stre
 void RTCPeerConnection::stop_sender(RTCRtpSender& sender)
 {
     auto id = sender.sender_id();
-    auto pipeline = m_outgoing_audio_pipelines.take(id);
-    if (pipeline.has_value() && (*pipeline)->track && (*pipeline)->sink)
-        (*pipeline)->track->remove_audio_sink(*(*pipeline)->sink);
-    if (m_requested_audio_senders.contains(id)) {
+    auto audio_pipeline = m_outgoing_audio_pipelines.take(id);
+    if (audio_pipeline.has_value() && (*audio_pipeline)->track && (*audio_pipeline)->sink)
+        (*audio_pipeline)->track->remove_audio_sink(*(*audio_pipeline)->sink);
+    auto video_pipeline = m_outgoing_video_pipelines.take(id);
+    if (video_pipeline.has_value() && (*video_pipeline)->track && (*video_pipeline)->sink)
+        (*video_pipeline)->track->remove_video_sink(*(*video_pipeline)->sink);
+    if (m_requested_audio_senders.contains(id) || m_requested_video_senders.contains(id)) {
         if (auto* client = WebRTCAgent::the().existing_client())
             client->async_remove_track(m_pc_id, id);
     }
     m_requested_audio_senders.remove(id);
     m_ready_audio_senders.remove(id);
+    m_requested_video_senders.remove(id);
+    m_ready_video_senders.remove(id);
 }
 
 WebIDL::ExceptionOr<void> RTCPeerConnection::remove_track(GC::Ref<RTCRtpSender> sender)
@@ -1316,21 +1331,41 @@ void RTCPeerConnection::on_sender_track_changed(RTCRtpSender& sender)
     if (m_is_closed)
         return;
     auto sender_id = sender.sender_id();
-    auto old = m_outgoing_audio_pipelines.take(sender_id);
-    if (old.has_value() && (*old)->track && (*old)->sink)
-        (*old)->track->remove_audio_sink(*(*old)->sink);
+    auto old_audio = m_outgoing_audio_pipelines.take(sender_id);
+    if (old_audio.has_value() && (*old_audio)->track && (*old_audio)->sink)
+        (*old_audio)->track->remove_audio_sink(*(*old_audio)->sink);
+    auto old_video = m_outgoing_video_pipelines.take(sender_id);
+    if (old_video.has_value() && (*old_video)->track && (*old_video)->sink)
+        (*old_video)->track->remove_video_sink(*(*old_video)->sink);
+
     auto track = sender.track();
-    if (!track || track->track_kind() != Bindings::MediaStreamTrackKind::Audio)
+    if (!track)
         return;
-    if (m_ready_audio_senders.contains(sender_id)) {
-        start_outgoing_audio_for_sender(sender);
+
+    if (track->track_kind() == Bindings::MediaStreamTrackKind::Audio) {
+        if (m_ready_audio_senders.contains(sender_id)) {
+            start_outgoing_audio_for_sender(sender);
+            return;
+        }
+        if (m_requested_audio_senders.contains(sender_id))
+            return;
+        m_requested_audio_senders.set(sender_id);
+        if (auto* client = WebRTCAgent::the().existing_client())
+            client->async_add_audio_track(m_pc_id, sender_id);
         return;
     }
-    if (m_requested_audio_senders.contains(sender_id))
-        return;
-    m_requested_audio_senders.set(sender_id);
-    if (auto* client = WebRTCAgent::the().existing_client())
-        client->async_add_audio_track(m_pc_id, sender_id);
+
+    if (track->track_kind() == Bindings::MediaStreamTrackKind::Video) {
+        if (m_ready_video_senders.contains(sender_id)) {
+            start_outgoing_video_for_sender(sender);
+            return;
+        }
+        if (m_requested_video_senders.contains(sender_id))
+            return;
+        m_requested_video_senders.set(sender_id);
+        if (auto* client = WebRTCAgent::the().existing_client())
+            client->async_add_video_track(m_pc_id, sender_id, "video/H264"_string);
+    }
 }
 
 void RTCPeerConnection::on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc)
@@ -1355,6 +1390,159 @@ void RTCPeerConnection::on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc)
     if (m_outgoing_audio_pipelines.contains(sender_id))
         return;
     start_outgoing_audio_for_sender(*sender);
+}
+
+void RTCPeerConnection::on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc)
+{
+    if (m_is_closed)
+        return;
+    GC::Ptr<RTCRtpSender> sender;
+    for (auto& transceiver : m_transceivers) {
+        if (transceiver->sender()->sender_id() == sender_id) {
+            sender = transceiver->sender();
+            break;
+        }
+    }
+    if (!sender) {
+        dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: on_video_track_ssrc_assigned for unknown sender_id={}", sender_id);
+        return;
+    }
+    if (!m_requested_video_senders.contains(sender_id))
+        return;
+    if (ssrc != 0)
+        sender->set_ssrc(ssrc);
+    m_ready_video_senders.set(sender_id);
+    if (m_outgoing_video_pipelines.contains(sender_id))
+        return;
+    start_outgoing_video_for_sender(*sender);
+}
+
+void RTCPeerConnection::on_video_keyframe_requested(u64 sender_id)
+{
+    if (m_is_closed)
+        return;
+    if (auto pipeline = m_outgoing_video_pipelines.find(sender_id); pipeline != m_outgoing_video_pipelines.end())
+        pipeline->value->force_keyframe = true;
+}
+
+RTCPeerConnection::OutgoingVideoPipeline::~OutgoingVideoPipeline() = default;
+
+void RTCPeerConnection::start_outgoing_video_for_sender(GC::Ref<RTCRtpSender> sender)
+{
+    auto sender_id = sender->sender_id();
+    auto track = sender->track();
+    if (!track || track->track_kind() != Bindings::MediaStreamTrackKind::Video)
+        return;
+
+    auto pipeline = make<OutgoingVideoPipeline>();
+    auto producer = adopt_ref(*new OutgoingVideoProducerState);
+    pipeline->generation = WebRTCAgent::the().next_request_id();
+    pipeline->track = track;
+    pipeline->force_keyframe = true;
+
+    auto main_loop_weak = Core::EventLoop::current_weak();
+    auto sink = adopt_ref(*new MediaCapture::VideoFrameSink);
+    sink->on_frame = [pc_id = m_pc_id, sender_id, producer, generation = pipeline->generation, main_loop_weak](Gfx::DecodedImageFrame const& frame) {
+        if (frame.width() <= 0 || frame.height() <= 0)
+            return;
+        auto strong = main_loop_weak->take();
+        if (!strong || producer->pending_frames.load() >= 2)
+            return;
+        producer->pending_frames.fetch_add(1);
+        strong->deferred_invoke([pc_id, sender_id, producer, captured_at = MonotonicTime::now(), generation, frame]() mutable {
+            producer->pending_frames.fetch_sub(1);
+            auto self = WebRTCAgent::the().find_peer_connection(pc_id);
+            if (!self || self->m_is_closed || (MonotonicTime::now() - captured_at).to_milliseconds() > 500)
+                return;
+            auto pipeline = self->m_outgoing_video_pipelines.find(sender_id);
+            if (pipeline == self->m_outgoing_video_pipelines.end() || pipeline->value->generation != generation)
+                return;
+            self->encode_and_send_outgoing_video_frame(sender_id, move(frame));
+        });
+    };
+
+    pipeline->sink = sink;
+    m_outgoing_video_pipelines.set(sender_id, move(pipeline));
+    track->add_video_sink(sink);
+}
+
+void RTCPeerConnection::encode_and_send_outgoing_video_frame(u64 sender_id, Gfx::DecodedImageFrame frame)
+{
+    if (m_is_closed)
+        return;
+#ifdef AK_OS_WINDOWS
+    auto pipeline_iter = m_outgoing_video_pipelines.find(sender_id);
+    if (pipeline_iter == m_outgoing_video_pipelines.end())
+        return;
+    auto& pipeline = *pipeline_iter->value;
+
+    u32 target_width = static_cast<u32>(frame.width());
+    u32 target_height = static_cast<u32>(frame.height());
+    constexpr u32 MAX_WIDTH = 1280;
+    constexpr u32 MAX_HEIGHT = 720;
+    if (target_width > MAX_WIDTH || target_height > MAX_HEIGHT) {
+        double scale = min(static_cast<double>(MAX_WIDTH) / target_width, static_cast<double>(MAX_HEIGHT) / target_height);
+        target_width = static_cast<u32>(target_width * scale);
+        target_height = static_cast<u32>(target_height * scale);
+    }
+    target_width &= ~1u;
+    target_height &= ~1u;
+    if (target_width < 16 || target_height < 16)
+        return;
+
+    if (!pipeline.encoder || pipeline.encoded_width != target_width || pipeline.encoded_height != target_height) {
+        Media::WindowsMediaFoundation::VideoEncoderConfig config {
+            .width = target_width,
+            .height = target_height,
+            .framerate = 30,
+            .bitrate_bps = 1'200'000,
+            .keyframe_interval_frames = 60,
+        };
+        auto encoder_or_err = Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder::try_create(config);
+        if (encoder_or_err.is_error()) {
+            dbgln("RTCPeerConnection: H.264 encoder init failed for sender_id={}: {}", sender_id, encoder_or_err.error().description());
+            return;
+        }
+        pipeline.encoder = encoder_or_err.release_value();
+        pipeline.encoded_width = target_width;
+        pipeline.encoded_height = target_height;
+        pipeline.force_keyframe = true;
+    }
+
+    auto now = MonotonicTime::now();
+    AK::Duration frame_duration = AK::Duration::from_milliseconds(33);
+    if (pipeline.last_frame_time.has_value()) {
+        auto delta = now - *pipeline.last_frame_time;
+        if (delta >= AK::Duration::from_milliseconds(16) && delta <= AK::Duration::from_milliseconds(100))
+            frame_duration = delta;
+    }
+    pipeline.last_frame_time = now;
+
+    AK::Duration timestamp = pipeline.next_timestamp;
+    pipeline.next_timestamp = pipeline.next_timestamp + frame_duration;
+
+    Vector<Media::WindowsMediaFoundation::EncodedVideoPacket> packets;
+    if (auto rc = pipeline.encoder->encode_frame(frame, timestamp, frame_duration, pipeline.force_keyframe, packets); rc.is_error()) {
+        dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: H.264 encode_frame failed: {}", rc.error().description());
+        return;
+    }
+
+    auto* client = WebRTCAgent::the().existing_client();
+    if (!client)
+        return;
+
+    u32 duration_micros = static_cast<u32>(max<i64>(16'000, min<i64>(100'000, frame_duration.to_microseconds())));
+    for (auto const& packet : packets) {
+        if (packet.data.is_empty())
+            continue;
+        if (packet.is_keyframe)
+            pipeline.force_keyframe = false;
+        client->async_video_track_encoded_frame(sender_id, duration_micros, packet.data.bytes());
+    }
+#else
+    (void)sender_id;
+    (void)frame;
+#endif
 }
 
 void RTCPeerConnection::on_sender_transform_changed(RTCRtpSender& sender)

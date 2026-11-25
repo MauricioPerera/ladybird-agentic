@@ -37,6 +37,23 @@ struct DeviceIdConstraint final {
     bool is_required { false };
 };
 
+struct GetUserMediaOptions final {
+    bool audio_requested { false };
+    bool video_requested { false };
+    Optional<DeviceIdConstraint> audio_device_id_constraint;
+    Optional<DeviceIdConstraint> video_device_id_constraint;
+    u32 requested_video_width { 640 };
+    u32 requested_video_height { 480 };
+    u32 requested_video_fps { 30 };
+};
+
+struct VideoCameraCandidate final {
+    String device_id;
+    String label;
+    String group_id;
+    bool is_default { false };
+};
+
 // https://w3c.github.io/mediacapture-main/#mediadevices
 class MediaDevices final : public DOM::EventTarget {
     WEB_WRAPPABLE(MediaDevices, DOM::EventTarget);
@@ -72,7 +89,7 @@ private:
 
     struct PendingGetUserMediaRequest final {
         GC::Ref<WebIDL::Promise> promise;
-        Optional<DeviceIdConstraint> device_id_constraint;
+        GetUserMediaOptions options;
 
         void visit_edges(GC::Cell::Visitor&) const;
     };
@@ -97,12 +114,12 @@ private:
     bool has_live_device_of_kind(Utf16FlyString const& kind) const;
     void set_device_information_exposure(bool audio_requested, bool video_requested, bool value);
     void queue_enumerate_devices_task(GC::Ref<WebIDL::Promise>);
-    void queue_get_user_media_task(GC::Ref<WebIDL::Promise>, Optional<DeviceIdConstraint>);
+    void queue_get_user_media_task(GC::Ref<WebIDL::Promise>, GetUserMediaOptions);
     void process_pending_enumerate_devices_requests();
     void process_pending_get_user_media_requests();
     GC::RootVector<GC::Ref<MediaDeviceInfo>> create_list_of_device_info_objects(Vector<StoredDevice> const& device_list);
     void run_device_change_notification_steps(Vector<StoredDevice> const& device_list);
-    static Vector<StoredDevice> current_audio_device_snapshot();
+    static Vector<StoredDevice> current_device_snapshot();
     void did_observe_audio_device_cache_update();
     // Runs the callback once the process has a device list fetched from now on, or at once where no list ever comes.
     void run_with_fresh_audio_device_list(GC::Ref<GC::Function<void()>>);
@@ -137,3 +154,5 @@ private:
 }
 
 GC_UNTRACED_CAPTURE(Web::MediaCapture::DeviceIdConstraint);
+GC_UNTRACED_CAPTURE(Web::MediaCapture::GetUserMediaOptions);
+GC_UNTRACED_CAPTURE(Web::MediaCapture::VideoCameraCandidate);

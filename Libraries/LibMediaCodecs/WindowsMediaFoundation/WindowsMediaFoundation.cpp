@@ -22,10 +22,10 @@ AK::Duration duration_from_sample_time(i64 sample_time)
     return AK::Duration::from_time_units(sample_time, NANOSECONDS_PER_SAMPLE_TIME_UNIT, 1'000'000'000);
 }
 
-static bool media_foundation_is_started()
+bool ensure_media_foundation_started()
 {
     static bool const started = [] {
-        // Decoder threads never enter an apartment, so they rely on the process-wide one staying alive.
+        // Decoder and capture threads never enter an apartment, so they rely on the process-wide one staying alive.
         CO_MTA_USAGE_COOKIE cookie;
         if (FAILED(CoIncrementMTAUsage(&cookie)))
             return false;
@@ -36,7 +36,7 @@ static bool media_foundation_is_started()
 
 DecoderErrorOr<ComPtr<IMFTransform>> create_decoder_transform(CodecID codec_id, IMFMediaType& input_type)
 {
-    if (!media_foundation_is_started())
+    if (!ensure_media_foundation_started())
         return DecoderError::with_description(DecoderErrorCategory::NotImplemented, "Media Foundation could not be started"sv);
 
     MFT_REGISTER_TYPE_INFO input_type_info {};

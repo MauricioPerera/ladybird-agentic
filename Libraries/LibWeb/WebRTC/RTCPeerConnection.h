@@ -28,6 +28,12 @@ namespace Media {
 enum class CodecID : u8;
 class VideoDecoder;
 
+#ifdef AK_OS_WINDOWS
+namespace WindowsMediaFoundation {
+class WindowsMediaFoundationVideoEncoder;
+}
+#endif
+
 }
 
 namespace Web::WebRTC {
@@ -129,6 +135,8 @@ public:
     void on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload);
     void on_encoded_video_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload);
     void on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc);
+    void on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc);
+    void on_video_keyframe_requested(u64 sender_id);
     void on_create_offer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
     void on_create_answer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
     void on_set_local_description_result_received(u64 request_id, bool ok, String error_kind, String error_message);
@@ -276,6 +284,33 @@ private:
     void start_outgoing_audio_for_sender(GC::Ref<RTCRtpSender>);
     void encode_and_route_outgoing_pcm(u64 sender_id, ByteBuffer pcm_s16le);
     void on_outgoing_encrypted_frame(u64 sender_id, ByteBuffer payload, u32 rtp_timestamp, u16 sequence_number, u8 payload_type);
+
+    struct OutgoingVideoProducerState : public AtomicRefCounted<OutgoingVideoProducerState> {
+        Atomic<size_t> pending_frames { 0 };
+    };
+    struct OutgoingVideoPipeline {
+        AK_ALLOC_WITH_KMALLOC;
+
+        OutgoingVideoPipeline() = default;
+        ~OutgoingVideoPipeline();
+
+        RefPtr<MediaCapture::VideoFrameSink> sink;
+        GC::Ptr<MediaCapture::MediaStreamTrack> track;
+#ifdef AK_OS_WINDOWS
+        OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationVideoEncoder> encoder;
+#endif
+        u64 generation { 0 };
+        Optional<MonotonicTime> last_frame_time;
+        AK::Duration next_timestamp { AK::Duration::zero() };
+        bool force_keyframe { true };
+        u32 encoded_width { 0 };
+        u32 encoded_height { 0 };
+    };
+    HashMap<u64, NonnullOwnPtr<OutgoingVideoPipeline>> m_outgoing_video_pipelines;
+    HashTable<u64> m_requested_video_senders;
+    HashTable<u64> m_ready_video_senders;
+    void start_outgoing_video_for_sender(GC::Ref<RTCRtpSender>);
+    void encode_and_send_outgoing_video_frame(u64 sender_id, Gfx::DecodedImageFrame);
 };
 
 }

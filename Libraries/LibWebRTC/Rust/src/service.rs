@@ -47,6 +47,7 @@ type SharedWriter = Arc<Transport>;
 const MAX_PEER_CONNECTIONS: usize = 256;
 const MAX_TRANSCEIVERS: usize = 1024;
 const MAX_AUDIO_SENDERS: usize = 1024;
+const MAX_VIDEO_SENDERS: usize = 1024;
 const MAX_DATA_CHANNELS: usize = 1024;
 const MAX_ICE_SERVER_URLS: usize = 32;
 // Data a channel may have waiting to go out. A page that sends more than this is closed rather than buffered.
@@ -74,6 +75,12 @@ struct AudioSender {
     sender: Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
     // The host encodes (and possibly encrypts, as Discord's DAVE transform does) each frame, so its bytes go straight
     // onto the wire.
+    track: Arc<TrackLocalStaticSample>,
+}
+
+struct VideoSender {
+    pc_id: u64,
+    sender: Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
     track: Arc<TrackLocalStaticSample>,
 }
 
@@ -167,6 +174,7 @@ struct Registry {
     pcs: HashMap<u64, Arc<RTCPeerConnection>>,
     data_channels: HashMap<u64, Arc<RTCDataChannel>>,
     audio_senders: HashMap<u64, AudioSender>,
+    video_senders: HashMap<u64, VideoSender>,
     channel_owners: HashMap<u64, u64>,
     transceivers: HashMap<u64, (u64, Arc<webrtc::rtp_transceiver::RTCRtpTransceiver>)>,
 }
@@ -681,6 +689,7 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
             let pc = {
                 let mut registry = state.registry.lock().await;
                 registry.audio_senders.retain(|_, sender| sender.pc_id != req.pc_id);
+                registry.video_senders.retain(|_, sender| sender.pc_id != req.pc_id);
                 registry.transceivers.retain(|_, (owner, _)| *owner != req.pc_id);
                 let channels: Vec<_> = registry
                     .channel_owners
@@ -1117,6 +1126,141 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                 );
             }
         }
+        Message::AddVideoTrack(req) => {
+            {
+                let registry = state.registry.lock().await;
+                if registry.video_senders.contains_key(&req.sender_id) {
+                    return Ok(());
+                }
+                if registry.video_senders.len() >= MAX_VIDEO_SENDERS {
+                    return Err(anyhow!("Too many video senders"));
+                }
+            }
+            if let Some(pc) = find_pc(state, req.pc_id).await {
+                use webrtc::api::media_engine::MIME_TYPE_H264;
+                use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+                let requested_mime = to_string(req.mime_type);
+                let normalized_mime = if requested_mime.eq_ignore_ascii_case("video/h264") {
+                    MIME_TYPE_H264.to_owned()
+                } else {
+                    requested_mime
+                };
+                let track = Arc::new(TrackLocalStaticSample::new(
+                    RTCRtpCodecCapability {
+                        mime_type: normalized_mime,
+                        clock_rate: 90000,
+                        channels: 0,
+                        sdp_fmtp_line: String::new(),
+                        rtcp_feedback: vec![],
+                    },
+                    format!("video-{}", req.sender_id),
+                    format!("ladybird-stream-{}", req.pc_id),
+                ));
+                let existing = state.registry.lock().await.transceivers.get(&req.sender_id).cloned();
+                let added = if let Some((owner, transceiver)) = existing {
+                    if owner != req.pc_id {
+                        return Err(anyhow!("Sender belongs to another peer"));
+                    }
+                    let sender = transceiver.sender().await;
+                    sender.replace_track(Some(track.clone())).await.map(|()| sender)
+                } else {
+                    pc.add_track(track.clone()).await
+                };
+                match added {
+                    Ok(rtp_sender) => {
+                        for transceiver in pc.get_transceivers().await {
+                            if Arc::ptr_eq(&transceiver.sender().await, &rtp_sender) {
+                                state
+                                    .registry
+                                    .lock()
+                                    .await
+                                    .transceivers
+                                    .insert(req.sender_id, (req.pc_id, transceiver));
+                                break;
+                            }
+                        }
+                        let params = rtp_sender.get_parameters().await;
+                        let ssrc = params.encodings.first().map(|e| e.ssrc).unwrap_or(0);
+                        match rtp_sender.send(&params).await {
+                            Ok(()) | Err(webrtc::Error::ErrRTPSenderSendAlreadyCalled) => {}
+                            Err(e) => log::warn!("video rtp_sender.send (forcing bind): {e}"),
+                        }
+                        let feedback_sender = rtp_sender.clone();
+                        let writer = state.writer.clone();
+                        let pc_id = req.pc_id;
+                        let sender_id = req.sender_id;
+                        tokio::spawn(async move {
+                            use webrtc::rtcp::payload_feedbacks::{
+                                full_intra_request::FullIntraRequest,
+                                picture_loss_indication::PictureLossIndication,
+                            };
+                            while let Ok((packets, _)) = feedback_sender.read_rtcp().await {
+                                let wants_keyframe = packets.iter().any(|packet| {
+                                    let any = packet.as_any();
+                                    any.downcast_ref::<PictureLossIndication>().is_some()
+                                        || any.downcast_ref::<FullIntraRequest>().is_some()
+                                });
+                                if wants_keyframe {
+                                    let _ = send(
+                                        &writer,
+                                        &Client::OnVideoKeyframeRequested { pc_id, sender_id },
+                                    );
+                                }
+                            }
+                        });
+                        state.registry.lock().await.video_senders.insert(
+                            req.sender_id,
+                            VideoSender {
+                                pc_id: req.pc_id,
+                                sender: rtp_sender,
+                                track,
+                            },
+                        );
+                        log::info!(
+                            "AddVideoTrack pc_id={} sender_id={} ssrc={}",
+                            req.pc_id,
+                            req.sender_id,
+                            ssrc
+                        );
+                        send(
+                            &state.writer,
+                            &Client::OnVideoTrackAdded {
+                                pc_id: req.pc_id,
+                                sender_id: req.sender_id,
+                                ssrc,
+                            },
+                        )?;
+                    }
+                    Err(e) => log::warn!("pc.add_track (video): {e}"),
+                }
+            }
+        }
+        Message::VideoTrackEncodedFrame(req) => {
+            let track = state
+                .registry
+                .lock()
+                .await
+                .video_senders
+                .get(&req.sender_id)
+                .map(|sender| sender.track.clone());
+            if let Some(track) = track {
+                use std::time::Duration;
+                use webrtc::media::Sample;
+                let sample = Sample {
+                    data: req.payload.into(),
+                    duration: Duration::from_micros(req.duration_micros as u64),
+                    ..Default::default()
+                };
+                if let Err(e) = track.write_sample(&sample).await {
+                    log::debug!("video_track_encoded_frame write_sample failed: {e}");
+                }
+            } else {
+                log::debug!(
+                    "video_track_encoded_frame: no VideoSender for sender_id={}",
+                    req.sender_id
+                );
+            }
+        }
         Message::RequestVideoKeyframe(req) => {
             if let Some(pc) = find_pc(state, req.pc_id).await {
                 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -1130,14 +1274,20 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
             }
         }
         Message::RemoveTrack(req) => {
-            let removed = {
+            let (removed_audio, removed_video) = {
                 let mut registry = state.registry.lock().await;
-                registry.audio_senders.remove(&req.sender_id)
+                (
+                    registry.audio_senders.remove(&req.sender_id).map(|s| s.sender),
+                    registry.video_senders.remove(&req.sender_id).map(|s| s.sender),
+                )
             };
-            if let Some(sender) = removed
-                && let Some(pc) = find_pc(state, req.pc_id).await
-            {
-                pc.remove_track(&sender.sender).await?;
+            if let Some(pc) = find_pc(state, req.pc_id).await {
+                if let Some(sender) = removed_audio {
+                    pc.remove_track(&sender).await?;
+                }
+                if let Some(sender) = removed_video {
+                    pc.remove_track(&sender).await?;
+                }
             }
             log::info!("RemoveTrack pc_id={} sender_id={}", req.pc_id, req.sender_id);
         }
@@ -2642,6 +2792,258 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
         command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;
         drop(msg_rx);
+        drop(state);
+        drop(reader_thread);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn h264_video_send_and_receive_loopback() {
+        use std::time::Duration;
+        use webrtc::api::APIBuilder;
+        use webrtc::api::media_engine::MediaEngine;
+        use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+        use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+        use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
+        use crate::ipc::ClientMessage;
+        use crate::video_rx::{VideoCodec, VideoFrameAssembler};
+
+        let (state, renderer) = new_state(NetworkAccess::Allowed);
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reader_thread = std::thread::spawn(move || {
+            while let Some(received) = renderer.receive() {
+                let (bytes, _) = received.into_parts();
+                if let Ok(message) = ClientMessage::decode(bytes.as_ref(), Vec::new())
+                    && msg_tx.send(message).is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        command(
+            &state,
+            Server::CreatePeerConnection {
+                pc_id: 1,
+                configuration: CONFIG.to_owned().into(),
+            },
+        )
+        .await;
+        command(
+            &state,
+            Server::AddVideoTrack {
+                pc_id: 1,
+                sender_id: 42,
+                mime_type: "video/H264".to_owned().into(),
+            },
+        )
+        .await;
+
+        let local_ssrc = loop {
+            if let ClientMessage::OnVideoTrackAdded(added) = tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+                .await
+                .expect("timed out waiting for OnVideoTrackAdded")
+                .expect("IPC channel closed")
+            {
+                assert_eq!(added.pc_id, 1);
+                assert_eq!(added.sender_id, 42);
+                assert_ne!(added.ssrc, 0);
+                break added.ssrc;
+            }
+        };
+
+        let mut media = MediaEngine::default();
+        media
+            .register_codec(
+                RTCRtpCodecParameters {
+                    capability: RTCRtpCodecCapability {
+                        mime_type: "video/H264".to_owned(),
+                        clock_rate: 90000,
+                        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+                            .to_owned(),
+                        ..Default::default()
+                    },
+                    payload_type: 102,
+                    ..Default::default()
+                },
+                RTPCodecType::Video,
+            )
+            .unwrap();
+        let remote_api = APIBuilder::new().with_media_engine(media).build();
+        let remote = Arc::new(
+            remote_api
+                .new_peer_connection(RTCConfiguration::default())
+                .await
+                .unwrap(),
+        );
+
+        let (rx_frame_tx, mut rx_frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let remote_for_pli = Arc::clone(&remote);
+        remote.on_track(Box::new(move |track, _, _| {
+            let rx_frame_tx = rx_frame_tx.clone();
+            let remote_for_pli = Arc::clone(&remote_for_pli);
+            let media_ssrc = track.ssrc();
+            Box::pin(async move {
+                let mut assembler = VideoFrameAssembler::new(VideoCodec::H264);
+                let mut sent_pli = false;
+                while let Ok((pkt, _)) = track.read_rtp().await {
+                    if !sent_pli {
+                        sent_pli = true;
+                        let _ = remote_for_pli
+                            .write_rtcp(&[Box::new(PictureLossIndication {
+                                sender_ssrc: 0,
+                                media_ssrc,
+                            })])
+                            .await;
+                    }
+                    for frame in assembler.push_packet(pkt).frames {
+                        let _ = rx_frame_tx.send(frame);
+                    }
+                }
+            })
+        }));
+
+        let state_for_ice = Arc::clone(&state);
+        remote.on_ice_candidate(Box::new(move |candidate| {
+            let state = Arc::clone(&state_for_ice);
+            Box::pin(async move {
+                let Some(candidate) = candidate else {
+                    return;
+                };
+                let Ok(json) = candidate.to_json() else {
+                    return;
+                };
+                command(
+                    &state,
+                    Server::AddIceCandidate {
+                        pc_id: 1,
+                        request_id: 10,
+                        candidate: json.candidate.into(),
+                        sdp_mid: json.sdp_mid.map(Into::into),
+                        sdp_mline_index: json.sdp_mline_index.map(u32::from),
+                        ufrag: json.username_fragment.map(Into::into),
+                    },
+                )
+                .await;
+            })
+        }));
+
+        command(
+            &state,
+            Server::CreateOffer {
+                pc_id: 1,
+                request_id: 1,
+                ice_restart: false,
+            },
+        )
+        .await;
+        let offer_sdp = loop {
+            if let ClientMessage::OnCreateOfferResult(res) = tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+                .await
+                .expect("timed out waiting for CreateOfferResult")
+                .expect("IPC channel closed")
+            {
+                assert!(res.ok, "create_offer failed: {}", to_string(res.error_message));
+                break to_string(res.sdp);
+            }
+        };
+
+        command(
+            &state,
+            Server::SetLocalDescription {
+                pc_id: 1,
+                request_id: 2,
+                sdp_type: "offer".to_owned().into(),
+                sdp: offer_sdp.clone().into(),
+            },
+        )
+        .await;
+        remote
+            .set_remote_description(RTCSessionDescription::offer(offer_sdp).unwrap())
+            .await
+            .unwrap();
+        let answer = remote.create_answer(None).await.unwrap();
+        assert!(answer.sdp.contains("H264/90000"));
+        remote.set_local_description(answer.clone()).await.unwrap();
+        command(
+            &state,
+            Server::SetRemoteDescription {
+                pc_id: 1,
+                request_id: 3,
+                sdp_type: "answer".to_owned().into(),
+                sdp: answer.sdp.into(),
+            },
+        )
+        .await;
+
+        let _ = local_ssrc;
+        // Minimal Annex-B SPS + PPS + IDR slice.
+        let h264_annex_b = [
+            0x00u8, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1F, 0xE9, 0x01, 0x40, 0x7B, 0x20,
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x06, 0xE2,
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21, 0xA0,
+        ];
+
+        let mut received_assembled = None;
+        let mut received_pli = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+
+        while tokio::time::Instant::now() < deadline && (received_assembled.is_none() || !received_pli) {
+            tokio::select! {
+                _ = tick.tick() => {
+                    command(
+                        &state,
+                        Server::VideoTrackEncodedFrame {
+                            sender_id: 42,
+                            duration_micros: 33_000,
+                            payload: h264_annex_b.to_vec(),
+                        },
+                    )
+                    .await;
+                }
+                maybe_frame = rx_frame_rx.recv() => {
+                    if let Some(frame) = maybe_frame
+                        && received_assembled.is_none()
+                    {
+                        received_assembled = Some(frame);
+                    }
+                }
+                maybe_msg = msg_rx.recv() => {
+                    let Some(msg) = maybe_msg else {
+                        break;
+                    };
+                    match msg {
+                        ClientMessage::OnIceCandidate(cand) => {
+                            if let Some(c) = to_optional_string(cand.candidate) {
+                                let _ = remote.add_ice_candidate(RTCIceCandidateInit {
+                                    candidate: c,
+                                    sdp_mid: to_optional_string(cand.sdp_mid),
+                                    sdp_mline_index: cand.sdp_mline_index.map(|v| v as u16),
+                                    ..Default::default()
+                                }).await;
+                            }
+                        }
+                        ClientMessage::OnVideoKeyframeRequested(req)
+                            if req.pc_id == 1 && req.sender_id == 42 =>
+                        {
+                            received_pli = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let assembled = received_assembled.expect("expected assembled H.264 frame at remote peer");
+        assert!(assembled.is_keyframe);
+        assert!(!assembled.data.is_empty());
+        assert!(received_pli, "expected RTCP PLI to trigger OnVideoKeyframeRequested");
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
+        command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;
+        drop(msg_rx);
+        drop(rx_frame_rx);
         drop(state);
         drop(reader_thread);
     }

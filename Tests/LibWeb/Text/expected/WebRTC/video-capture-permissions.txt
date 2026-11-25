@@ -1,0 +1,5 @@
+camera permission initial: prompt
+camera permission with policy none: denied
+policy-blocked getUserMedia error: NotAllowedError
+enumerateDevices is array: true
+prompt-blocked getUserMedia rejected cleanly: true

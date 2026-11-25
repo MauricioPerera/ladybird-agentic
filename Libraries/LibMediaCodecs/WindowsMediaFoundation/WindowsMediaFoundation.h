@@ -25,6 +25,7 @@ namespace Media::WindowsMediaFoundation {
 
 using Microsoft::WRL::ComPtr;
 
+MEDIACODECS_API bool ensure_media_foundation_started();
 MEDIACODECS_API i64 sample_time_from_duration(AK::Duration);
 MEDIACODECS_API AK::Duration duration_from_sample_time(i64 sample_time);
 
