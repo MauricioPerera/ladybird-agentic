@@ -845,10 +845,20 @@ void MediaDevices::queue_enumerate_devices_task(GC::Ref<WebIDL::Promise> promise
                 break;
             }
         }
-        dbgln("MediaDevices::enumerateDevices -> total={} (audioin={}, videoin={}, audioout={}, exposed_mic={}, exposed_cam={})",
-            result_list.size(), audio_in, video_in, audio_out,
-            media_devices->microphone_information_can_be_exposed(),
-            media_devices->camera_information_can_be_exposed());
+        EnumerateLogSummary summary {
+            .total = result_list.size(),
+            .audio_in = audio_in,
+            .video_in = video_in,
+            .audio_out = audio_out,
+            .exposed_mic = media_devices->microphone_information_can_be_exposed(),
+            .exposed_cam = media_devices->camera_information_can_be_exposed(),
+        };
+        if (media_devices->m_last_logged_enumerate_summary != summary) {
+            media_devices->m_last_logged_enumerate_summary = summary;
+            dbgln("MediaDevices::enumerateDevices -> total={} (audioin={}, videoin={}, audioout={}, exposed_mic={}, exposed_cam={})",
+                summary.total, summary.audio_in, summary.video_in, summary.audio_out,
+                summary.exposed_mic, summary.exposed_cam);
+        }
         resolve_media_device_info_list_promise(*promise, result_list);
     }));
 }

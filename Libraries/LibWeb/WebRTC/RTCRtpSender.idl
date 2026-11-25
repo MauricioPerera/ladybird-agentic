@@ -11,7 +11,7 @@ interface RTCRtpSender {
     RTCRtpSendParameters getParameters();
     Promise<undefined> replaceTrack(MediaStreamTrack? withTrack);
     [FIXME] undefined setStreams(MediaStream... streams);
-    [FIXME] Promise<RTCStatsReport> getStats();
+    Promise<RTCStatsReport> getStats();
 };
 
 partial interface RTCRtpSender {

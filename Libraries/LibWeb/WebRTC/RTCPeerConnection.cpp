@@ -636,7 +636,7 @@ WebIDL::ExceptionOr<GC::Ref<RTCRtpSender>> RTCPeerConnection::add_track(GC::Ref<
         }
         sender->set_associated_media_stream_ids(move(ids));
         // 9.2. Create an RTCRtpReceiver with kind, and let receiver be the result.
-        auto receiver = RTCRtpReceiver::create(kind);
+        auto receiver = RTCRtpReceiver::create(*this, kind);
         // FIXME: 9.3. Create an RTCRtpTransceiver with sender, receiver and an RTCRtpTransceiverDirection value of "sendrecv", and let transceiver be the result.
         auto transceiver = RTCRtpTransceiver::create(*this, *sender, receiver, Bindings::RTCRtpTransceiverDirection::Sendrecv, kind);
         transceiver->set_transceiver_id(sender_id);
@@ -695,7 +695,7 @@ WebIDL::ExceptionOr<GC::Ref<RTCRtpTransceiver>> RTCPeerConnection::add_transceiv
     }
     sender->set_associated_media_stream_ids(move(stream_ids));
     // 12. Create an RTCRtpReceiver, receiver, from kind.
-    auto receiver = RTCRtpReceiver::create(kind);
+    auto receiver = RTCRtpReceiver::create(*this, kind);
     // 13. Create an RTCRtpTransceiver, transceiver, from sender, receiver, and direction.
     auto transceiver = RTCRtpTransceiver::create(*this, sender, receiver, direction, kind);
     // 14. Add transceiver to connection's set of transceivers.
@@ -1236,7 +1236,7 @@ void RTCPeerConnection::on_remote_track_added(u64 receiver_id, u64 transceiver_i
         auto synth_sender_id = WebRTCAgent::the().next_sender_id();
         auto synth_sender_ssrc = WebRTCAgent::the().next_ssrc();
         auto sender = RTCRtpSender::create(*this, synth_sender_id, synth_sender_ssrc);
-        auto receiver = RTCRtpReceiver::create(kind);
+        auto receiver = RTCRtpReceiver::create(*this, kind);
         auto new_transceiver = RTCRtpTransceiver::create(*this, sender, receiver, Bindings::RTCRtpTransceiverDirection::Recvonly, kind);
         m_transceivers.append(new_transceiver);
         transceiver = new_transceiver;

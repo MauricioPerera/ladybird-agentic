@@ -34,6 +34,8 @@ struct CameraWorkerState final : public AtomicRefCounted<CameraWorkerState> {
 
     Atomic<bool> stop_requested { false };
     Atomic<bool> is_running { false };
+    Atomic<bool> logged_first_frame { false };
+    Atomic<bool> logged_convert_failure { false };
 };
 
 struct VideoCaptureStream::Impl {
@@ -230,6 +232,7 @@ public:
             return S_OK;
 
         if (FAILED(hr_status) || (stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) != 0) {
+            dbgln("WMF camera: OnReadSample ended hr=0x{:08x} flags=0x{:x}", static_cast<u32>(hr_status), static_cast<u32>(stream_flags));
             m_worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
             VideoCaptureStream::ErrorCallback ended_cb;
             {
@@ -284,7 +287,12 @@ public:
                         frame = convert_sample_to_frame({ ptr, len }, subtype, width, height, stride);
                     (void)contiguous->Unlock();
 
+                    if (!frame.has_value() && !m_worker->logged_convert_failure.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
+                        dbgln("WMF camera: convert_sample_to_frame failed len={} {}x{} stride={}", len, width, height, stride);
+
                     if (frame.has_value() && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+                        if (!m_worker->logged_first_frame.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
+                            dbgln("WMF camera: first frame delivered {}x{}", frame->width(), frame->height());
                         MutexLocker cb_locker(m_worker->callback_mutex);
                         if (m_worker->on_frame && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire))
                             m_worker->on_frame(frame.release_value());
@@ -296,6 +304,7 @@ public:
         if (!m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire) && reader) {
             HRESULT next_hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
             if (FAILED(next_hr) && !m_worker->stop_requested.load(AK::MemoryOrder::memory_order_acquire)) {
+                dbgln("WMF camera: next ReadSample failed hr=0x{:08x}", static_cast<u32>(next_hr));
                 m_worker->is_running.store(false, AK::MemoryOrder::memory_order_release);
                 VideoCaptureStream::ErrorCallback ended_cb;
                 {

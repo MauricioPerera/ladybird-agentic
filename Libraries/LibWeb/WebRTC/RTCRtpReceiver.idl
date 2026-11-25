@@ -7,9 +7,9 @@ interface RTCRtpReceiver {
     [FIXME] readonly attribute RTCDtlsTransport? transport;
     static RTCRtpCapabilities? getCapabilities(DOMString kind);
     RTCRtpReceiveParameters getParameters();
-    [FIXME] sequence<RTCRtpContributingSource> getContributingSources();
-    [FIXME] sequence<RTCRtpSynchronizationSource> getSynchronizationSources();
-    [FIXME] Promise<RTCStatsReport> getStats();
+    sequence<RTCRtpContributingSource> getContributingSources();
+    sequence<RTCRtpSynchronizationSource> getSynchronizationSources();
+    Promise<RTCStatsReport> getStats();
     [FIXME] attribute DOMHighResTimeStamp? jitterBufferTarget;
 };
 

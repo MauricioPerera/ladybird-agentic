@@ -9,6 +9,7 @@
 #include <AK/Optional.h>
 #include <AK/Utf16View.h>
 #include <LibWeb/Bindings/MediaStreamTrack.h>
+#include <LibWeb/Bindings/RTCRtpReceiver.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebRTC/RTCRtpParameters.h>
@@ -22,11 +23,14 @@ class RTCRtpReceiver final : public Bindings::GCAllocatedWrappable {
     GC_DECLARE_ALLOCATOR(RTCRtpReceiver);
 
 public:
-    static GC::Ref<RTCRtpReceiver> create(Bindings::MediaStreamTrackKind);
+    static GC::Ref<RTCRtpReceiver> create(GC::Ref<RTCPeerConnection>, Bindings::MediaStreamTrackKind);
     virtual ~RTCRtpReceiver() override;
 
     static Optional<RTCRtpCapabilities> get_capabilities(Utf16View kind);
     RTCRtpReceiveParameters get_parameters() const;
+    Vector<Bindings::RTCRtpContributingSource> get_contributing_sources() const { return {}; }
+    Vector<Bindings::RTCRtpSynchronizationSource> get_synchronization_sources() const { return {}; }
+    GC::Ref<WebIDL::Promise> get_stats() const;
 
     GC::Ref<MediaCapture::MediaStreamTrack> track() const;
 
@@ -38,9 +42,10 @@ public:
     void set_associated_remote_streams(Vector<GC::Ref<MediaCapture::MediaStream>>&&);
 
 private:
-    explicit RTCRtpReceiver(GC::Ref<MediaCapture::MediaStreamTrack>);
+    explicit RTCRtpReceiver(GC::Ref<RTCPeerConnection>, GC::Ref<MediaCapture::MediaStreamTrack>);
     virtual void visit_edges(JS::Cell::Visitor&) override;
 
+    GC::Ref<RTCPeerConnection> m_connection;
     // [[ReceiverTrack]]
     GC::Ref<MediaCapture::MediaStreamTrack> m_track;
     GC::Ptr<Bindings::Wrappable> m_transform;

@@ -8,6 +8,7 @@
 #include <LibGC/Heap.h>
 #include <LibWeb/MediaCapture/MediaStream.h>
 #include <LibWeb/MediaCapture/MediaStreamTrack.h>
+#include <LibWeb/WebRTC/RTCPeerConnection.h>
 #include <LibWeb/WebRTC/RTCRtpReceiver.h>
 #include <LibWeb/WebRTC/RTCRtpScriptTransform.h>
 #include <LibWeb/WebRTC/RTCSFrameReceiverTransform.h>
@@ -16,14 +17,15 @@ namespace Web::WebRTC {
 
 GC_DEFINE_ALLOCATOR(RTCRtpReceiver);
 
-GC::Ref<RTCRtpReceiver> RTCRtpReceiver::create(Bindings::MediaStreamTrackKind kind)
+GC::Ref<RTCRtpReceiver> RTCRtpReceiver::create(GC::Ref<RTCPeerConnection> connection, Bindings::MediaStreamTrackKind kind)
 {
     auto track = MediaCapture::MediaStreamTrack::create(kind);
-    return GC::Heap::the().allocate<RTCRtpReceiver>(track);
+    return GC::Heap::the().allocate<RTCRtpReceiver>(connection, track);
 }
 
-RTCRtpReceiver::RTCRtpReceiver(GC::Ref<MediaCapture::MediaStreamTrack> track)
-    : m_track(track)
+RTCRtpReceiver::RTCRtpReceiver(GC::Ref<RTCPeerConnection> connection, GC::Ref<MediaCapture::MediaStreamTrack> track)
+    : m_connection(connection)
+    , m_track(track)
 {
 }
 
@@ -100,6 +102,12 @@ RTCRtpReceiveParameters RTCRtpReceiver::get_parameters() const
     return result;
 }
 
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtpreceiver-getstats
+GC::Ref<WebIDL::Promise> RTCRtpReceiver::get_stats() const
+{
+    return m_connection->get_stats(nullptr);
+}
+
 GC::Ref<MediaCapture::MediaStreamTrack> RTCRtpReceiver::track() const { return m_track; }
 
 void RTCRtpReceiver::set_associated_remote_streams(Vector<GC::Ref<MediaCapture::MediaStream>>&& streams)
@@ -110,6 +118,7 @@ void RTCRtpReceiver::set_associated_remote_streams(Vector<GC::Ref<MediaCapture::
 void RTCRtpReceiver::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    visitor.visit(m_connection);
     visitor.visit(m_track);
     visitor.visit(m_transform);
     for (auto& stream : m_associated_remote_streams)

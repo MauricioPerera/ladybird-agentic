@@ -18,9 +18,9 @@ asyncTest(async done => {
         println(`has ssrc: ${offer.sdp.includes("a=ssrc:")}`);
         println(`has msid: ${offer.sdp.includes("a=msid:")}`);
 
-        const munged = offer.sdp.replace(/^(a=rtpmap:\d+ VP8\/90000\r?\n)/m, "$1a=rtcp-fb:96 rrtr\r\n");
+        const munged = offer.sdp.replace(/^(a=rtpmap:\d+ H264\/90000\r?\n)/m, "$1a=rtcp-fb:102 rrtr\r\n");
         await pc.setLocalDescription({ type: "offer", sdp: munged });
-        println(`munged applied: ${pc.localDescription.sdp.includes("a=rtcp-fb:96 rrtr")}`);
+        println(`munged applied: ${pc.localDescription.sdp.includes("a=rtcp-fb:102 rrtr")}`);
         println(`transceiver mid set: ${typeof videoTransceiver.mid === "string" && videoTransceiver.mid.length > 0}`);
 
         try {

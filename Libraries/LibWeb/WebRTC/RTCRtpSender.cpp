@@ -215,7 +215,24 @@ RTCRtpSendParameters RTCRtpSender::get_parameters()
     //    The headerExtensions sequence is populated based on the header extensions that have been negotiated for sending.
     // FIXME: populate from negotiated header extensions.
     //    codecs is set to the value of the [[SendCodecs]] internal slot.
-    // FIXME: populate from [[SendCodecs]].
+    if (m_track) {
+        if (m_track->track_kind() == Bindings::MediaStreamTrackKind::Audio) {
+            RTCRtpCodecParameters opus;
+            opus.channels = 2;
+            opus.clock_rate = 48000;
+            opus.mime_type = "audio/opus"_utf16;
+            opus.sdp_fmtp_line = "minptime=10;useinbandfec=1"_utf16;
+            opus.payload_type = 111;
+            result.codecs.append(move(opus));
+        } else {
+            RTCRtpCodecParameters h264;
+            h264.clock_rate = 90000;
+            h264.mime_type = "video/H264"_utf16;
+            h264.sdp_fmtp_line = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"_utf16;
+            h264.payload_type = 102;
+            result.codecs.append(move(h264));
+        }
+    }
     //    rtcp.cname is set to the CNAME of the associated RTCPeerConnection. rtcp.reducedSize is set to true if
     //        reduced-size RTCP has been negotiated for sending, and false otherwise.
     // FIXME: populate rtcp.cname and rtcp.reducedSize from the connection.
@@ -230,6 +247,12 @@ RTCRtpSendParameters RTCRtpSender::get_parameters()
 
     // 6. Return result.
     return result;
+}
+
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtpsender-getstats
+GC::Ref<WebIDL::Promise> RTCRtpSender::get_stats() const
+{
+    return m_connection->get_stats(nullptr);
 }
 
 }

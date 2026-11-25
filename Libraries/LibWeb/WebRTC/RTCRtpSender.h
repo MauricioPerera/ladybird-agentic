@@ -40,6 +40,7 @@ public:
     GC::Ref<WebIDL::Promise> replace_track(GC::Ptr<MediaCapture::MediaStreamTrack> with_track);
     RTCRtpSendParameters get_parameters();
     GC::Ref<WebIDL::Promise> set_parameters(RTCRtpSendParameters const&, RTCSetParameterOptions const&);
+    GC::Ref<WebIDL::Promise> get_stats() const;
 
     u64 sender_id() const { return m_sender_id; }
     u32 ssrc() const { return m_ssrc; }

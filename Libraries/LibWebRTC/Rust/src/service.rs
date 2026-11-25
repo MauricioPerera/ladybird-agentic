@@ -87,6 +87,57 @@ struct VideoSender {
 /// Placeholder send track attached to sendonly/sendrecv video transceivers so WebRTC offers
 /// populate media SSRCs, RTX `a=ssrc-group:FID` lines, and `a=msid` attributes needed by apps
 /// such as Google Meet before local camera encoding is wired up.
+fn h264_send_codecs() -> Vec<webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters> {
+    use webrtc::api::media_engine::MIME_TYPE_H264;
+    use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
+    vec![
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 102,
+            ..Default::default()
+        },
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: "video/rtx".to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: "apt=102".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 103,
+            ..Default::default()
+        },
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 125,
+            ..Default::default()
+        },
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: "video/rtx".to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: "apt=125".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 124,
+            ..Default::default()
+        },
+    ]
+}
+
 struct PlaceholderVideoTrack {
     id: String,
     stream_id: String,
@@ -109,24 +160,30 @@ impl webrtc::track::track_local::TrackLocal for PlaceholderVideoTrack {
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        use webrtc::api::media_engine::MIME_TYPE_VP8;
+        use webrtc::api::media_engine::MIME_TYPE_H264;
         use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
         let codec = t
             .codec_parameters()
             .iter()
-            .find(|c| {
-                let mime = c.capability.mime_type.as_str();
-                !mime.eq_ignore_ascii_case("video/rtx") && !mime.eq_ignore_ascii_case("video/ulpfec")
-            })
+            .find(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H264"))
             .cloned()
+            .or_else(|| {
+                t.codec_parameters()
+                    .iter()
+                    .find(|c| {
+                        let mime = c.capability.mime_type.as_str();
+                        !mime.eq_ignore_ascii_case("video/rtx") && !mime.eq_ignore_ascii_case("video/ulpfec")
+                    })
+                    .cloned()
+            })
             .or_else(|| t.codec_parameters().first().cloned())
             .unwrap_or_else(|| RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_VP8.to_owned(),
+                    mime_type: MIME_TYPE_H264.to_owned(),
                     clock_rate: 90000,
                     ..Default::default()
                 },
-                payload_type: 96,
+                payload_type: 102,
                 ..Default::default()
             });
         Box::pin(async move { Ok(codec) })
@@ -938,14 +995,19 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         id: format!("video-{}", req.transceiver_id),
                         stream_id: format!("ladybird-stream-{}", req.pc_id),
                     });
-                    pc.add_transceiver_from_track(
-                        track,
-                        Some(webrtc::rtp_transceiver::RTCRtpTransceiverInit {
-                            direction,
-                            send_encodings: Vec::new(),
-                        }),
-                    )
-                    .await?
+                    let transceiver = pc
+                        .add_transceiver_from_track(
+                            track,
+                            Some(webrtc::rtp_transceiver::RTCRtpTransceiverInit {
+                                direction,
+                                send_encodings: Vec::new(),
+                            }),
+                        )
+                        .await?;
+                    if let Err(e) = transceiver.set_codec_preferences(h264_send_codecs()).await {
+                        log::warn!("set_codec_preferences(H264) for send video failed: {e}");
+                    }
+                    transceiver
                 } else {
                     // Audio needs a placeholder encoding so a microphone can be attached
                     // later. Receive-only video has no send pipeline; leave its sender empty. A dummy
@@ -2459,8 +2521,9 @@ mod tests {
 
         let munged_sdp = offer
             .sdp
-            .replacen("a=rtpmap:96 VP8/90000", "a=rtpmap:96 VP8/90000\r\na=rtcp-fb:96 rrtr", 1);
-        assert_ne!(munged_sdp, offer.sdp, "offer must include VP8 rtpmap");
+            .replacen("a=rtpmap:102 H264/90000", "a=rtpmap:102 H264/90000\r\na=rtcp-fb:102 rrtr", 1);
+        assert_ne!(munged_sdp, offer.sdp, "offer must include H264 rtpmap");
+        assert!(!offer.sdp.contains("VP8/90000"), "sendonly video offer must restrict to H264");
         let (munged_ok, err_kind, err_msg) = apply_description(&state, 1, "offer", munged_sdp, true).await;
         assert!(munged_ok, "valid munged offer SDP failed: {err_kind} {err_msg}");
 

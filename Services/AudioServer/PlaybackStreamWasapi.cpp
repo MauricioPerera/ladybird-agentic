@@ -90,6 +90,7 @@ struct PlaybackStreamWASAPI::AudioState : public AtomicRefCounted<PlaybackStream
     AudioState();
     ~AudioState();
 
+    Mutex stream_volume_mutex;
     ComPtr<IMMDeviceEnumerator> enumerator;
     ComPtr<IMMDevice> device;
     ComPtr<IAudioClient> audio_client;
@@ -115,8 +116,10 @@ struct PlaybackStreamWASAPI::AudioState : public AtomicRefCounted<PlaybackStream
     };
     Atomic<Paused> paused = Paused::Explicit;
     bool drain_and_suspend = false;
+    Atomic<bool> device_invalidated = false;
     Atomic<bool> exit_requested = false;
 
+    static bool reopen_default_render_device(AudioState& state);
     static int render_thread_loop(AudioState& state);
     static void drain_buffer_and_stop(AudioState& state);
     RefPtr<Core::ThreadedPromise<void>> resume_promise;
@@ -296,25 +299,140 @@ SampleSpecification PlaybackStreamWASAPI::sample_specification() const
     return SampleSpecification { m_state->wave_format.Format.nSamplesPerSec, channel_map };
 }
 
-void PlaybackStreamWASAPI::AudioState::drain_buffer_and_stop(PlaybackStreamWASAPI::AudioState& state)
+bool PlaybackStreamWASAPI::AudioState::reopen_default_render_device(PlaybackStreamWASAPI::AudioState& state)
 {
-    u32 padding;
-    MUST_HR(state.audio_client->GetCurrentPadding(&padding));
-    if (padding > 0) {
-        u32 ms_to_sleep = padding * 1'000ull / state.wave_format.Format.nSamplesPerSec;
-        if (ms_to_sleep > 0) {
-            Sleep(ms_to_sleep - 1);
-            MUST_HR(state.audio_client->GetCurrentPadding(&padding));
-        }
-        if (padding == 0)
-            dbgln_if(AUDIO_DEBUG, "------- PlaybackStreamWASAPI: overslept draining buffer --------");
-        while (padding > 0) {
-            AK::atomic_pause();
-            MUST_HR(state.audio_client->GetCurrentPadding(&padding));
+    state.render_client.Reset();
+    {
+        MutexLocker volume_locker(state.stream_volume_mutex);
+        state.audio_stream_volume.Reset();
+    }
+    state.audio_client.Reset();
+    state.device.Reset();
+
+    if (!state.enumerator || !state.buffer_event) {
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    ComPtr<IMMDevice> new_device;
+    HRESULT hr = state.enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &new_device);
+    if (FAILED(hr) || !new_device) {
+        dbgln("PlaybackStreamWASAPI: GetDefaultAudioEndpoint failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    ComPtr<IAudioClient> new_client;
+    hr = new_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &new_client);
+    if (FAILED(hr) || !new_client) {
+        dbgln("PlaybackStreamWASAPI: Activate IAudioClient failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    DWORD stream_flags
+        = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY | AUDCLNT_STREAMFLAGS_NOPERSIST;
+    hr = new_client->Initialize(AUDCLNT_SHAREMODE_SHARED, stream_flags, 0, 0, &state.wave_format.Format, &PlaybackSessionGUID);
+    if (FAILED(hr)) {
+        dbgln("PlaybackStreamWASAPI: IAudioClient::Initialize failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    UINT32 new_buffer_frame_count = 0;
+    hr = new_client->GetBufferSize(&new_buffer_frame_count);
+    if (FAILED(hr) || new_buffer_frame_count == 0) {
+        dbgln("PlaybackStreamWASAPI: GetBufferSize failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    REFERENCE_TIME new_stream_latency = 0;
+    if (FAILED(new_client->GetStreamLatency(&new_stream_latency)))
+        new_stream_latency = state.stream_latency;
+
+    ComPtr<IAudioRenderClient> new_render_client;
+    hr = new_client->GetService(IID_PPV_ARGS(&new_render_client));
+    if (FAILED(hr) || !new_render_client) {
+        dbgln("PlaybackStreamWASAPI: GetService(IAudioRenderClient) failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    ComPtr<IAudioStreamVolume> new_stream_volume;
+    if (SUCCEEDED(new_client->GetService(IID_PPV_ARGS(&new_stream_volume))) && new_stream_volume) {
+        if (!state.channel_volumes.is_empty())
+            (void)new_stream_volume->SetAllVolumes(state.channel_volumes.size(), state.channel_volumes.data());
+    }
+
+    ResetEvent(state.buffer_event);
+    hr = new_client->SetEventHandle(state.buffer_event);
+    if (FAILED(hr)) {
+        dbgln("PlaybackStreamWASAPI: SetEventHandle failed during reopen (0x{:08x})", static_cast<u32>(hr));
+        state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+        state.paused = Paused::Explicit;
+        return false;
+    }
+
+    state.device = move(new_device);
+    state.audio_client = move(new_client);
+    state.render_client = move(new_render_client);
+    {
+        MutexLocker volume_locker(state.stream_volume_mutex);
+        state.audio_stream_volume = move(new_stream_volume);
+    }
+    state.buffer_frame_count = new_buffer_frame_count;
+    state.stream_latency = new_stream_latency;
+    state.device_invalidated.store(false, MemoryOrder::memory_order_release);
+
+    if (state.paused == Paused::No) {
+        hr = state.audio_client->Start();
+        if (FAILED(hr) && hr != AUDCLNT_E_NOT_STOPPED) {
+            dbgln("PlaybackStreamWASAPI: Start failed during reopen (0x{:08x})", static_cast<u32>(hr));
+            state.device_invalidated.store(true, MemoryOrder::memory_order_release);
+            state.paused = Paused::Explicit;
+            return false;
         }
     }
 
-    MUST_HR(state.audio_client->Stop());
+    dbgln("PlaybackStreamWASAPI: reopened default audio render endpoint");
+    return true;
+}
+
+void PlaybackStreamWASAPI::AudioState::drain_buffer_and_stop(PlaybackStreamWASAPI::AudioState& state)
+{
+    if (!state.audio_client)
+        return;
+
+    u32 padding = 0;
+    HRESULT hr = state.audio_client->GetCurrentPadding(&padding);
+    if (FAILED(hr))
+        return;
+
+    if (padding > 0) {
+        u32 ms_to_sleep = padding * 1'000ull / state.wave_format.Format.nSamplesPerSec;
+        if (ms_to_sleep > 0) {
+            Sleep(min(ms_to_sleep - 1, 500u));
+            if (FAILED(state.audio_client->GetCurrentPadding(&padding)))
+                return;
+        }
+        if (padding == 0)
+            dbgln_if(AUDIO_DEBUG, "------- PlaybackStreamWASAPI: overslept draining buffer --------");
+        auto deadline = MonotonicTime::now() + AK::Duration::from_milliseconds(500);
+        while (padding > 0 && MonotonicTime::now() < deadline) {
+            AK::atomic_pause();
+            if (FAILED(state.audio_client->GetCurrentPadding(&padding)))
+                return;
+        }
+    }
+
+    (void)state.audio_client->Stop();
 }
 
 int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::AudioState& state)
@@ -340,13 +458,21 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
                 auto task = state.task_queue.dequeue();
                 task.visit(
                     [&state](TaskPlay const& task) {
-                        HRESULT hr = state.audio_client->Start();
-                        if (hr == AUDCLNT_E_NOT_STOPPED)
-                            dbgln_if(AUDIO_DEBUG, "PlaybackStreamWASAPI: Trying to start an already running stream.");
-                        else
-                            MUST_HR(move(hr));
+                        if (state.device_invalidated.load(MemoryOrder::memory_order_acquire) || !state.audio_client)
+                            (void)reopen_default_render_device(state);
+                        if (state.audio_client) {
+                            HRESULT hr = state.audio_client->Start();
+                            if (FAILED(hr) && hr != AUDCLNT_E_NOT_STOPPED) {
+                                dbgln("PlaybackStreamWASAPI: Start failed on TaskPlay (0x{:08x}), attempting reopen", static_cast<u32>(hr));
+                                if (reopen_default_render_device(state) && state.audio_client)
+                                    hr = state.audio_client->Start();
+                            }
+                            if (SUCCEEDED(hr) || hr == AUDCLNT_E_NOT_STOPPED)
+                                state.paused = Paused::No;
+                            else
+                                state.paused = Paused::Explicit;
+                        }
                         task.promise->resolve();
-                        state.paused = Paused::No;
                     },
                     [&state](TaskDrainAndSuspend const& task) {
                         state.paused = Paused::Explicit;
@@ -355,15 +481,35 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
                     },
                     [&state](TaskDiscardAndSuspend const& task) {
                         state.paused = Paused::Explicit;
-                        MUST_HR(state.audio_client->Stop());
-                        MUST_HR(state.audio_client->Reset());
+                        if (state.audio_client) {
+                            (void)state.audio_client->Stop();
+                            (void)state.audio_client->Reset();
+                        }
                         task.promise->resolve();
                     },
                     [&state](TaskResumeFromUnderrun const&) {
                         if (state.paused != Paused::Underrun)
                             return;
-                        MUST_HR(state.audio_client->Start());
-                        state.paused.store(Paused::No);
+                        if (state.device_invalidated.load(MemoryOrder::memory_order_acquire) || !state.audio_client) {
+                            if (!reopen_default_render_device(state)) {
+                                state.paused = Paused::Explicit;
+                                return;
+                            }
+                        }
+                        if (!state.audio_client) {
+                            state.paused = Paused::Explicit;
+                            return;
+                        }
+                        HRESULT hr = state.audio_client->Start();
+                        if (FAILED(hr) && hr != AUDCLNT_E_NOT_STOPPED) {
+                            dbgln("PlaybackStreamWASAPI: Start failed on TaskResumeFromUnderrun (0x{:08x}), attempting reopen", static_cast<u32>(hr));
+                            if (reopen_default_render_device(state) && state.audio_client)
+                                hr = state.audio_client->Start();
+                        }
+                        if (SUCCEEDED(hr) || hr == AUDCLNT_E_NOT_STOPPED)
+                            state.paused.store(Paused::No);
+                        else
+                            state.paused.store(Paused::Explicit);
                     });
             }
             state.task_queue_mutex.unlock();
@@ -390,28 +536,57 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
         if (state.paused != Paused::No)
             continue;
 
+        if (!state.audio_client || !state.render_client) {
+            if (!reopen_default_render_device(state))
+                state.paused = Paused::Explicit;
+            continue;
+        }
+
         u32 padding = 0;
-        // TODO: Try to handle some of the errors.
-        MUST_HR(state.audio_client->GetCurrentPadding(&padding));
+        HRESULT hr = state.audio_client->GetCurrentPadding(&padding);
+        if (FAILED(hr)) {
+            dbgln("PlaybackStreamWASAPI: WASAPI call failed (0x{:08x}), attempting device recovery", static_cast<u32>(hr));
+            if (!reopen_default_render_device(state))
+                state.paused = Paused::Explicit;
+            continue;
+        }
 
         u32 frames_available = state.buffer_frame_count - padding;
         if (frames_available == 0) [[unlikely]]
             continue;
         auto buffer_starts_playing_at = MonotonicTime::now() + AK::Duration::from_time_units(padding, 1, state.wave_format.Format.nSamplesPerSec) + AK::Duration::from_nanoseconds(static_cast<i64>(state.stream_latency) * 100);
 
-        BYTE* buffer;
-        MUST_HR(state.render_client->GetBuffer(frames_available, &buffer));
+        BYTE* buffer = nullptr;
+        hr = state.render_client->GetBuffer(frames_available, &buffer);
+        if (FAILED(hr) || !buffer) {
+            dbgln("PlaybackStreamWASAPI: WASAPI call failed (0x{:08x}), attempting device recovery", static_cast<u32>(hr));
+            if (!reopen_default_render_device(state))
+                state.paused = Paused::Explicit;
+            continue;
+        }
 
         u32 buffer_size = frames_available * block_align;
         auto output_buffer = Bytes(buffer, buffer_size).reinterpret<float>();
         auto floats_written = state.data_request_callback(output_buffer, buffer_starts_playing_at);
         if (floats_written.is_empty()) [[unlikely]] {
-            MUST_HR(state.render_client->ReleaseBuffer(0, AUDCLNT_BUFFERFLAGS_SILENT));
+            hr = state.render_client->ReleaseBuffer(0, AUDCLNT_BUFFERFLAGS_SILENT);
+            if (FAILED(hr)) {
+                dbgln("PlaybackStreamWASAPI: WASAPI call failed (0x{:08x}), attempting device recovery", static_cast<u32>(hr));
+                if (!reopen_default_render_device(state))
+                    state.paused = Paused::Explicit;
+                continue;
+            }
             state.paused = Paused::Underrun;
             drain_buffer_and_stop(state);
         } else {
             frames_available = floats_written.size() / state.wave_format.Format.nChannels;
-            MUST_HR(state.render_client->ReleaseBuffer(frames_available, 0));
+            hr = state.render_client->ReleaseBuffer(frames_available, 0);
+            if (FAILED(hr)) {
+                dbgln("PlaybackStreamWASAPI: WASAPI call failed (0x{:08x}), attempting device recovery", static_cast<u32>(hr));
+                if (!reopen_default_render_device(state))
+                    state.paused = Paused::Explicit;
+                continue;
+            }
         }
     }
 
@@ -487,9 +662,22 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamWASAPI::set_volume(doub
 
     m_state->channel_volumes.fill(clamped_volume);
 
-    hr = m_state->audio_stream_volume->SetAllVolumes(m_state->channel_volumes.size(), m_state->channel_volumes.data());
+    ComPtr<IAudioStreamVolume> stream_volume;
+    {
+        MutexLocker volume_locker(m_state->stream_volume_mutex);
+        stream_volume = m_state->audio_stream_volume;
+    }
+    if (!stream_volume) {
+        promise->resolve();
+        return promise;
+    }
+
+    hr = stream_volume->SetAllVolumes(m_state->channel_volumes.size(), m_state->channel_volumes.data());
     if (FAILED(hr)) [[unlikely]] {
-        promise->reject(Error::from_windows_error(hr));
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
+            promise->resolve();
+        else
+            promise->reject(Error::from_windows_error(hr));
     } else [[likely]] {
         promise->resolve();
     }

@@ -147,8 +147,20 @@ private:
     Vector<PendingEnumerateDevicesRequest> m_pending_enumerate_devices_requests;
     Vector<PendingGetUserMediaRequest> m_pending_get_user_media_requests;
     Vector<GC::Ref<GC::Function<void()>>> m_awaiting_fresh_audio_device_list;
+    struct EnumerateLogSummary final {
+        size_t total { 0 };
+        size_t audio_in { 0 };
+        size_t video_in { 0 };
+        size_t audio_out { 0 };
+        bool exposed_mic { false };
+        bool exposed_cam { false };
+
+        bool operator==(EnumerateLogSummary const&) const = default;
+    };
+
     GC::Ptr<DOM::IDLEventListener> m_pending_request_state_change_listener;
     Optional<u64> m_audio_device_cache_listener_id;
+    Optional<EnumerateLogSummary> m_last_logged_enumerate_summary;
 };
 
 }

@@ -8,6 +8,11 @@ sender matches receiver video count: true
 mid before SDP: true, true
 invalid setCodecPreferences: InvalidModificationError
 receiver getParameters shape: true
+sender getStats function: true
+sender getStats returns RTCStatsReport: true
+receiver getStats returns RTCStatsReport: true
+receiver getContributingSources array: true
+receiver getSynchronizationSources array: true
 mid after setLocalDescription: true, true
 remote mid after setRemoteDescription: true, true
 encodingInfo audio opus: true, true, true

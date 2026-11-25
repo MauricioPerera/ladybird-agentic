@@ -34,6 +34,11 @@ asyncTest(async done => {
 
         const recvParams = audioTransceiver.receiver.getParameters();
         println(`receiver getParameters shape: ${Array.isArray(recvParams.codecs) && Array.isArray(recvParams.headerExtensions)}`);
+        println(`sender getStats function: ${typeof videoTransceiver.sender.getStats === "function"}`);
+        println(`sender getStats returns RTCStatsReport: ${(await videoTransceiver.sender.getStats()) instanceof RTCStatsReport}`);
+        println(`receiver getStats returns RTCStatsReport: ${(await videoTransceiver.receiver.getStats()) instanceof RTCStatsReport}`);
+        println(`receiver getContributingSources array: ${Array.isArray(videoTransceiver.receiver.getContributingSources())}`);
+        println(`receiver getSynchronizationSources array: ${Array.isArray(videoTransceiver.receiver.getSynchronizationSources())}`);
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
