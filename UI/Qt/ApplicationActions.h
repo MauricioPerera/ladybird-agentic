@@ -55,6 +55,7 @@ public:
     Action& open_about_page_action() { return *m_open_about_page_action; }
     Action& open_downloads_page_action() { return *m_open_downloads_page_action; }
     Action& open_settings_page_action() { return *m_open_settings_page_action; }
+    Action& open_flows_page_action() { return *m_open_flows_page_action; }
     Action& zoom_in_action() { return *m_zoom_in_action; }
     Action& zoom_out_action() { return *m_zoom_out_action; }
     Action& reset_zoom_action() { return *m_reset_zoom_action; }

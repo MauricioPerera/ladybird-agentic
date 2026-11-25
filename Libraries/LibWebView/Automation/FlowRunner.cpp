@@ -89,6 +89,7 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
         return Error::from_string_literal("Flow has no steps");
 
     u64 resolved_tab_id = 0;
+    bool opened_tab = false;
     if (request.tab_id.has_value()) {
         auto view = m_application.find_automation_view(*request.tab_id, request.require_mcp_permission);
         if (!view.has_value())
@@ -101,6 +102,7 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
         if (!view.has_value())
             return Error::from_string_literal("UI unavailable to open a new automation tab");
         resolved_tab_id = view->view_id();
+        opened_tab = true;
     } else {
         return Error::from_string_literal("No target tab specified and open_new_tab is false");
     }
@@ -111,6 +113,8 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
     active->flow = flow.release_value();
     active->tab_id = resolved_tab_id;
     active->require_mcp_permission = request.require_mcp_permission;
+    active->opened_tab = opened_tab;
+    active->close_tab_on_finish = request.close_tab_on_finish;
     active->on_complete = move(on_complete);
 
     for (auto const& [k, v] : active->flow.variables)
@@ -572,6 +576,7 @@ void FlowRunner::fail_run(String const& run_id, String error, StringView termina
     m_store.upsert_run(final_record, true);
     if (run.on_complete)
         run.on_complete(final_record);
+    maybe_close_run_tab(run);
 }
 
 void FlowRunner::finish_run_success(String const& run_id)
@@ -592,6 +597,19 @@ void FlowRunner::finish_run_success(String const& run_id)
     m_store.upsert_run(final_record, true);
     if (run.on_complete)
         run.on_complete(final_record);
+    maybe_close_run_tab(run);
+}
+
+void FlowRunner::maybe_close_run_tab(ActiveRun const& run)
+{
+    if (!run.opened_tab || !run.close_tab_on_finish)
+        return;
+    Core::deferred_invoke([weak_self = make_weak_ptr<FlowRunner>(), tab_id = run.tab_id, require_mcp = run.require_mcp_permission] {
+        if (!weak_self)
+            return;
+        if (auto view = weak_self->m_application.find_automation_view(tab_id, require_mcp); view.has_value())
+            view->force_close();
+    });
 }
 
 }

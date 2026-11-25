@@ -5360,13 +5360,14 @@ void Application::delete_flow(String flow_id, MCP::OnToolCallComplete on_complet
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
-void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, MCP::OnToolCallComplete on_complete)
+void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, bool wait, bool close_tab_on_finish, MCP::OnToolCallComplete on_complete)
 {
     FlowRunRequest request;
     request.flow_id = move(flow_id);
     request.tab_id = tab_id;
     request.require_mcp_permission = true;
     request.open_new_tab = open_new_tab;
+    request.close_tab_on_finish = close_tab_on_finish;
 
     if (inline_flow.has_value()) {
         auto parsed = parse_flow_definition(*inline_flow);
@@ -5384,16 +5385,44 @@ void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_
             request.variables.set(key, val.serialized());
     });
 
-    auto completion = [on_complete = move(on_complete)](FlowRunRecord const& record) {
-        on_complete({
-            .is_error = record.status != "passed"sv,
-            .text = JsonValue { serialize_flow_run(record) }.serialized(),
-        });
+    if (!wait) {
+        auto started = flow_runner().start_run(move(request), nullptr);
+        if (started.is_error()) {
+            on_complete(mcp_error_result(MUST(String::formatted("Could not start flow run: {}", started.error()))));
+            return;
+        }
+
+        JsonObject result;
+        result.set("started"sv, true);
+        result.set("run_id"sv, started.value());
+        result.set("status"sv, "running"sv);
+        if (auto run = flow_store().get_run(started.value()); run.has_value() && run->tab_id.has_value())
+            result.set("tab_id"sv, *run->tab_id);
+        on_complete(mcp_ok_json(JsonValue { move(result) }));
+        return;
+    }
+
+    struct SharedComplete final : public RefCounted<SharedComplete> {
+        explicit SharedComplete(MCP::OnToolCallComplete cb)
+            : callback(move(cb))
+        {
+        }
+        MCP::OnToolCallComplete callback;
+    };
+    auto shared = adopt_ref(*new SharedComplete(move(on_complete)));
+
+    auto completion = [shared](FlowRunRecord const& record) {
+        if (!shared->callback)
+            return;
+        MCP::ToolCallResult result;
+        result.is_error = record.status != "passed"sv;
+        result.text = JsonValue { serialize_flow_run(record) }.serialized();
+        shared->callback(move(result));
     };
 
     auto started = flow_runner().start_run(move(request), move(completion));
-    if (started.is_error()) {
-        on_complete(mcp_error_result(MUST(String::formatted("Could not start flow run: {}", started.error()))));
+    if (started.is_error() && shared->callback) {
+        shared->callback(mcp_error_result(MUST(String::formatted("Could not start flow run: {}", started.error()))));
     }
 }
 
@@ -5417,6 +5446,18 @@ void Application::get_flow_run(String run_id, MCP::OnToolCallComplete on_complet
         return;
     }
     on_complete(mcp_ok_json(JsonValue { serialize_flow_run(*run) }));
+}
+
+void Application::cancel_flow_run(String run_id, MCP::OnToolCallComplete on_complete)
+{
+    if (!flow_runner().cancel_run(run_id)) {
+        on_complete(mcp_error_result("Active flow run not found"sv));
+        return;
+    }
+    JsonObject result;
+    result.set("cancelled"sv, true);
+    result.set("run_id"sv, run_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
 }

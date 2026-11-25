@@ -36,6 +36,10 @@ MCPBanner::MCPBanner(QWidget* parent)
     connect(m_tab_access_button, &QPushButton::clicked, this, &MCPBanner::toggle_current_tab_access_requested);
     layout->addWidget(m_tab_access_button);
 
+    auto* flows_button = new QPushButton("Flows", this);
+    connect(flows_button, &QPushButton::clicked, this, &MCPBanner::open_flows_requested);
+    layout->addWidget(flows_button);
+
     m_copy_config_button = new QPushButton("Copy Config", this);
     connect(m_copy_config_button, &QPushButton::clicked, this, &MCPBanner::copy_config_requested);
     layout->addWidget(m_copy_config_button);

@@ -30,6 +30,7 @@ struct WEBVIEW_API FlowRunRequest {
     HashMap<String, String> variables;
     bool require_mcp_permission { false };
     bool open_new_tab { true };
+    bool close_tab_on_finish { false };
 };
 
 class WEBVIEW_API FlowRunner final : public Weakable<FlowRunner> {
@@ -56,6 +57,8 @@ private:
         FlowRunRecord record;
         u64 tab_id { 0 };
         bool require_mcp_permission { false };
+        bool opened_tab { false };
+        bool close_tab_on_finish { false };
         size_t step_index { 0 };
         MonotonicTime step_started_at;
         RefPtr<Core::Timer> step_timer;
@@ -70,6 +73,7 @@ private:
     void complete_current_step(String const& run_id, size_t step_index, JsonValue output = {}, Optional<String> screenshot_path = {});
     void fail_run(String const& run_id, String error, StringView terminal_status = "failed"sv);
     void finish_run_success(String const& run_id);
+    void maybe_close_run_tab(ActiveRun const&);
     void cleanup_run_timers(ActiveRun&);
 
     Application& m_application;

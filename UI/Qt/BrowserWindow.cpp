@@ -19,6 +19,7 @@
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/URL.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/ApplicationActions.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -464,6 +465,9 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     connect(m_mcp_banner, &MCPBanner::toggle_current_tab_access_requested, this, [this] {
         if (m_current_tab && m_current_tab->is_loaded())
             m_current_tab->view().set_mcp_access_allowed(!m_current_tab->view().is_mcp_access_allowed());
+    });
+    connect(m_mcp_banner, &MCPBanner::open_flows_requested, this, [] {
+        ApplicationActions::the().open_flows_page_action().activate();
     });
     connect(m_mcp_banner, &MCPBanner::copy_config_requested, this, [this] {
         auto port = Application::the().mcp_port();

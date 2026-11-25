@@ -85,6 +85,7 @@ set(TEST_SOURCES
     TestHistoryStore.cpp
     TestHSTSStore.cpp
     TestLingeringIndicator.cpp
+    TestMCPAutomation.cpp
     TestMediaSessionCoordinator.cpp
     TestNavigationLoader.cpp
     TestNotificationAttribution.cpp
@@ -192,7 +193,7 @@ if (NOT WIN32)
 endif()
 
 target_sources(TestLibWebView PRIVATE ${TEST_SOURCES})
-target_link_libraries(TestLibWebView PRIVATE LibAudio LibCompositing LibDatabase LibGamepad LibGC LibGfx LibHTTP LibIPC LibRequests LibThreading LibURL LibWeb LibWebCommon LibWebView)
+target_link_libraries(TestLibWebView PRIVATE LibAudio LibCompositing LibDatabase LibGamepad LibGC LibGfx LibHTTP LibIPC LibMCP LibRequests LibThreading LibURL LibWeb LibWebCommon LibWebView)
 
 if (APPLE)
     add_dependencies(TestLibWebView ProcessReaper)

@@ -676,9 +676,10 @@ private:
     virtual void get_flow(String flow_id, MCP::OnToolCallComplete) override;
     virtual void save_flow(JsonValue flow_json, MCP::OnToolCallComplete) override;
     virtual void delete_flow(String flow_id, MCP::OnToolCallComplete) override;
-    virtual void run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, MCP::OnToolCallComplete) override;
+    virtual void run_flow(Optional<String> flow_id, Optional<JsonValue> inline_flow, Optional<u64> tab_id, JsonObject variables, bool open_new_tab, bool wait, bool close_tab_on_finish, MCP::OnToolCallComplete) override;
     virtual void list_flow_runs(Optional<String> flow_id, size_t limit, MCP::OnToolCallComplete) override;
     virtual void get_flow_run(String run_id, MCP::OnToolCallComplete) override;
+    virtual void cancel_flow_run(String run_id, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 

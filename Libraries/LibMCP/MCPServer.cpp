@@ -104,6 +104,118 @@ static JsonObject make_tool_schema(StringView name, StringView description, Json
     return tool;
 }
 
+static JsonObject make_int_prop(StringView description, i64 minimum, i64 maximum, Optional<i64> default_value = {})
+{
+    JsonObject prop = make_prop("integer"sv, description);
+    prop.set("minimum"sv, minimum);
+    prop.set("maximum"sv, maximum);
+    if (default_value.has_value())
+        prop.set("default"sv, *default_value);
+    return prop;
+}
+
+static JsonObject build_flow_schema(StringView description)
+{
+    static constexpr Array step_actions {
+        "open"sv,
+        "reload"sv,
+        "back"sv,
+        "forward"sv,
+        "click"sv,
+        "fill"sv,
+        "press"sv,
+        "wait_for"sv,
+        "assert_text"sv,
+        "assert_visible"sv,
+        "assert_url"sv,
+        "extract"sv,
+        "eval"sv,
+        "sleep"sv,
+        "screenshot"sv,
+    };
+    static constexpr Array locator_kinds {
+        "css"sv,
+        "xpath"sv,
+        "role"sv,
+        "label"sv,
+        "placeholder"sv,
+        "text"sv,
+        "test_id"sv,
+    };
+
+    JsonObject locator_props;
+    locator_props.set("kind"sv, make_string_enum_prop("Element matching strategy."sv, locator_kinds, "css"sv));
+    locator_props.set("value"sv, make_prop("string"sv, "Selector, XPath, label, placeholder, text, or data-testid depending on 'kind'."sv));
+    locator_props.set("role"sv, make_prop("string"sv, "ARIA role name (for kind='role', e.g. button, heading, textbox, link)."sv));
+    locator_props.set("name"sv, make_prop("string"sv, "Accessible name filter when kind='role'."sv));
+    locator_props.set("exact"sv, make_prop("boolean"sv, "Require exact string match instead of substring (default: false)."sv));
+    locator_props.set("nth"sv, make_int_prop("Zero-based match index when multiple elements match."sv, 0, 1000));
+
+    JsonObject locator_schema;
+    locator_schema.set("type"sv, "object"sv);
+    locator_schema.set("description"sv, "Target element locator."sv);
+    locator_schema.set("properties"sv, move(locator_props));
+
+    JsonObject step_props;
+    step_props.set("action"sv, make_string_enum_prop("Step action to execute."sv, step_actions, "click"sv));
+    step_props.set("label"sv, make_prop("string"sv, "Optional human-readable step label."sv));
+    step_props.set("url"sv, make_prop("string"sv, "URL for 'open' (supports {{var}} interpolation; http:, https:, about:blank)."sv));
+    step_props.set("locator"sv, move(locator_schema));
+    step_props.set("text"sv, make_prop("string"sv, "Input value for 'fill' (supports {{var}} interpolation)."sv));
+    step_props.set("key"sv, make_prop("string"sv, "Keyboard key name for 'press' (e.g. 'Enter', 'Tab', 'Escape')."sv));
+    step_props.set("clear"sv, make_prop("boolean"sv, "Clear existing field value before 'fill' (default: true)."sv));
+    step_props.set("contains"sv, make_prop("string"sv, "Expected substring for 'assert_text' or 'assert_url'."sv));
+    step_props.set("equals"sv, make_prop("string"sv, "Expected exact string for 'assert_text' or 'assert_url'."sv));
+    step_props.set("wait_for_load"sv, make_prop("boolean"sv, "Wait for navigation load completion on 'open'/'reload' (default: true)."sv));
+    step_props.set("script"sv, make_prop("string"sv, "JavaScript function body for 'eval' (receives runtime variables as arguments[0])."sv));
+    step_props.set("save_as"sv, make_prop("string"sv, "Variable/output key to store result of 'extract' or 'eval'."sv));
+    step_props.set("timeout_ms"sv, make_int_prop("Step timeout override in milliseconds."sv, 100, 120000));
+    step_props.set("ms"sv, make_int_prop("Delay in milliseconds for 'sleep'."sv, 0, 60000));
+
+    JsonArray step_required;
+    step_required.must_append("action"sv);
+
+    JsonObject step_schema;
+    step_schema.set("type"sv, "object"sv);
+    step_schema.set("properties"sv, move(step_props));
+    step_schema.set("required"sv, move(step_required));
+
+    JsonObject steps_schema;
+    steps_schema.set("type"sv, "array"sv);
+    steps_schema.set("minItems"sv, 1);
+    steps_schema.set("description"sv, "Ordered list of automation steps to execute."sv);
+    steps_schema.set("items"sv, move(step_schema));
+
+    JsonObject var_value_schema;
+    var_value_schema.set("type"sv, "string"sv);
+
+    JsonObject variables_schema;
+    variables_schema.set("type"sv, "object"sv);
+    variables_schema.set("description"sv, "Default variable map interpolated into strings via {{var}}."sv);
+    variables_schema.set("additionalProperties"sv, move(var_value_schema));
+
+    JsonObject flow_props;
+    flow_props.set("schema_version"sv, make_int_prop("Declarative flow schema version (default: 1)."sv, 1, 1, 1));
+    flow_props.set("id"sv, make_prop("string"sv, "Flow ID: lowercase a-z0-9 start, a-z0-9-_ body, max 64 chars."sv));
+    flow_props.set("name"sv, make_prop("string"sv, "Human-readable flow name."sv));
+    flow_props.set("description"sv, make_prop("string"sv, "Optional description of what the flow automates."sv));
+    flow_props.set("default_timeout_ms"sv, make_int_prop("Default per-step timeout in milliseconds (default: 10000)."sv, 100, 120000, 10000));
+    flow_props.set("variables"sv, move(variables_schema));
+    flow_props.set("steps"sv, move(steps_schema));
+
+    JsonArray flow_required;
+    flow_required.must_append("id"sv);
+    flow_required.must_append("name"sv);
+    flow_required.must_append("steps"sv);
+
+    JsonObject flow_schema;
+    flow_schema.set("type"sv, "object"sv);
+    flow_schema.set("description"sv, description);
+    flow_schema.set("properties"sv, move(flow_props));
+    flow_schema.set("required"sv, move(flow_required));
+    return flow_schema;
+}
+
 static JsonArray build_tool_definitions()
 {
     static constexpr Array selector_strategies { "css selector"sv, "xpath"sv, "link text"sv, "partial link text"sv, "tag name"sv };
@@ -301,7 +413,7 @@ static JsonArray build_tool_definitions()
 
     {
         JsonObject props;
-        props.set("flow"sv, make_prop("object"sv, "Declarative automation flow JSON object (schema_version, id, name, variables, steps)."sv));
+        props.set("flow"sv, build_flow_schema("Declarative automation flow JSON definition to validate and save."sv));
         tools.must_append(make_tool_schema(
             "save_flow"sv,
             "Validate and persist a declarative browser automation flow for repeated execution."sv,
@@ -322,10 +434,12 @@ static JsonArray build_tool_definitions()
     {
         JsonObject props;
         props.set("flow_id"sv, make_prop("string"sv, "ID of a saved automation flow to run (omit if providing inline 'flow')."sv));
-        props.set("flow"sv, make_prop("object"sv, "Inline declarative flow definition to run without saving first."sv));
+        props.set("flow"sv, build_flow_schema("Inline declarative automation flow definition to run without saving first."sv));
         props.set("tab_id"sv, make_prop("integer"sv, "Optional MCP-allowed tab ID to run the flow in."sv));
         props.set("variables"sv, make_prop("object"sv, "Optional key-value variables overriding flow defaults for this run."sv));
         props.set("open_new_tab"sv, make_prop("boolean"sv, "Open a new MCP-allowed tab when tab_id is omitted (default: true)."sv));
+        props.set("wait"sv, make_prop("boolean"sv, "Wait for the flow to finish before responding (default: true). Set false to start asynchronously and poll with get_flow_run."sv));
+        props.set("close_tab_on_finish"sv, make_prop("boolean"sv, "Close the tab automatically when the flow finishes if run_flow opened a new tab (never closes a pre-existing tab_id)."sv));
         tools.must_append(make_tool_schema(
             "run_flow"sv,
             "Execute a saved or inline declarative automation flow in Ladybird and return step-by-step results and extracted outputs."sv,
@@ -348,6 +462,16 @@ static JsonArray build_tool_definitions()
         tools.must_append(make_tool_schema(
             "get_flow_run"sv,
             "Retrieve step-by-step details and outputs of a flow execution run."sv,
+            move(props),
+            Array { "run_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("run_id"sv, make_prop("string"sv, "ID of an active flow execution run to cancel."sv));
+        tools.must_append(make_tool_schema(
+            "cancel_flow_run"sv,
+            "Cancel an in-progress automation flow execution run."sv,
             move(props),
             Array { "run_id"sv }));
     }
@@ -584,7 +708,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab are automatically allowed."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -839,11 +963,22 @@ private:
             return;
         }
 
+        auto extract_flow_value = [](JsonObject const& args) -> Optional<JsonValue> {
+            if (auto flow_obj = args.get_object("flow"sv); flow_obj.has_value())
+                return JsonValue { *flow_obj };
+            if (auto flow_str = args.get_string("flow"sv); flow_str.has_value()) {
+                auto parsed = JsonValue::from_string(*flow_str);
+                if (!parsed.is_error() && parsed.value().is_object())
+                    return parsed.release_value();
+            }
+            return {};
+        };
+
         if (tool_name == "save_flow"sv) {
-            auto flow_obj = arguments.get_object("flow"sv);
-            if (!flow_obj.has_value())
+            auto flow_val = extract_flow_value(arguments);
+            if (!flow_val.has_value())
                 return fail_invalid_params("Missing object parameter 'flow'"sv);
-            delegate.save_flow(JsonValue { *flow_obj }, move(complete));
+            delegate.save_flow(flow_val.release_value(), move(complete));
             return;
         }
 
@@ -859,15 +994,15 @@ private:
             Optional<String> flow_id;
             if (auto maybe_flow_id = arguments.get_string("flow_id"sv); maybe_flow_id.has_value() && !maybe_flow_id->is_empty())
                 flow_id = *maybe_flow_id;
-            Optional<JsonValue> inline_flow;
-            if (auto maybe_flow_obj = arguments.get_object("flow"sv); maybe_flow_obj.has_value())
-                inline_flow = JsonValue { *maybe_flow_obj };
+            auto inline_flow = extract_flow_value(arguments);
             auto tab_id = arguments.get_u64("tab_id"sv);
             JsonObject variables;
             if (auto maybe_vars = arguments.get_object("variables"sv); maybe_vars.has_value())
                 variables = *maybe_vars;
             bool open_new_tab = arguments.get_bool("open_new_tab"sv).value_or(true);
-            delegate.run_flow(move(flow_id), move(inline_flow), tab_id, move(variables), open_new_tab, move(complete));
+            bool wait = arguments.get_bool("wait"sv).value_or(true);
+            bool close_tab_on_finish = arguments.get_bool("close_tab_on_finish"sv).value_or(false);
+            delegate.run_flow(move(flow_id), move(inline_flow), tab_id, move(variables), open_new_tab, wait, close_tab_on_finish, move(complete));
             return;
         }
 
@@ -885,6 +1020,14 @@ private:
             if (!run_id.has_value() || run_id->is_empty())
                 return fail_invalid_params("Missing string parameter 'run_id'"sv);
             delegate.get_flow_run(*run_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "cancel_flow_run"sv) {
+            auto run_id = arguments.get_string("run_id"sv);
+            if (!run_id.has_value() || run_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'run_id'"sv);
+            delegate.cancel_flow_run(*run_id, move(complete));
             return;
         }
 
