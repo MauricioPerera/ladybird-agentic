@@ -283,6 +283,8 @@ private:
 
     void add_current_video_sink(Media::VideoSinkHandle);
     void release_active_video_sink();
+    void sync_media_stream_tracks(MediaCapture::MediaStream&);
+    void clear_media_stream_observer();
 
     Optional<Utf16String> verify_response_or_get_failure_reason(GC::Ref<Fetch::Infrastructure::ResponseView>, ByteRange const&);
     bool should_hold_screen_wake_lock() const;
@@ -511,6 +513,8 @@ private:
 
     OwnPtr<MediaClient::RemotePlaybackManager> m_playback_manager;
     OwnPtr<MediaStreamPlayback> m_media_stream_playback;
+    GC::Weak<MediaCapture::MediaStream> m_observed_media_stream;
+    u64 m_media_stream_observer_id { 0 };
     GC::Ptr<GC::Function<void(Utf16String)>> m_playback_manager_failure_callback;
 
     RefPtr<Core::Timer> m_playback_position_update_timer;

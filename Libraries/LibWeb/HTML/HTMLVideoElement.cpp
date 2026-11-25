@@ -212,6 +212,14 @@ u32 HTMLVideoElement::video_height() const
     return 0;
 }
 
+void HTMLVideoElement::set_live_video_frame(Optional<Gfx::DecodedImageFrame> frame)
+{
+    m_live_video_frame = move(frame);
+    if (m_live_video_frame.has_value())
+        set_intrinsic_video_dimensions(Gfx::Size<u32>(m_live_video_frame->width(), m_live_video_frame->height()));
+    update_representation();
+}
+
 void HTMLVideoElement::update_representation()
 {
     auto representation = current_representation();
@@ -232,10 +240,15 @@ void HTMLVideoElement::update_representation()
         poster_frame_id = m_poster_frame->id();
     }
 
-    if (representation == m_representation && poster_frame_id == m_represented_poster_frame_id && natural_dimensions == m_natural_dimensions)
+    Optional<u64> live_frame_id;
+    if ((representation == Representation::VideoFrame || representation == Representation::FirstVideoFrame) && m_live_video_frame.has_value())
+        live_frame_id = m_live_video_frame->id();
+
+    if (representation == m_representation && poster_frame_id == m_represented_poster_frame_id && live_frame_id == m_represented_live_frame_id && natural_dimensions == m_natural_dimensions)
         return;
     m_representation = representation;
     m_represented_poster_frame_id = poster_frame_id;
+    m_represented_live_frame_id = live_frame_id;
 
     if (natural_dimensions != m_natural_dimensions) {
         set_needs_layout_update(DOM::SetNeedsLayoutReason::HTMLVideoElementNaturalDimensionsChanged);

@@ -1,0 +1,7 @@
+track kind: video
+readyState >= 2: true
+videoTracks after attach: 1
+paused after play(): false
+videoTracks after removeTrack: 0
+videoTracks after addTrack: 1
+paused after pause(): true

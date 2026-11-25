@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<script>internals.setAutoplayPolicy("allow-audio-and-video");</script>
+<script src="../include.js"></script>
+<script>
+asyncTest(async done => {
+    const pc = new RTCPeerConnection();
+    try {
+        const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+        const videoTrack = transceiver.receiver.track;
+        println(`track kind: ${videoTrack.kind}`);
+
+        const stream = new MediaStream([videoTrack]);
+        const video = document.createElement("video");
+        const loadedMetadata = new Promise(resolve => video.onloadedmetadata = resolve);
+        video.srcObject = stream;
+        await video.play();
+        await loadedMetadata;
+
+        println(`readyState >= 2: ${video.readyState >= 2}`);
+        println(`videoTracks after attach: ${video.videoTracks.length}`);
+        println(`paused after play(): ${video.paused}`);
+
+        videoTrack.enabled = false;
+        videoTrack.enabled = true;
+
+        stream.removeTrack(videoTrack);
+        println(`videoTracks after removeTrack: ${video.videoTracks.length}`);
+
+        stream.addTrack(videoTrack);
+        println(`videoTracks after addTrack: ${video.videoTracks.length}`);
+
+        video.pause();
+        println(`paused after pause(): ${video.paused}`);
+    } catch (error) {
+        println(`FAIL: ${error.name}: ${error.message}`);
+    } finally {
+        pc.close();
+        done();
+    }
+});
+</script>

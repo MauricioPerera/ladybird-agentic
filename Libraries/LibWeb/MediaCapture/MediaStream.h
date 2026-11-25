@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <AK/Function.h>
+#include <AK/HashMap.h>
 #include <AK/Utf16String.h>
 #include <AK/Vector.h>
 #include <LibWeb/DOM/EventTarget.h>
@@ -47,12 +49,18 @@ public:
     void set_onremovetrack(WebIDL::CallbackType* event_handler);
     WebIDL::CallbackType* onremovetrack();
 
+    u64 add_tracks_changed_observer(Function<void()>);
+    void remove_tracks_changed_observer(u64);
+
 private:
     explicit MediaStream();
     virtual void visit_edges(Cell::Visitor&) override;
+    void notify_tracks_changed();
 
     Utf16String m_id;
     Vector<GC::Ref<MediaStreamTrack>> m_tracks;
+    HashMap<u64, Function<void()>> m_tracks_changed_observers;
+    u64 m_next_observer_id { 1 };
 };
 
 }

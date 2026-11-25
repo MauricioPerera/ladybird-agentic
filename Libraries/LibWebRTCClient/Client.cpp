@@ -86,6 +86,12 @@ void Client::on_encoded_audio_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rt
         on_encoded_audio_frame_event(pc_id, receiver_id, ssrc, rtp_timestamp, sequence_number, payload_type, move(payload));
 }
 
+void Client::on_encoded_video_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload)
+{
+    if (on_encoded_video_frame_event)
+        on_encoded_video_frame_event(pc_id, receiver_id, ssrc, rtp_timestamp, sequence_number, payload_type, move(mime_type), is_keyframe, move(payload));
+}
+
 void Client::on_audio_track_added(u64 pc_id, u64 sender_id, u32 ssrc)
 {
     if (on_audio_track_added_event)

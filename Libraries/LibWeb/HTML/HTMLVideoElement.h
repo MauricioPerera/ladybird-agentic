@@ -38,6 +38,8 @@ public:
     Optional<CSSPixelSize> natural_element_size() const;
 
     Optional<Gfx::DecodedImageFrame> const& poster_frame() const { return m_poster_frame; }
+    void set_live_video_frame(Optional<Gfx::DecodedImageFrame>);
+    Optional<Gfx::DecodedImageFrame> const& live_video_frame() const { return m_live_video_frame; }
 
     // https://html.spec.whatwg.org/multipage/media.html#the-video-element:the-video-element-7
     // NB: We combine the values of...
@@ -106,11 +108,13 @@ private:
     GC::Ptr<HTML::VideoTrack> m_video_track;
     VideoFrame m_current_frame;
     Optional<Gfx::DecodedImageFrame> m_poster_frame;
+    Optional<Gfx::DecodedImageFrame> m_live_video_frame;
 
     Optional<Gfx::Size<u32>> m_intrinsic_video_dimensions;
     Optional<CSSPixelSize> m_natural_dimensions;
     Optional<Representation> m_representation;
     Optional<u64> m_represented_poster_frame_id;
+    Optional<u64> m_represented_live_frame_id;
 
     GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;

@@ -7,8 +7,11 @@
 #include <AK/Debug.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Time.h>
 #include <LibCore/EventLoop.h>
 #include <LibGC/Heap.h>
+#include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibJS/Runtime/Map.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibMedia/FFmpeg/FFmpegAudioConverter.h>
@@ -17,6 +20,12 @@
 #include <LibMediaCodecs/AudioBlock.h>
 #include <LibMediaCodecs/CodecID.h>
 #include <LibMediaCodecs/CodedFrame.h>
+#include <LibMediaCodecs/FFmpeg/FFmpegVideoDecoder.h>
+#include <LibMediaCodecs/VideoDecoder.h>
+#include <LibMediaCodecs/VideoFrame.h>
+#ifdef AK_OS_WINDOWS
+#    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.h>
+#endif
 #include <LibWeb/Bindings/RTCPeerConnection.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Event.h>
@@ -224,6 +233,7 @@ void RTCPeerConnection::close_the_connection_algorithm(bool disappear)
     m_pending_description_payloads.clear();
     m_held_ice_events.clear();
     m_receiver_audio_decoders.clear();
+    m_receiver_video_decoders.clear();
     agent.unregister_peer_connection(m_pc_id);
     // 6. If connection.[[SctpTransport]] is not null...
     if (m_sctp) {
@@ -1544,6 +1554,211 @@ void RTCPeerConnection::on_remote_track_ended(u64 receiver_id)
     if (auto receiver = m_remote_receivers_by_id.get(receiver_id); receiver.has_value())
         (*receiver)->track()->end();
     m_receiver_audio_decoders.remove(receiver_id);
+    m_receiver_video_decoders.remove(receiver_id);
+}
+
+RTCPeerConnection::ReceiverVideoDecoder::~ReceiverVideoDecoder() = default;
+
+static Media::CodecID codec_id_from_video_mime_type(StringView mime_type)
+{
+    if (auto semicolon = mime_type.find(';'); semicolon.has_value())
+        mime_type = mime_type.substring_view(0, *semicolon);
+    mime_type = mime_type.trim_whitespace();
+    if (mime_type.equals_ignoring_ascii_case("video/vp8"sv))
+        return Media::CodecID::VP8;
+    if (mime_type.equals_ignoring_ascii_case("video/vp9"sv))
+        return Media::CodecID::VP9;
+    if (mime_type.equals_ignoring_ascii_case("video/av1"sv))
+        return Media::CodecID::AV1;
+    if (mime_type.equals_ignoring_ascii_case("video/h264"sv))
+        return Media::CodecID::H264;
+    return Media::CodecID::Unknown;
+}
+
+static ByteBuffer annex_b_to_avcc(ReadonlyBytes data)
+{
+    ByteBuffer avcc;
+    size_t idx = 0;
+    Optional<size_t> nalu_start;
+
+    auto append_nalu = [&](size_t start, size_t end) {
+        if (end <= start)
+            return;
+        auto length = static_cast<u32>(end - start);
+        u8 length_bytes[4] = {
+            static_cast<u8>((length >> 24) & 0xFF),
+            static_cast<u8>((length >> 16) & 0xFF),
+            static_cast<u8>((length >> 8) & 0xFF),
+            static_cast<u8>(length & 0xFF),
+        };
+        avcc.append(length_bytes, sizeof(length_bytes));
+        avcc.append(data.slice(start, end - start));
+    };
+
+    while (idx < data.size()) {
+        size_t start_code_len = 0;
+        if (idx + 4 <= data.size() && data[idx] == 0 && data[idx + 1] == 0 && data[idx + 2] == 0 && data[idx + 3] == 1)
+            start_code_len = 4;
+        else if (idx + 3 <= data.size() && data[idx] == 0 && data[idx + 1] == 0 && data[idx + 2] == 1)
+            start_code_len = 3;
+
+        if (start_code_len > 0) {
+            if (nalu_start.has_value())
+                append_nalu(*nalu_start, idx);
+            idx += start_code_len;
+            nalu_start = idx;
+        } else {
+            ++idx;
+        }
+    }
+    if (nalu_start.has_value())
+        append_nalu(*nalu_start, data.size());
+
+    if (avcc.is_empty() && !data.is_empty()) {
+        // Fallback if input had no Annex-B start codes: treat entire buffer as one NALU.
+        append_nalu(0, data.size());
+    }
+    return avcc;
+}
+
+void RTCPeerConnection::request_video_keyframe_if_needed(ReceiverVideoDecoder& state, u32 ssrc)
+{
+    auto now = MonotonicTime::now();
+    if (state.last_keyframe_request.has_value() && (now - *state.last_keyframe_request) < AK::Duration::from_milliseconds(500))
+        return;
+    state.last_keyframe_request = now;
+    if (auto* client = WebRTCAgent::the().existing_client())
+        client->async_request_video_keyframe(m_pc_id, ssrc);
+}
+
+void RTCPeerConnection::drain_decoded_video_frames(u64 receiver_id)
+{
+    if (m_is_closed)
+        return;
+    auto receiver = m_remote_receivers_by_id.get(receiver_id);
+    auto decoder_entry = m_receiver_video_decoders.get(receiver_id);
+    if (!receiver.has_value() || !decoder_entry.has_value() || !(*decoder_entry)->decoder)
+        return;
+
+    auto& decoder = *(*decoder_entry)->decoder;
+    while (true) {
+        auto output_or_error = decoder.take_next_output({});
+        if (output_or_error.is_error()) {
+            if (output_or_error.error().category() != Media::DecoderErrorCategory::NeedsMoreInput)
+                dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: video take_next_output failed for receiver={}: {}", receiver_id, output_or_error.error().description());
+            break;
+        }
+        auto video_frame = output_or_error.release_value();
+        auto bitmap_or_error = video_frame->to_bitmap();
+        if (bitmap_or_error.is_error())
+            continue;
+        auto image_frame_or_error = Gfx::DecodedImageFrame::create(*bitmap_or_error.value());
+        if (image_frame_or_error.is_error())
+            continue;
+        (*receiver)->track()->deliver_video_frame(image_frame_or_error.release_value());
+    }
+}
+
+void RTCPeerConnection::on_encoded_video_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16, u8, String mime_type, bool is_keyframe, ByteBuffer payload)
+{
+    if (m_is_closed || payload.is_empty())
+        return;
+    auto receiver = m_remote_receivers_by_id.get(receiver_id);
+    if (!receiver.has_value())
+        return;
+
+    auto codec_id = codec_id_from_video_mime_type(mime_type);
+    if (codec_id == Media::CodecID::Unknown) {
+        dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: unsupported remote video codec '{}'", mime_type);
+        return;
+    }
+
+    auto& state = *m_receiver_video_decoders.ensure(receiver_id, [] {
+        return make<ReceiverVideoDecoder>();
+    });
+    if (state.codec_id != codec_id) {
+        state.codec_id = codec_id;
+        state.uses_avcc_input = false;
+        state.decoder.clear();
+        state.waiting_for_keyframe = true;
+    }
+
+    if (!state.decoder) {
+        OwnPtr<Media::VideoDecoder> created_decoder;
+        if (codec_id == Media::CodecID::H264) {
+#ifdef AK_OS_WINDOWS
+            auto wmf_or_error = Media::WindowsMediaFoundation::WindowsMediaFoundationVideoDecoder::try_create(codec_id, {});
+            if (!wmf_or_error.is_error()) {
+                created_decoder = wmf_or_error.release_value();
+                state.uses_avcc_input = true;
+            } else {
+                dbgln("RTCPeerConnection: WMF H.264 decoder init failed for receiver={}: {}", receiver_id, wmf_or_error.error().description());
+            }
+#else
+            auto ffmpeg_or_error = Media::FFmpeg::FFmpegVideoDecoder::try_create(codec_id, {});
+            if (!ffmpeg_or_error.is_error())
+                created_decoder = ffmpeg_or_error.release_value();
+            else
+                dbgln("RTCPeerConnection: FFmpeg H.264 decoder init failed for receiver={}: {}", receiver_id, ffmpeg_or_error.error().description());
+#endif
+        } else {
+            auto ffmpeg_or_error = Media::FFmpeg::FFmpegVideoDecoder::try_create(codec_id, {});
+            if (!ffmpeg_or_error.is_error())
+                created_decoder = ffmpeg_or_error.release_value();
+            else
+                dbgln("RTCPeerConnection: video decoder init failed for receiver={} ({}): {}", receiver_id, mime_type, ffmpeg_or_error.error().description());
+        }
+        if (!created_decoder)
+            return;
+
+        if (Core::EventLoop::is_running()) {
+            created_decoder->set_decode_completed_callback([weak_loop = Core::EventLoop::current_weak(), weak_self = GC::Weak { *this }, receiver_id](Media::DecodeCompletion) {
+                auto loop = weak_loop->take();
+                if (!loop.is_alive())
+                    return;
+                loop->deferred_invoke([weak_self, receiver_id] {
+                    if (weak_self)
+                        weak_self->drain_decoded_video_frames(receiver_id);
+                });
+            });
+        }
+        state.decoder = move(created_decoder);
+    }
+
+    if (state.waiting_for_keyframe && !is_keyframe) {
+        request_video_keyframe_if_needed(state, ssrc);
+        return;
+    }
+    if (is_keyframe)
+        state.waiting_for_keyframe = false;
+
+    ReadonlyBytes coded_bytes = payload.bytes();
+    ByteBuffer avcc_buffer;
+    if (state.uses_avcc_input) {
+        avcc_buffer = annex_b_to_avcc(coded_bytes);
+        if (avcc_buffer.is_empty())
+            return;
+        coded_bytes = avcc_buffer.bytes();
+    }
+
+    auto timestamp = AK::Duration::from_milliseconds(static_cast<i64>(rtp_timestamp / 90));
+    auto flags = is_keyframe ? Media::FrameFlags::Keyframe : Media::FrameFlags::None;
+    Media::CodedFrame coded_frame { codec_id, timestamp, timestamp, AK::Duration::from_milliseconds(33), flags, MUST(FixedArray<u8>::create(coded_bytes)) };
+
+    auto rc = state.decoder->receive_coded_data(coded_frame, Media::DecodeIntent::Output);
+    if (rc.is_error() && rc.error().category() == Media::DecoderErrorCategory::TryAgain) {
+        drain_decoded_video_frames(receiver_id);
+        rc = state.decoder->receive_coded_data(coded_frame, Media::DecodeIntent::Output);
+    }
+    if (rc.is_error()) {
+        dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: video receive_coded_data failed for receiver={}: {}", receiver_id, rc.error().description());
+        state.decoder->flush();
+        state.waiting_for_keyframe = true;
+        request_video_keyframe_if_needed(state, ssrc);
+        return;
+    }
+
+    drain_decoded_video_frames(receiver_id);
 }
 
 void RTCPeerConnection::on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload)

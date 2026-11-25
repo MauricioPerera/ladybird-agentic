@@ -15,11 +15,14 @@
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>
 #include <LibAudio/Forward.h>
+#include <LibCore/Forward.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Weak.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibMedia/Forward.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/MediaCapture/MediaStreamTrack.h>
+#include <thread>
 
 namespace Web::HTML {
 
@@ -35,6 +38,7 @@ public:
     ~MediaStreamPlayback();
 
     void set_tracks(ReadonlySpan<GC::Ref<MediaCapture::MediaStreamTrack>>);
+    void set_video_frame_callback(Function<void(Optional<Gfx::DecodedImageFrame>)>);
 
     void play();
     void pause();
@@ -50,9 +54,13 @@ private:
     explicit MediaStreamPlayback(NonnullRefPtr<Media::AudioOutputFactory>);
 
     void remove_input(size_t index);
+    void clear_video_subscription();
+    void deliver_video_frame_on_owner_thread(Gfx::DecodedImageFrame);
 
     NonnullRefPtr<Mixer> m_mixer;
     NonnullRefPtr<Media::AudioOutputFactory> m_audio_output_factory;
+    std::thread::id m_owner_thread_id;
+    RefPtr<Core::WeakEventLoopReference> m_owner_loop_weak;
 
     struct Subscription {
         GC::Weak<MediaCapture::MediaStreamTrack> track;
@@ -60,6 +68,15 @@ private:
         NonnullRefPtr<TrackInput> input;
     };
     Vector<Subscription> m_subscriptions;
+
+    struct VideoSubscription {
+        GC::Weak<MediaCapture::MediaStreamTrack> track;
+        NonnullRefPtr<MediaCapture::VideoFrameSink> sink;
+    };
+    Optional<VideoSubscription> m_video_subscription;
+    Function<void(Optional<Gfx::DecodedImageFrame>)> m_on_video_frame;
+    Optional<Gfx::DecodedImageFrame> m_latest_video_frame;
+    bool m_has_delivered_first_video_frame { false };
 
     RefPtr<Audio::PlaybackStream> m_output;
     bool m_creating_output { false };

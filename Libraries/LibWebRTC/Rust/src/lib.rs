@@ -12,5 +12,6 @@ pub mod media;
 pub mod peer;
 pub mod service;
 pub mod signal;
+pub mod video_rx;
 
 pub use webrtc;

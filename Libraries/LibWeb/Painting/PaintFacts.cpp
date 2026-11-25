@@ -256,6 +256,11 @@ static void queue_video_paint_facts(HTML::HTMLVideoElement const& element)
     switch (representation) {
     case HTML::HTMLVideoElement::Representation::FirstVideoFrame:
     case HTML::HTMLVideoElement::Representation::VideoFrame: {
+        if (auto const& live_frame = video_element.live_video_frame(); live_frame.has_value()) {
+            facts.representation = Layout::RustFFI::FfiVideoRepresentation::PosterFrame;
+            facts.poster_frame = &live_frame.value();
+            break;
+        }
         facts.representation = Layout::RustFFI::FfiVideoRepresentation::VideoFrame;
         auto sink_handle = video_element.video_sink_handle();
         if (sink_handle.has_value() && video_element.natural_media_size().has_value()) {

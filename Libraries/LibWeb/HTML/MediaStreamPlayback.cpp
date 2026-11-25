@@ -6,6 +6,7 @@
 
 #include <AK/Atomic.h>
 #include <AK/Mutex.h>
+#include <LibCore/EventLoop.h>
 #include <LibMedia/FFmpeg/FFmpegAudioConverter.h>
 #include <LibMedia/Sinks/AudioOutputFactory.h>
 #include <LibMediaCodecs/AudioBlock.h>
@@ -97,7 +98,10 @@ NonnullOwnPtr<MediaStreamPlayback> MediaStreamPlayback::create(NonnullRefPtr<Med
 MediaStreamPlayback::MediaStreamPlayback(NonnullRefPtr<Media::AudioOutputFactory> audio_output_factory)
     : m_mixer(adopt_ref(*new Mixer))
     , m_audio_output_factory(move(audio_output_factory))
+    , m_owner_thread_id(std::this_thread::get_id())
 {
+    if (Core::EventLoop::is_running())
+        m_owner_loop_weak = Core::EventLoop::current_weak();
 }
 
 MediaStreamPlayback::~MediaStreamPlayback()
@@ -107,6 +111,37 @@ MediaStreamPlayback::~MediaStreamPlayback()
     // are only switched off here. Callers stop playback properly through set_tracks({}) beforehand.
     for (auto& subscription : m_subscriptions)
         subscription.sink->deactivate();
+    if (m_video_subscription.has_value())
+        m_video_subscription->sink->deactivate();
+}
+
+void MediaStreamPlayback::set_video_frame_callback(Function<void(Optional<Gfx::DecodedImageFrame>)> callback)
+{
+    m_on_video_frame = move(callback);
+    if (m_on_video_frame && m_latest_video_frame.has_value())
+        m_on_video_frame(*m_latest_video_frame);
+}
+
+void MediaStreamPlayback::clear_video_subscription()
+{
+    if (!m_video_subscription.has_value())
+        return;
+    auto subscription = m_video_subscription.release_value();
+    if (auto track = subscription.track.ptr())
+        track->remove_video_sink(*subscription.sink);
+    else
+        subscription.sink->deactivate();
+}
+
+void MediaStreamPlayback::deliver_video_frame_on_owner_thread(Gfx::DecodedImageFrame frame)
+{
+    m_latest_video_frame = frame;
+    if (!m_on_video_frame)
+        return;
+    if (m_playing || !m_has_delivered_first_video_frame) {
+        m_has_delivered_first_video_frame = true;
+        m_on_video_frame(move(frame));
+    }
 }
 
 void MediaStreamPlayback::set_tracks(ReadonlySpan<GC::Ref<MediaCapture::MediaStreamTrack>> tracks)
@@ -136,6 +171,46 @@ void MediaStreamPlayback::set_tracks(ReadonlySpan<GC::Ref<MediaCapture::MediaStr
         m_subscriptions.append({ track, sink, input });
         track->add_audio_sink(sink);
     }
+
+    GC::Ptr<MediaCapture::MediaStreamTrack> selected_video_track;
+    for (auto const& track : tracks) {
+        if (track->is_video() && track->track_ready_state() != MediaCapture::MediaStreamTrackState::Ended) {
+            selected_video_track = track;
+            break;
+        }
+    }
+
+    auto current_video_track = m_video_subscription.has_value() ? m_video_subscription->track.ptr() : nullptr;
+    if (current_video_track.ptr() != selected_video_track.ptr()) {
+        clear_video_subscription();
+        m_latest_video_frame.clear();
+        m_has_delivered_first_video_frame = false;
+
+        if (!selected_video_track) {
+            if (m_on_video_frame)
+                m_on_video_frame({});
+        } else {
+            auto sink = adopt_ref(*new MediaCapture::VideoFrameSink);
+            sink->on_frame = [weak_self = make_weak_ptr(), owner_thread_id = m_owner_thread_id, owner_loop_weak = m_owner_loop_weak](Gfx::DecodedImageFrame const& frame) {
+                if (std::this_thread::get_id() == owner_thread_id) {
+                    if (weak_self)
+                        weak_self->deliver_video_frame_on_owner_thread(frame);
+                    return;
+                }
+                if (!owner_loop_weak)
+                    return;
+                auto loop = owner_loop_weak->take();
+                if (!loop.is_alive())
+                    return;
+                loop->deferred_invoke([weak_self, frame]() mutable {
+                    if (weak_self)
+                        weak_self->deliver_video_frame_on_owner_thread(move(frame));
+                });
+            };
+            m_video_subscription = VideoSubscription { selected_video_track, sink };
+            selected_video_track->add_video_sink(sink);
+        }
+    }
 }
 
 void MediaStreamPlayback::remove_input(size_t index)
@@ -157,6 +232,10 @@ void MediaStreamPlayback::play()
     m_playing = true;
     m_playing_since = MonotonicTime::now();
     m_mixer->playing.store(true);
+    if (m_latest_video_frame.has_value() && m_on_video_frame) {
+        m_has_delivered_first_video_frame = true;
+        m_on_video_frame(*m_latest_video_frame);
+    }
 
     if (m_output) {
         (void)m_output->resume();

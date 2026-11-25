@@ -23,6 +23,13 @@
 #include <LibWeb/MediaCapture/MediaStreamTrack.h>
 #include <LibWeb/WebIDL/Promise.h>
 
+namespace Media {
+
+enum class CodecID : u8;
+class VideoDecoder;
+
+}
+
 namespace Web::WebRTC {
 
 class RTCDataChannel;
@@ -120,6 +127,7 @@ public:
     void on_remote_track_added(u64 receiver_id, u64 transceiver_id, String kind, Vector<String> stream_ids);
     void on_remote_track_ended(u64 receiver_id);
     void on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload);
+    void on_encoded_video_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload);
     void on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc);
     void on_create_offer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
     void on_create_answer_result_received(u64 request_id, bool ok, String sdp_type, String sdp, String error_kind, String error_message);
@@ -224,6 +232,25 @@ private:
     HashMap<u64, NonnullOwnPtr<Media::AudioDecoder>> m_receiver_audio_decoders;
     Vector<float> m_decoded_audio_scratch;
     void feed_decoded_audio(u64 receiver_id, ByteBuffer payload, u32 rtp_timestamp);
+
+    struct ReceiverVideoDecoder {
+        AK_MAKE_NONCOPYABLE(ReceiverVideoDecoder);
+        AK_MAKE_NONMOVABLE(ReceiverVideoDecoder);
+        AK_ALLOC_WITH_KMALLOC;
+
+    public:
+        ReceiverVideoDecoder() = default;
+        ~ReceiverVideoDecoder();
+
+        Media::CodecID codec_id {};
+        bool uses_avcc_input { false };
+        OwnPtr<Media::VideoDecoder> decoder;
+        bool waiting_for_keyframe { true };
+        Optional<MonotonicTime> last_keyframe_request;
+    };
+    HashMap<u64, NonnullOwnPtr<ReceiverVideoDecoder>> m_receiver_video_decoders;
+    void request_video_keyframe_if_needed(ReceiverVideoDecoder&, u32 ssrc);
+    void drain_decoded_video_frames(u64 receiver_id);
 
     // The track may outlive this connection, so its producer callback owns this state independently.
     struct OutgoingAudioProducerState : public AtomicRefCounted<OutgoingAudioProducerState> {

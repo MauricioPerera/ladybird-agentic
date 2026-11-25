@@ -123,6 +123,7 @@ void MediaStream::add_track(GC::Ref<MediaStreamTrack> track)
     // AD-HOC: The spec links this step to "add a track", which fires an addtrack event, but addtrack is not fired
     //         when script modifies the tracks of a MediaStream.
     m_tracks.append(track);
+    notify_tracks_changed();
 }
 
 // https://w3c.github.io/mediacapture-main/#dfn-add-a-track
@@ -134,6 +135,7 @@ void MediaStream::add_a_track(GC::Ref<MediaStreamTrack> track)
 
     // 2. Add track to stream's track set.
     m_tracks.append(track);
+    notify_tracks_changed();
 
     // 3. Fire a track event named addtrack with track at stream.
     auto event = create_media_stream_track_event(HTML::relevant_realm(HTML::current_global_object()), HTML::EventNames::addtrack, {}, track);
@@ -148,9 +150,11 @@ void MediaStream::remove_track(GC::Ref<MediaStreamTrack> track)
     // 3. Remove track from stream's track set.
     // AD-HOC: The spec links this step to "remove a track", which fires a removetrack event, but removetrack is not
     //         fired when script modifies the tracks of a MediaStream.
-    m_tracks.remove_first_matching([&](auto const& existing_track) {
-        return existing_track.ptr() == track.ptr();
-    });
+    if (m_tracks.remove_first_matching([&](auto const& existing_track) {
+            return existing_track.ptr() == track.ptr();
+        })) {
+        notify_tracks_changed();
+    }
 }
 
 // https://w3c.github.io/mediacapture-main/#dfn-remove-a-track
@@ -163,6 +167,8 @@ void MediaStream::remove_a_track(GC::Ref<MediaStreamTrack> track)
     });
     if (!removed)
         return;
+
+    notify_tracks_changed();
 
     // 3. Fire a track event named removetrack with track at stream.
     auto event = create_media_stream_track_event(HTML::relevant_realm(HTML::current_global_object()), HTML::EventNames::removetrack, {}, track);
@@ -216,6 +222,30 @@ void MediaStream::set_onremovetrack(WebIDL::CallbackType* event_handler)
 {
     // The event type of this event handler is removetrack.
     set_event_handler_attribute(HTML::EventNames::removetrack, event_handler);
+}
+
+u64 MediaStream::add_tracks_changed_observer(Function<void()> observer)
+{
+    auto id = m_next_observer_id++;
+    m_tracks_changed_observers.set(id, move(observer));
+    return id;
+}
+
+void MediaStream::remove_tracks_changed_observer(u64 id)
+{
+    m_tracks_changed_observers.remove(id);
+}
+
+void MediaStream::notify_tracks_changed()
+{
+    Vector<u64> ids;
+    ids.ensure_capacity(m_tracks_changed_observers.size());
+    for (auto const& entry : m_tracks_changed_observers)
+        ids.append(entry.key);
+    for (auto id : ids) {
+        if (auto observer = m_tracks_changed_observers.get(id); observer.has_value())
+            (*observer)();
+    }
 }
 
 }

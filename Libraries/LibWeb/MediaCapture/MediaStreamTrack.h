@@ -21,6 +21,7 @@
 #include <AK/Vector.h>
 #include <LibGC/Function.h>
 #include <LibGC/Weak.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/MediaStreamConstraints.h>
 #include <LibWeb/Bindings/MediaStreamTrack.h>
 #include <LibWeb/DOM/EventTarget.h>
@@ -89,6 +90,46 @@ private:
     Vector<float> m_scratch;
 };
 
+// Receives decoded video frames on the producing thread. Implementations must hand them off
+// without blocking or touching GC-managed objects.
+struct VideoFrameSink final : public AtomicRefCounted<VideoFrameSink> {
+    void deliver(Gfx::DecodedImageFrame const& frame)
+    {
+        MutexLocker locker(m_mutex);
+        if (on_frame)
+            on_frame(frame);
+    }
+    void deactivate() const
+    {
+        MutexLocker locker(m_mutex);
+        on_frame = nullptr;
+    }
+    mutable Mutex m_mutex;
+    mutable Function<void(Gfx::DecodedImageFrame const&)> on_frame;
+};
+
+class VideoFrameFanout final : public AtomicRefCounted<VideoFrameFanout> {
+public:
+    void add_sink(NonnullRefPtr<VideoFrameSink>);
+    void remove_sink(VideoFrameSink const&);
+
+    // While a track is disabled, muted, or ended it renders black frames rather than stale live video.
+    // https://w3c.github.io/mediacapture-main/#dfn-enabled
+    void set_blackout(bool blackout);
+
+    void deliver(Gfx::DecodedImageFrame);
+    Optional<Gfx::DecodedImageFrame> last_frame() const;
+
+private:
+    Optional<Gfx::DecodedImageFrame> black_frame_for_size_locked(Gfx::IntSize);
+
+    mutable Mutex m_mutex;
+    Vector<NonnullRefPtr<VideoFrameSink>> m_sinks;
+    bool m_blackout { false };
+    Optional<Gfx::DecodedImageFrame> m_last_frame;
+    Optional<Gfx::DecodedImageFrame> m_cached_black_frame;
+};
+
 // Spec: https://w3c.github.io/mediacapture-main/#mediastreamtrack
 class MediaStreamTrack final : public DOM::EventTarget {
     WEB_WRAPPABLE(MediaStreamTrack, DOM::EventTarget);
@@ -143,6 +184,12 @@ public:
 
     void deliver_audio_frames(float const* samples, size_t frame_count, u8 channel_count, u32 sample_rate);
 
+    void add_video_sink(NonnullRefPtr<VideoFrameSink>);
+    void remove_video_sink(VideoFrameSink const&);
+
+    void deliver_video_frame(Gfx::DecodedImageFrame);
+    Optional<Gfx::DecodedImageFrame> last_video_frame() const { return m_video_fanout->last_frame(); }
+
 private:
     explicit MediaStreamTrack();
 
@@ -152,7 +199,12 @@ private:
 
     void stop_audio_capture();
     void audio_source_ended();
-    void update_audio_silence_state() { m_audio_fanout->set_silenced(!m_enabled || m_muted || m_state == MediaStreamTrackState::Ended); }
+    void update_audio_silence_state()
+    {
+        bool inactive = !m_enabled || m_muted || m_state == MediaStreamTrackState::Ended;
+        m_audio_fanout->set_silenced(inactive);
+        m_video_fanout->set_blackout(inactive);
+    }
 
     static Atomic<u64> s_next_provider_id;
 
@@ -170,6 +222,7 @@ private:
     GC::Weak<MediaDevices> m_media_devices;
 
     NonnullRefPtr<AudioFrameFanout> m_audio_fanout;
+    NonnullRefPtr<VideoFrameFanout> m_video_fanout;
     RefPtr<Audio::RecordStream> m_audio_capture_stream;
     bool m_audio_capture_start_pending { false };
     u64 m_audio_capture_request_id { 0 };

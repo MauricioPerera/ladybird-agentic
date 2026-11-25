@@ -331,6 +331,7 @@ void HTMLMediaElement::finalize()
     // and our sweep, when our GC::Weak references to shadow tree nodes are
     // already cleared.
     m_controls.clear();
+    clear_media_stream_observer();
 
     document().page().unregister_media_element({}, unique_id());
 }
@@ -2098,10 +2099,21 @@ void HTMLMediaElement::load_local_resource(MediaProvider const& media_provider, 
         },
         [&](GC::Ref<MediaCapture::MediaStream> stream) {
             // https://w3c.github.io/mediacapture-main/#mediastreams-in-media-elements
-            // FIXME: Reflect the stream's tracks in audioTracks and videoTracks, follow tracks added to or removed
-            //        from the stream after assignment, and render video tracks.
+            // FIXME: Reflect the stream's tracks in audioTracks as well.
+            clear_media_stream_observer();
             m_media_stream_playback = MediaStreamPlayback::create(document().page().client().create_audio_output_factory());
-            m_media_stream_playback->set_tracks(stream->get_audio_tracks());
+            if (auto* video_element = as_if<HTMLVideoElement>(this)) {
+                m_media_stream_playback->set_video_frame_callback([weak_video = GC::Weak { *video_element }](Optional<Gfx::DecodedImageFrame> frame) {
+                    if (weak_video)
+                        weak_video->set_live_video_frame(move(frame));
+                });
+            }
+            sync_media_stream_tracks(*stream);
+            m_observed_media_stream = stream;
+            m_media_stream_observer_id = stream->add_tracks_changed_observer([weak_self = GC::Weak { *this }, weak_stream = GC::Weak { *stream }] {
+                if (weak_self && weak_stream)
+                    weak_self->sync_media_stream_tracks(*weak_stream);
+            });
             update_volume();
 
             // A MediaStream is live and unbounded, so its duration is infinite and its data is always as complete as it
@@ -2996,13 +3008,54 @@ void HTMLMediaElement::forget_media_resource_specific_tracks()
         m_media_stream_playback->set_tracks({});
         m_media_stream_playback.clear();
     }
+    clear_media_stream_observer();
     m_last_known_current_playback_position = {};
     start_or_stop_playback_position_update_timer();
     update_screen_wake_lock();
 
     // NB: At this point, we no longer have any selected tracks to derive the video dimensions from.
-    if (auto* video_element = as_if<HTMLVideoElement>(this))
+    if (auto* video_element = as_if<HTMLVideoElement>(this)) {
+        video_element->set_live_video_frame({});
         video_element->set_intrinsic_video_dimensions({});
+    }
+}
+
+void HTMLMediaElement::clear_media_stream_observer()
+{
+    if (m_media_stream_observer_id != 0) {
+        if (auto observed = m_observed_media_stream.ptr())
+            observed->remove_tracks_changed_observer(m_media_stream_observer_id);
+        m_media_stream_observer_id = 0;
+    }
+    m_observed_media_stream = nullptr;
+}
+
+void HTMLMediaElement::sync_media_stream_tracks(MediaCapture::MediaStream& stream)
+{
+    if (!m_media_stream_playback)
+        return;
+
+    auto tracks = stream.get_tracks();
+    m_media_stream_playback->set_tracks(tracks.span());
+
+    auto video_tracks = stream.get_video_tracks();
+    if (!video_tracks.is_empty()) {
+        if (m_video_tracks->length() == 0) {
+            auto track = VideoTrack::create(*this, Media::Track(Media::TrackType::Video, 1, Media::Track::Kind::Main, {}, {}));
+            m_video_tracks->add_track(track);
+            track->set_selected(true);
+        }
+    } else if (m_video_tracks->length() > 0) {
+        m_video_tracks->remove_all_tracks();
+        m_selected_video_track = nullptr;
+        if (auto* video_element = as_if<HTMLVideoElement>(this)) {
+            video_element->set_live_video_frame({});
+            video_element->set_intrinsic_video_dimensions({});
+        }
+    }
+
+    if (auto* video_element = as_if<HTMLVideoElement>(this))
+        video_element->update_representation();
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#ready-states:media-element-3

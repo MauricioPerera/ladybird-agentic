@@ -9,6 +9,7 @@
 #include <LibAudio/SampleSpecification.h>
 #include <LibGC/Heap.h>
 #include <LibGC/Weak.h>
+#include <LibGfx/Bitmap.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Event.h>
@@ -81,9 +82,90 @@ void AudioFrameFanout::deliver(float const* samples, size_t frame_count, u8 chan
     }
 }
 
+Optional<Gfx::DecodedImageFrame> VideoFrameFanout::black_frame_for_size_locked(Gfx::IntSize size)
+{
+    if (size.is_empty())
+        return {};
+    if (m_cached_black_frame.has_value() && m_cached_black_frame->size() == size)
+        return m_cached_black_frame;
+    auto bitmap_or_error = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRx8888, size);
+    if (bitmap_or_error.is_error())
+        return {};
+    auto frame_or_error = Gfx::DecodedImageFrame::create(*bitmap_or_error.value());
+    if (frame_or_error.is_error())
+        return {};
+    m_cached_black_frame = frame_or_error.release_value();
+    return m_cached_black_frame;
+}
+
+void VideoFrameFanout::add_sink(NonnullRefPtr<VideoFrameSink> sink)
+{
+    Optional<Gfx::DecodedImageFrame> initial_frame;
+    {
+        MutexLocker locker(m_mutex);
+        m_sinks.append(sink);
+        if (m_last_frame.has_value())
+            initial_frame = m_blackout ? black_frame_for_size_locked(m_last_frame->size()) : m_last_frame;
+    }
+    if (initial_frame.has_value())
+        sink->deliver(*initial_frame);
+}
+
+void VideoFrameFanout::remove_sink(VideoFrameSink const& sink)
+{
+    sink.deactivate();
+    MutexLocker locker(m_mutex);
+    m_sinks.remove_first_matching([&](auto const& existing) { return existing.ptr() == &sink; });
+}
+
+void VideoFrameFanout::set_blackout(bool blackout)
+{
+    Vector<NonnullRefPtr<VideoFrameSink>> sinks;
+    Optional<Gfx::DecodedImageFrame> frame_to_deliver;
+    {
+        MutexLocker locker(m_mutex);
+        if (m_blackout == blackout)
+            return;
+        m_blackout = blackout;
+        if (!m_last_frame.has_value() || m_sinks.is_empty())
+            return;
+        frame_to_deliver = m_blackout ? black_frame_for_size_locked(m_last_frame->size()) : m_last_frame;
+        if (!frame_to_deliver.has_value())
+            return;
+        sinks = m_sinks;
+    }
+    for (auto const& sink : sinks)
+        sink->deliver(*frame_to_deliver);
+}
+
+void VideoFrameFanout::deliver(Gfx::DecodedImageFrame frame)
+{
+    Vector<NonnullRefPtr<VideoFrameSink>> sinks;
+    Optional<Gfx::DecodedImageFrame> frame_to_deliver;
+    {
+        MutexLocker locker(m_mutex);
+        m_last_frame = frame;
+        if (m_sinks.is_empty())
+            return;
+        frame_to_deliver = m_blackout ? black_frame_for_size_locked(frame.size()) : Optional<Gfx::DecodedImageFrame> { move(frame) };
+        if (!frame_to_deliver.has_value())
+            return;
+        sinks = m_sinks;
+    }
+    for (auto const& sink : sinks)
+        sink->deliver(*frame_to_deliver);
+}
+
+Optional<Gfx::DecodedImageFrame> VideoFrameFanout::last_frame() const
+{
+    MutexLocker locker(m_mutex);
+    return m_last_frame;
+}
+
 MediaStreamTrack::MediaStreamTrack()
     : DOM::EventTarget()
     , m_audio_fanout(adopt_ref(*new AudioFrameFanout))
+    , m_video_fanout(adopt_ref(*new VideoFrameFanout))
 {
 }
 
@@ -287,6 +369,23 @@ void MediaStreamTrack::remove_audio_sink(AudioFrameSink const& sink)
 void MediaStreamTrack::deliver_audio_frames(float const* samples, size_t frame_count, u8 channel_count, u32 sample_rate)
 {
     m_audio_fanout->deliver(samples, frame_count, channel_count, sample_rate);
+}
+
+void MediaStreamTrack::add_video_sink(NonnullRefPtr<VideoFrameSink> sink)
+{
+    m_video_fanout->add_sink(move(sink));
+}
+
+void MediaStreamTrack::remove_video_sink(VideoFrameSink const& sink)
+{
+    m_video_fanout->remove_sink(sink);
+}
+
+void MediaStreamTrack::deliver_video_frame(Gfx::DecodedImageFrame frame)
+{
+    m_settings.width = static_cast<u32>(frame.width());
+    m_settings.height = static_cast<u32>(frame.height());
+    m_video_fanout->deliver(move(frame));
 }
 
 void MediaStreamTrack::start_audio_capture(GC::Ptr<GC::Function<void(ErrorOr<void>)>> on_started)

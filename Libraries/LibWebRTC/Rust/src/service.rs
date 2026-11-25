@@ -1117,6 +1117,18 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                 );
             }
         }
+        Message::RequestVideoKeyframe(req) => {
+            if let Some(pc) = find_pc(state, req.pc_id).await {
+                use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+                let pli = PictureLossIndication {
+                    sender_ssrc: 0,
+                    media_ssrc: req.media_ssrc,
+                };
+                if let Err(e) = pc.write_rtcp(&[Box::new(pli)]).await {
+                    log::warn!("request_video_keyframe pc_id={} ssrc={} failed: {e}", req.pc_id, req.media_ssrc);
+                }
+            }
+        }
         Message::RemoveTrack(req) => {
             let removed = {
                 let mut registry = state.registry.lock().await;
@@ -1650,9 +1662,11 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
 
     let writer = state.writer.clone();
     let weak_state = Arc::downgrade(state);
+    let weak_pc = Arc::downgrade(pc);
     pc.on_track(Box::new(move |track, receiver, transceiver| {
         let writer = writer.clone();
         let weak_state = weak_state.clone();
+        let weak_pc = weak_pc.clone();
         Box::pin(async move {
             // FIXME: hand out monotonic ids and forward audio data through LibMedia plumbing
             //        rather than using ssrc-derived ids.
@@ -1740,6 +1754,93 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
                             }
                             Err(e) => {
                                 log::debug!("read_rtp ended pc_id={pc_id} track_ssrc={} after {pkt_count} pkts ssrcs={:?}: {e}", track.ssrc(), ssrcs_seen);
+                                let _ = send(&writer, &Client::OnTrackEnded { pc_id, receiver_id });
+                                break;
+                            }
+                        }
+                    }
+                });
+            } else if kind == "video" {
+                let writer = writer.clone();
+                let weak_pc = weak_pc.clone();
+                tokio::spawn(async move {
+                    use std::time::{Duration, Instant};
+                    use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+
+                    use crate::video_rx::{VideoCodec, VideoFrameAssembler};
+
+                    let send_pli = |weak_pc: &std::sync::Weak<RTCPeerConnection>, media_ssrc: u32, last_pli: &mut Option<Instant>| {
+                        let now = Instant::now();
+                        if last_pli.is_some_and(|prev| now.duration_since(prev) < Duration::from_millis(500)) {
+                            return;
+                        }
+                        *last_pli = Some(now);
+                        if let Some(pc) = weak_pc.upgrade() {
+                            tokio::spawn(async move {
+                                let pli = PictureLossIndication {
+                                    sender_ssrc: 0,
+                                    media_ssrc,
+                                };
+                                let _ = pc.write_rtcp(&[Box::new(pli)]).await;
+                            });
+                        }
+                    };
+
+                    let media_ssrc = track.ssrc();
+                    let mut mime_type = track.codec().capability.mime_type.clone();
+                    let mut assembler = VideoCodec::from_mime_type(&mime_type).map(VideoFrameAssembler::new);
+                    let mut last_pli_sent: Option<Instant> = None;
+                    let mut drop_until_keyframe = false;
+
+                    send_pli(&weak_pc, media_ssrc, &mut last_pli_sent);
+
+                    loop {
+                        match track.read_rtp().await {
+                            Ok((packet, _)) => {
+                                if assembler.is_none() {
+                                    let current_mime = track.codec().capability.mime_type;
+                                    if !current_mime.is_empty() {
+                                        mime_type = current_mime;
+                                        assembler = VideoCodec::from_mime_type(&mime_type).map(VideoFrameAssembler::new);
+                                    }
+                                }
+                                let Some(ref mut asm) = assembler else {
+                                    continue;
+                                };
+                                let outcome = asm.push_packet(packet);
+                                if outcome.request_pli {
+                                    send_pli(&weak_pc, media_ssrc, &mut last_pli_sent);
+                                }
+                                for frame in outcome.frames {
+                                    if writer.pending_message_count() > MAX_PENDING_OUTGOING_MESSAGES {
+                                        drop_until_keyframe = true;
+                                        send_pli(&weak_pc, media_ssrc, &mut last_pli_sent);
+                                        continue;
+                                    }
+                                    if drop_until_keyframe {
+                                        if !frame.is_keyframe {
+                                            continue;
+                                        }
+                                        drop_until_keyframe = false;
+                                    }
+                                    let _ = send(
+                                        &writer,
+                                        &Client::OnEncodedVideoFrame {
+                                            pc_id,
+                                            receiver_id,
+                                            ssrc: media_ssrc,
+                                            rtp_timestamp: frame.rtp_timestamp,
+                                            sequence_number: frame.sequence_number,
+                                            payload_type: frame.payload_type,
+                                            mime_type: mime_type.clone().into(),
+                                            is_keyframe: frame.is_keyframe,
+                                            payload: frame.data,
+                                        },
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!("video read_rtp ended pc_id={pc_id} track_ssrc={media_ssrc}: {e}");
                                 let _ = send(&writer, &Client::OnTrackEnded { pc_id, receiver_id });
                                 break;
                             }
@@ -2348,5 +2449,200 @@ mod tests {
         assert!(!candidate_has_unsupported_transport(
             "candidate:1 1 tcp 1518280447 192.0.2.1 9 typ host tcptype active"
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vp8_video_loopback_emits_assembled_encoded_video_frame() {
+        use std::time::Duration;
+        use bytes::Bytes;
+        use webrtc::api::media_engine::MIME_TYPE_VP8;
+        use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+        use webrtc::media::Sample;
+        use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+        use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+        use webrtc::track::track_local::TrackLocal;
+        use crate::ipc::ClientMessage;
+
+        let (state, renderer) = new_state(NetworkAccess::Allowed);
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reader_thread = std::thread::spawn(move || {
+            while let Some(received) = renderer.receive() {
+                let (bytes, _) = received.into_parts();
+                if let Ok(message) = ClientMessage::decode(bytes.as_ref(), Vec::new())
+                    && msg_tx.send(message).is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        command(
+            &state,
+            Server::CreatePeerConnection {
+                pc_id: 1,
+                configuration: CONFIG.to_owned().into(),
+            },
+        )
+        .await;
+        command(
+            &state,
+            Server::AddTransceiver {
+                pc_id: 1,
+                transceiver_id: 1,
+                kind: "video".to_owned().into(),
+                direction: "recvonly".to_owned().into(),
+            },
+        )
+        .await;
+
+        let remote_api = crate::peer::build_default_api().unwrap();
+        let remote = Arc::new(
+            remote_api
+                .new_peer_connection(RTCConfiguration::default())
+                .await
+                .unwrap(),
+        );
+        let video_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_VP8.to_owned(),
+                clock_rate: 90000,
+                ..Default::default()
+            },
+            "video".to_owned(),
+            "remote-stream".to_owned(),
+        ));
+        remote
+            .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .unwrap();
+
+        let state_for_ice = Arc::clone(&state);
+        remote.on_ice_candidate(Box::new(move |candidate| {
+            let state = Arc::clone(&state_for_ice);
+            Box::pin(async move {
+                let Some(candidate) = candidate else {
+                    return;
+                };
+                let Ok(json) = candidate.to_json() else {
+                    return;
+                };
+                command(
+                    &state,
+                    Server::AddIceCandidate {
+                        pc_id: 1,
+                        request_id: 10,
+                        candidate: json.candidate.into(),
+                        sdp_mid: json.sdp_mid.map(Into::into),
+                        sdp_mline_index: json.sdp_mline_index.map(u32::from),
+                        ufrag: json.username_fragment.map(Into::into),
+                    },
+                )
+                .await;
+            })
+        }));
+
+        let offer = remote.create_offer(None).await.unwrap();
+        remote.set_local_description(offer.clone()).await.unwrap();
+        command(
+            &state,
+            Server::SetRemoteDescription {
+                pc_id: 1,
+                request_id: 1,
+                sdp_type: "offer".to_owned().into(),
+                sdp: offer.sdp.into(),
+            },
+        )
+        .await;
+        command(&state, Server::CreateAnswer { pc_id: 1, request_id: 2 }).await;
+
+        let answer_sdp = loop {
+            match tokio::time::timeout(Duration::from_secs(5), msg_rx.recv())
+                .await
+                .expect("timed out waiting for CreateAnswerResult")
+                .expect("IPC channel closed")
+            {
+                ClientMessage::OnCreateAnswerResult(res) => {
+                    assert!(res.ok, "create_answer failed: {}", to_string(res.error_message));
+                    break to_string(res.sdp);
+                }
+                ClientMessage::OnIceCandidate(cand) => {
+                    if let Some(c) = to_optional_string(cand.candidate) {
+                        let _ = remote
+                            .add_ice_candidate(RTCIceCandidateInit {
+                                candidate: c,
+                                sdp_mid: to_optional_string(cand.sdp_mid),
+                                sdp_mline_index: cand.sdp_mline_index.map(|v| v as u16),
+                                ..Default::default()
+                            })
+                            .await;
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        command(
+            &state,
+            Server::SetLocalDescription {
+                pc_id: 1,
+                request_id: 3,
+                sdp_type: "answer".to_owned().into(),
+                sdp: answer_sdp.clone().into(),
+            },
+        )
+        .await;
+        remote
+            .set_remote_description(RTCSessionDescription::answer(answer_sdp).unwrap())
+            .await
+            .unwrap();
+
+        let vp8_keyframe = [0x10u8, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0x10, 0x00, 0x10, 0x00];
+        let mut received_video = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+
+        while tokio::time::Instant::now() < deadline && received_video.is_none() {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let _ = video_track.write_sample(&Sample {
+                        data: Bytes::copy_from_slice(&vp8_keyframe),
+                        duration: Duration::from_millis(33),
+                        ..Default::default()
+                    }).await;
+                }
+                maybe_msg = msg_rx.recv() => {
+                    let Some(msg) = maybe_msg else {
+                        break;
+                    };
+                    match msg {
+                        ClientMessage::OnIceCandidate(cand) => {
+                            if let Some(c) = to_optional_string(cand.candidate) {
+                                let _ = remote.add_ice_candidate(RTCIceCandidateInit {
+                                    candidate: c,
+                                    sdp_mid: to_optional_string(cand.sdp_mid),
+                                    sdp_mline_index: cand.sdp_mline_index.map(|v| v as u16),
+                                    ..Default::default()
+                                }).await;
+                            }
+                        }
+                        ClientMessage::OnEncodedVideoFrame(frame) => {
+                            received_video = Some(frame);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let frame = received_video.expect("expected OnEncodedVideoFrame from VP8 loopback");
+        assert!(to_string(frame.mime_type).eq_ignore_ascii_case("video/vp8"));
+        assert!(frame.is_keyframe);
+        assert_eq!(frame.payload, vp8_keyframe);
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
+        command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;
+        drop(msg_rx);
+        drop(state);
+        drop(reader_thread);
     }
 }
