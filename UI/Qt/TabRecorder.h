@@ -11,6 +11,7 @@
 #include <AK/Error.h>
 #include <AK/Mutex.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Optional.h>
 #include <AK/OwnPtr.h>
 #include <AK/RefPtr.h>
 #include <AK/String.h>
@@ -91,7 +92,7 @@ signals:
 private:
     void capture_video_tick();
     void enqueue_video_frame(QImage);
-    void run_video_worker();
+    void run_video_worker(u32 width, u32 height, u32 fps, bool record_audio);
     void run_audio_worker();
     ErrorOr<void> write_speakers_json(AK::Duration total_duration);
 
@@ -114,8 +115,12 @@ private:
     OwnPtr<Media::SpeakerTimeline> m_timeline;
 #ifdef Q_OS_WIN
     OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder> m_recorder;
+    Optional<Error> m_recorder_init_error;
+    Optional<Error> m_recorder_finalize_error;
     void* m_stop_event { nullptr };
     void* m_video_event { nullptr };
+    void* m_recorder_init_event { nullptr };
+    bool m_recorder_has_audio { false };
 #endif
 
     AK::Mutex m_recorder_mutex;

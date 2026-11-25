@@ -1832,7 +1832,7 @@ void Tab::toggle_recording()
     auto page_title = ak_string_from_qstring(title());
     if (auto rc = m_recorder->start(page_title); rc.is_error()) {
         dbgln("Tab: failed to start recording: {}", rc.error());
-        QMessageBox::warning(this, "Tab Recording Failed", qstring_from_ak_string(rc.error().string_literal()));
+        QMessageBox::warning(this, "Tab Recording Failed", qstring_from_ak_string(MUST(String::formatted("{}", rc.error()))));
     }
 }
 

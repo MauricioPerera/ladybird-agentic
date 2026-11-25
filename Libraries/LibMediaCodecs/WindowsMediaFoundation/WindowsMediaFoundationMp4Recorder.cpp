@@ -257,9 +257,8 @@ ErrorOr<NonnullOwnPtr<WindowsMediaFoundationMp4Recorder>> WindowsMediaFoundation
     auto wide_path = TRY(utf8_to_wide_null_terminated(output_mp4_path));
 
     ComPtr<IMFAttributes> attributes;
-    if (FAILED(MFCreateAttributes(&attributes, 3))
-        || FAILED(attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE))
-        || FAILED(attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE))
+    if (FAILED(MFCreateAttributes(&attributes, 2))
+        || FAILED(attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, FALSE))
         || FAILED(attributes->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4))) {
         return Error::from_string_literal("Failed to configure Media Foundation MP4 sink writer attributes");
     }

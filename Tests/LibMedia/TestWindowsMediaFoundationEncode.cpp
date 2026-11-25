@@ -531,3 +531,68 @@ TEST_CASE(mp4_recorder_video_only_writes_valid_mp4)
     EXPECT(sv.contains("ftyp"sv));
     EXPECT(sv.contains("moov"sv));
 }
+
+TEST_CASE(mp4_recorder_sustained_30fps_h264_aac_stress)
+{
+    StringView const test_path = "ladybird_test_mp4_recorder_stress.mp4"sv;
+    if (FileSystem::exists(test_path))
+        MUST(FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed));
+    ScopeGuard cleanup = [&] {
+        if (FileSystem::exists(test_path))
+            (void)FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed);
+    };
+
+    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
+    config.width = 1280;
+    config.height = 720;
+    config.fps = 30;
+    config.video_bitrate_bps = 4'000'000;
+    config.record_audio = true;
+    config.audio_sample_rate = 48000;
+    config.audio_channels = 2;
+    config.audio_bitrate_bps = 192'000;
+
+    {
+        auto recorder = TRY_OR_FAIL(Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(test_path, config));
+        Vector<u8> bgra_frame;
+        bgra_frame.resize(1280u * 720u * 4u);
+        Vector<i16> pcm_chunk;
+        pcm_chunk.resize(960u * 2u);
+
+        u32 audio_idx = 0;
+        for (u32 i = 0; i < 300; ++i) {
+            u8 shade = static_cast<u8>((i * 7) & 0xFF);
+            for (size_t row = 0; row < 720u; ++row) {
+                u8* row_ptr = bgra_frame.data() + row * 1280u * 4u;
+                memset(row_ptr, (row / 4 + shade) & 0xFF, 1280u * 4u);
+            }
+            auto vts = AK::Duration::from_milliseconds(static_cast<i64>(i) * 33);
+            TRY_OR_FAIL(recorder->write_video_frame(bgra_frame.span(), 1280, 720, 1280 * 4, false, vts, AK::Duration::from_milliseconds(33)));
+
+            if (recorder->has_audio_stream()) {
+                while (audio_idx < 500 && static_cast<i64>(audio_idx) * 20 <= vts.to_milliseconds()) {
+                    for (size_t f = 0; f < 960; ++f) {
+                        i16 sample = static_cast<i16>(((audio_idx * 960 + f) % 80 < 40) ? 2500 : -2500);
+                        pcm_chunk[f * 2 + 0] = sample;
+                        pcm_chunk[f * 2 + 1] = sample;
+                    }
+                    auto ats = AK::Duration::from_milliseconds(static_cast<i64>(audio_idx) * 20);
+                    ReadonlyBytes pcm_bytes { reinterpret_cast<u8 const*>(pcm_chunk.data()), pcm_chunk.size() * sizeof(i16) };
+                    TRY_OR_FAIL(recorder->write_audio_pcm_s16le(pcm_bytes, ats, AK::Duration::from_milliseconds(20)));
+                    ++audio_idx;
+                }
+            }
+        }
+
+        TRY_OR_FAIL(recorder->finalize());
+    }
+
+    EXPECT(FileSystem::exists(test_path));
+    auto file = TRY_OR_FAIL(Core::File::open(test_path, Core::File::OpenMode::Read));
+    auto bytes = TRY_OR_FAIL(file->read_until_eof());
+    EXPECT(bytes.size() > 100'000u);
+
+    auto sv = StringView { bytes.bytes() };
+    EXPECT(sv.contains("ftyp"sv));
+    EXPECT(sv.contains("moov"sv));
+}

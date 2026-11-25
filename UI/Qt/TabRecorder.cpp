@@ -606,29 +606,17 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     u32 target_width = max<u32>(320, raw_width & ~1u);
     u32 target_height = max<u32>(240, raw_height & ~1u);
 
-    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
-    config.width = target_width;
-    config.height = target_height;
-    config.fps = target_fps;
-    config.video_bitrate_bps = 4'000'000;
-    config.record_audio = m_active_settings.record_microphone || m_active_settings.record_system_audio;
-    config.audio_sample_rate = TARGET_AUDIO_SAMPLE_RATE;
-    config.audio_channels = TARGET_AUDIO_CHANNELS;
-    config.audio_bitrate_bps = 192'000;
+    bool want_audio = m_active_settings.record_microphone || m_active_settings.record_system_audio;
 
-    auto recorder_or_error = Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(m_mp4_path, config);
-    if (recorder_or_error.is_error()) {
-        m_view.set_recording_active(false);
-        return recorder_or_error.release_error();
-    }
-
-    m_recorder = recorder_or_error.release_value();
     if (m_active_settings.export_speaker_timeline)
         m_timeline = make<Media::SpeakerTimeline>();
     else
         m_timeline.clear();
     m_stop_requested = false;
     m_snapshot_in_flight = false;
+    m_recorder_init_error.clear();
+    m_recorder_finalize_error.clear();
+    m_recorder_has_audio = false;
     m_audio_worker_stop.store(false, AK::MemoryOrder::memory_order_release);
     {
         AK::MutexLocker locker(m_video_queue_mutex);
@@ -637,7 +625,8 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
 
     m_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_video_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!m_stop_event || !m_video_event) {
+    m_recorder_init_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!m_stop_event || !m_video_event || !m_recorder_init_event) {
         if (m_stop_event) {
             CloseHandle(static_cast<HANDLE>(m_stop_event));
             m_stop_event = nullptr;
@@ -646,7 +635,10 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
             CloseHandle(static_cast<HANDLE>(m_video_event));
             m_video_event = nullptr;
         }
-        m_recorder.clear();
+        if (m_recorder_init_event) {
+            CloseHandle(static_cast<HANDLE>(m_recorder_init_event));
+            m_recorder_init_event = nullptr;
+        }
         m_timeline.clear();
         m_view.set_recording_active(false);
         return Error::from_windows_error();
@@ -655,13 +647,30 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     m_start_time = MonotonicTime::now_coarse();
     m_is_recording = true;
 
-    m_video_thread = Threading::Thread::construct("TabRecorder Video"sv, [this]() -> intptr_t {
-        run_video_worker();
+    m_video_thread = Threading::Thread::construct("TabRecorder Video"sv, [this, target_width, target_height, target_fps, want_audio]() -> intptr_t {
+        run_video_worker(target_width, target_height, target_fps, want_audio);
         return 0;
     });
     m_video_thread->start();
 
-    if (m_recorder->has_audio_stream()) {
+    WaitForSingleObject(static_cast<HANDLE>(m_recorder_init_event), INFINITE);
+    CloseHandle(static_cast<HANDLE>(m_recorder_init_event));
+    m_recorder_init_event = nullptr;
+
+    if (m_recorder_init_error.has_value()) {
+        m_is_recording = false;
+        (void)m_video_thread->join();
+        m_video_thread = nullptr;
+        CloseHandle(static_cast<HANDLE>(m_stop_event));
+        m_stop_event = nullptr;
+        CloseHandle(static_cast<HANDLE>(m_video_event));
+        m_video_event = nullptr;
+        m_timeline.clear();
+        m_view.set_recording_active(false);
+        return m_recorder_init_error.release_value();
+    }
+
+    if (m_recorder_has_audio) {
         m_audio_thread = Threading::Thread::construct("TabRecorder Audio"sv, [this]() -> intptr_t {
             run_audio_worker();
             return 0;
@@ -691,23 +700,24 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
 
     auto total_duration = max(AK::Duration::from_milliseconds(1), MonotonicTime::now_coarse() - m_start_time);
 
+    // Stop and join the audio worker first so all audio samples finish before video finalization.
+    m_audio_worker_stop.store(true, AK::MemoryOrder::memory_order_release);
+    if (m_stop_event)
+        SetEvent(static_cast<HANDLE>(m_stop_event));
+    if (m_audio_thread) {
+        (void)m_audio_thread->join();
+        m_audio_thread = nullptr;
+    }
+
     {
         AK::MutexLocker locker(m_video_queue_mutex);
         m_stop_requested = true;
     }
-    m_audio_worker_stop.store(true, AK::MemoryOrder::memory_order_release);
-    if (m_stop_event)
-        SetEvent(static_cast<HANDLE>(m_stop_event));
     if (m_video_event)
         SetEvent(static_cast<HANDLE>(m_video_event));
-
     if (m_video_thread) {
         (void)m_video_thread->join();
         m_video_thread = nullptr;
-    }
-    if (m_audio_thread) {
-        (void)m_audio_thread->join();
-        m_audio_thread = nullptr;
     }
 
     if (m_stop_event) {
@@ -719,27 +729,19 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
         m_video_event = nullptr;
     }
 
-    ErrorOr<void> finalize_result = {};
-    {
-        AK::MutexLocker locker(m_recorder_mutex);
-        if (m_recorder) {
-            finalize_result = m_recorder->finalize();
-            m_recorder.clear();
-        }
-    }
-
     if (m_timeline)
         m_timeline->finalize(total_duration);
     auto json_result = write_speakers_json(total_duration);
     m_timeline.clear();
 
-    if (finalize_result.is_error()) {
-        auto err_msg = qstring_from_ak_string(finalize_result.error().string_literal());
+    if (m_recorder_finalize_error.has_value()) {
+        auto err = m_recorder_finalize_error.release_value();
+        auto err_msg = qstring_from_ak_string(MUST(String::formatted("{}", err)));
         emit recording_failed(err_msg);
-        return finalize_result.release_error();
+        return err;
     }
     if (json_result.is_error()) {
-        auto err_msg = qstring_from_ak_string(json_result.error().string_literal());
+        auto err_msg = qstring_from_ak_string(MUST(String::formatted("{}", json_result.error())));
         emit recording_failed(err_msg);
         return json_result.release_error();
     }
@@ -845,13 +847,46 @@ void TabRecorder::enqueue_video_frame(QImage snapshot)
 #endif
 }
 
-void TabRecorder::run_video_worker()
+void TabRecorder::run_video_worker(u32 width, u32 height, u32 fps, bool record_audio)
 {
 #ifdef Q_OS_WIN
     ScopedComInitializer com(COINIT_MULTITHREADED);
+    if (!com.initialized()) {
+        m_recorder_init_error = Error::from_string_literal("Failed to initialize COM MTA on recorder thread");
+        if (m_recorder_init_event)
+            SetEvent(static_cast<HANDLE>(m_recorder_init_event));
+        return;
+    }
+
+    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
+    config.width = width;
+    config.height = height;
+    config.fps = fps;
+    config.video_bitrate_bps = 4'000'000;
+    config.record_audio = record_audio;
+    config.audio_sample_rate = TARGET_AUDIO_SAMPLE_RATE;
+    config.audio_channels = TARGET_AUDIO_CHANNELS;
+    config.audio_bitrate_bps = 192'000;
+
+    auto recorder_or_error = Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(m_mp4_path, config);
+    if (recorder_or_error.is_error()) {
+        m_recorder_init_error = recorder_or_error.release_error();
+        if (m_recorder_init_event)
+            SetEvent(static_cast<HANDLE>(m_recorder_init_event));
+        return;
+    }
+
+    {
+        AK::MutexLocker rec_locker(m_recorder_mutex);
+        m_recorder = recorder_or_error.release_value();
+        m_recorder_has_audio = m_recorder->has_audio_stream();
+    }
+    if (m_recorder_init_event)
+        SetEvent(static_cast<HANDLE>(m_recorder_init_event));
+
     AK::Duration last_written_ts = AK::Duration::from_milliseconds(-1);
-    u32 fps = clamp<u32>(m_active_settings.fps, 10, 60);
-    auto frame_duration = AK::Duration::from_milliseconds(max<i64>(16, 1000 / fps));
+    u32 safe_fps = clamp<u32>(fps, 10, 60);
+    auto frame_duration = AK::Duration::from_milliseconds(max<i64>(16, 1000 / safe_fps));
 
     for (;;) {
         Optional<QueuedVideoFrame> next_frame;
@@ -886,6 +921,15 @@ void TabRecorder::run_video_worker()
             if (auto rc = m_recorder->write_video_frame(pixels, static_cast<u32>(img.width()), static_cast<u32>(img.height()), static_cast<size_t>(img.bytesPerLine()), false, ts, frame_duration); rc.is_error()) {
                 dbgln("TabRecorder: write_video_frame failed: {}", rc.error());
             }
+        }
+    }
+
+    {
+        AK::MutexLocker rec_locker(m_recorder_mutex);
+        if (m_recorder) {
+            if (auto rc = m_recorder->finalize(); rc.is_error())
+                m_recorder_finalize_error = rc.release_error();
+            m_recorder.clear();
         }
     }
 #endif
