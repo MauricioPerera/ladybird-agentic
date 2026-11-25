@@ -1750,6 +1750,8 @@ static Optional<Web::Permissions::PermissionName> permission_name_from(Utf16Stri
         return Web::Permissions::PermissionName::Microphone;
     if (name == "notifications"_utf16)
         return Web::Permissions::PermissionName::Notifications;
+    if (name == "camera"_utf16)
+        return Web::Permissions::PermissionName::Camera;
     return {};
 }
 
@@ -1763,6 +1765,8 @@ static Optional<Web::PermissionsPolicy::PolicyControlledFeature> policy_controll
         return Web::PermissionsPolicy::PolicyControlledFeature::Microphone;
     case Web::Permissions::PermissionName::Notifications:
         return {};
+    case Web::Permissions::PermissionName::Camera:
+        return Web::PermissionsPolicy::PolicyControlledFeature::Camera;
     }
     VERIFY_NOT_REACHED();
 }
@@ -1943,6 +1947,8 @@ void WebContentPage::did_request_permission(u64 request_id, Web::HTML::CrossProc
             return NotificationManager::the().backend().os_authorization_is_undetermined();
         case Web::Permissions::PermissionName::Microphone:
             return view().microphone_authorization() == MicrophoneAuthorization::NotDetermined;
+        case Web::Permissions::PermissionName::Camera:
+            return false;
         }
         VERIFY_NOT_REACHED();
     }();

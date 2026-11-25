@@ -26,8 +26,11 @@ using AudioConfiguration = Bindings::AudioConfiguration;
 using KeySystemTrackConfiguration = Bindings::KeySystemTrackConfiguration;
 using MediaCapabilitiesKeySystemConfiguration = Bindings::MediaCapabilitiesKeySystemConfiguration;
 using MediaCapabilitiesDecodingInfo = Bindings::MediaCapabilitiesDecodingInfo;
+using MediaCapabilitiesEncodingInfo = Bindings::MediaCapabilitiesEncodingInfo;
 using MediaDecodingConfiguration = Bindings::MediaDecodingConfiguration;
 using MediaDecodingType = Bindings::MediaDecodingType;
+using MediaEncodingConfiguration = Bindings::MediaEncodingConfiguration;
+using MediaEncodingType = Bindings::MediaEncodingType;
 using MediaKeysRequirement = Bindings::MediaKeysRequirement;
 using TransferFunction = Bindings::TransferFunction;
 using VideoConfiguration = Bindings::VideoConfiguration;
@@ -37,6 +40,8 @@ bool is_valid_video_configuration(VideoConfiguration const&);
 bool is_valid_audio_configuration(AudioConfiguration const&);
 
 bool is_valid_media_decoding_configuration(MediaDecodingConfiguration const&);
+
+bool is_valid_media_encoding_configuration(MediaEncodingConfiguration const&);
 
 // https://w3c.github.io/media-capabilities/#media-capabilities-interface
 class MediaCapabilities final : public Bindings::GCAllocatedWrappable {
@@ -48,6 +53,7 @@ public:
     virtual ~MediaCapabilities() override = default;
 
     void decoding_info(MediaDecodingConfiguration const&, GC::Ref<WebIDL::Promise>);
+    void encoding_info(MediaEncodingConfiguration const&, GC::Ref<WebIDL::Promise>);
 
 private:
     MediaCapabilities();
@@ -55,6 +61,7 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
 
     Vector<GC::Ref<WebIDL::Promise>> m_pending_decoding_info_promises;
+    Vector<GC::Ref<WebIDL::Promise>> m_pending_encoding_info_promises;
 };
 
 using DecoderCapabilitiesPromise = Core::Promise<Optional<Media::DecoderCapabilities>>;

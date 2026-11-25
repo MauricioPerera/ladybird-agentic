@@ -18,6 +18,8 @@ Optional<PermissionName> permission_name_from_string(StringView name)
         return PermissionName::Microphone;
     if (name == "notifications"sv)
         return PermissionName::Notifications;
+    if (name == "camera"sv)
+        return PermissionName::Camera;
     return {};
 }
 
@@ -30,6 +32,8 @@ StringView to_string(PermissionName name)
         return "microphone"sv;
     case PermissionName::Notifications:
         return "notifications"sv;
+    case PermissionName::Camera:
+        return "camera"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -63,6 +67,7 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::Permissions::PermissionSnapshot
     TRY(encoder.encode(snapshot.geolocation_default));
     TRY(encoder.encode(snapshot.microphone_default));
     TRY(encoder.encode(snapshot.notifications_default));
+    TRY(encoder.encode(snapshot.camera_default));
     return {};
 }
 
@@ -75,5 +80,6 @@ ErrorOr<Web::Permissions::PermissionSnapshot> IPC::decode(Decoder& decoder)
     auto geolocation_default = TRY(decoder.decode<Web::Permissions::EffectiveState>());
     auto microphone_default = TRY(decoder.decode<Web::Permissions::EffectiveState>());
     auto notifications_default = TRY(decoder.decode<Web::Permissions::EffectiveState>());
-    return Web::Permissions::PermissionSnapshot { revision, move(origins), move(entries), geolocation_default, microphone_default, notifications_default };
+    auto camera_default = TRY(decoder.decode<Web::Permissions::EffectiveState>());
+    return Web::Permissions::PermissionSnapshot { revision, move(origins), move(entries), geolocation_default, microphone_default, notifications_default, camera_default };
 }

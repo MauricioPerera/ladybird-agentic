@@ -11,4 +11,5 @@ pub(crate) enum PermissionName {
     Geolocation = 0,
     Microphone = 1,
     Notifications = 2,
+    Camera = 3,
 }

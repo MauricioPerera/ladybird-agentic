@@ -101,6 +101,7 @@ dictionary MediaCapabilitiesDecodingInfo : MediaCapabilitiesInfo {
     required MediaDecodingConfiguration configuration;
 };
 
+[GenerateToValue]
 dictionary MediaCapabilitiesEncodingInfo : MediaCapabilitiesInfo {
     required MediaEncodingConfiguration configuration;
 };
@@ -109,5 +110,5 @@ dictionary MediaCapabilitiesEncodingInfo : MediaCapabilitiesInfo {
 [Exposed=(Window, Worker)]
 interface MediaCapabilities {
     [NewObject, CreatesPromise] Promise<MediaCapabilitiesDecodingInfo> decodingInfo(MediaDecodingConfiguration configuration);
-    [FIXME, NewObject] Promise<MediaCapabilitiesEncodingInfo> encodingInfo(MediaEncodingConfiguration configuration);
+    [NewObject, CreatesPromise] Promise<MediaCapabilitiesEncodingInfo> encodingInfo(MediaEncodingConfiguration configuration);
 };

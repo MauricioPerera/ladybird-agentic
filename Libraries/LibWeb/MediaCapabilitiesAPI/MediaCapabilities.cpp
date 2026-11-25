@@ -32,7 +32,7 @@ static void queue_a_media_capabilities_task(JS::Object& global_object, GC::Ref<G
 }
 
 // https://w3c.github.io/media-capabilities/#valid-mediaconfiguration
-static bool is_valid_media_configuration(MediaDecodingConfiguration const& configuration)
+static bool is_valid_media_configuration(Bindings::MediaConfiguration const& configuration)
 {
     //  For a MediaConfiguration to be a valid MediaConfiguration, all of the following conditions MUST be true:
 
@@ -65,6 +65,12 @@ bool is_valid_media_decoding_configuration(MediaDecodingConfiguration const& con
     // FIXME: Implement this.
 
     return true;
+}
+
+// https://w3c.github.io/media-capabilities/#valid-mediaencodingconfiguration
+bool is_valid_media_encoding_configuration(MediaEncodingConfiguration const& configuration)
+{
+    return is_valid_media_configuration(configuration);
 }
 
 // https://w3c.github.io/media-capabilities/#check-mime-type-validity
@@ -194,6 +200,56 @@ void MediaCapabilities::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_pending_decoding_info_promises);
+    visitor.visit(m_pending_encoding_info_promises);
+}
+
+static bool is_supported_webrtc_encoding_audio_mime_type(Utf16View content_type)
+{
+    auto mime_type = MimeSniff::MimeType::parse(content_type);
+    return mime_type.has_value()
+        && mime_type->type() == "audio"sv
+        && mime_type->subtype().bytes_as_string_view().equals_ignoring_ascii_case("opus"sv);
+}
+
+// https://w3c.github.io/media-capabilities/#dom-mediacapabilities-encodinginfo
+void MediaCapabilities::encoding_info(MediaEncodingConfiguration const& configuration, GC::Ref<WebIDL::Promise> promise)
+{
+    // 1. If configuration is not a valid MediaEncodingConfiguration, return a Promise rejected with a newly created
+    //    TypeError.
+    if (!is_valid_media_encoding_configuration(configuration)) {
+        WebIDL::reject_promise(promise, JS::TypeError::create(WebIDL::promise_realm(promise), "The given configuration is not a valid MediaEncodingConfiguration"sv));
+        return;
+    }
+
+    MediaCapabilitiesEncodingInfo info {};
+    MediaEncodingConfiguration info_configuration {};
+    info_configuration.audio = configuration.audio;
+    info_configuration.video = configuration.video;
+    info_configuration.type = configuration.type;
+    info.configuration = move(info_configuration);
+
+    if (configuration.type == MediaEncodingType::Webrtc) {
+        auto audio_supported = !configuration.audio.has_value() || is_supported_webrtc_encoding_audio_mime_type(configuration.audio->content_type);
+        // Video encoding lands in Phase 4.
+        auto video_supported = !configuration.video.has_value();
+        info.supported = audio_supported && video_supported;
+        info.smooth = info.supported;
+        info.power_efficient = info.supported && !configuration.video.has_value();
+    } else {
+        info.supported = false;
+        info.smooth = false;
+        info.power_efficient = false;
+    }
+
+    m_pending_encoding_info_promises.append(promise);
+    queue_a_media_capabilities_task(WebIDL::promise_realm(promise).global_object(), GC::create_function(GC::Heap::the(), GC::captures(GC::Weak { *this }, promise, move(info)), [](auto& weak_this, auto& promise, auto& info) {
+        if (auto self = weak_this.ptr())
+            self->m_pending_encoding_info_promises.remove_first_matching([&](auto const& candidate) { return candidate.ptr() == promise.ptr(); });
+        auto& realm = WebIDL::promise_realm(*promise);
+        HTML::TemporaryExecutionContext context(realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
+        auto result = Bindings::media_capabilities_encoding_info_to_value(realm, info);
+        WebIDL::resolve_promise(*promise, result);
+    }));
 }
 
 // https://w3c.github.io/media-capabilities/#dom-mediacapabilities-decodinginfo
@@ -308,11 +364,19 @@ static NonnullRefPtr<DecoderCapabilitiesPromise> request_media_source_decoding_c
 //         LibMedia answers all three from one query, so the capabilities are returned here instead.
 static NonnullRefPtr<DecoderCapabilitiesPromise> check_mime_type_support(Utf16View content_type, MediaDecodingType decoding_type)
 {
+    auto mime_type = MimeSniff::MimeType::parse(content_type);
+    if (!mime_type.has_value())
+        return unsupported();
+
     // 1. If encodingOrDecodingType is webrtc and mimeType is not one that is used with RTP [...], return
     //    unsupported.
-    // FIXME: No RTP payload formats are supported, so every webrtc configuration is rejected here.
-    if (decoding_type == MediaDecodingType::Webrtc)
+    if (decoding_type == MediaDecodingType::Webrtc) {
+        if (mime_type->type() == "audio"sv && mime_type->subtype().bytes_as_string_view().is_one_of_ignoring_ascii_case("opus"sv, "pcmu"sv, "pcma"sv, "g722"sv, "cn"sv, "telephone-event"sv))
+            return DecoderCapabilitiesPromise::resolved(Optional<Media::DecoderCapabilities> { Media::DecoderCapabilities { .smooth = true, .power_efficient = true } });
+        if (mime_type->type() == "video"sv && mime_type->subtype().bytes_as_string_view().is_one_of_ignoring_ascii_case("vp8"sv, "vp9"sv, "h264"sv, "av1"sv))
+            return DecoderCapabilitiesPromise::resolved(Optional<Media::DecoderCapabilities> { Media::DecoderCapabilities { .smooth = true, .power_efficient = false } });
         return unsupported();
+    }
 
     // FIXME: 2. If colorGamut is present and is not valid for mimeType, return unsupported.
     // FIXME: 3. If transferFunction is present and is not valid for mimeType, return unsupported.
@@ -321,9 +385,6 @@ static NonnullRefPtr<DecoderCapabilitiesPromise> check_mime_type_support(Utf16Vi
     // AD-HOC: A media-source content type is supported exactly when MediaSource.isTypeSupported() accepts it,
     //         and a file content type when canPlayType() answers "probably" for it.
     // 5. Return supported.
-    auto mime_type = MimeSniff::MimeType::parse(content_type);
-    if (!mime_type.has_value())
-        return unsupported();
     if (decoding_type == MediaDecodingType::MediaSource)
         return request_media_source_decoding_capabilities(*mime_type);
     return request_file_decoding_capabilities(*mime_type);

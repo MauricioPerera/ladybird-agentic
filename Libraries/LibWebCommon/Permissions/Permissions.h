@@ -21,12 +21,14 @@ enum class PermissionName : u8 {
     Geolocation,
     Microphone,
     Notifications,
+    Camera,
 };
 
 constexpr inline Array PERMISSION_NAMES {
     PermissionName::Geolocation,
     PermissionName::Microphone,
     PermissionName::Notifications,
+    PermissionName::Camera,
 };
 
 WEBCOMMON_API Optional<PermissionName> permission_name_from_string(StringView);
@@ -67,6 +69,7 @@ struct WEBCOMMON_API PermissionSnapshot {
     EffectiveState geolocation_default { EffectiveState::Prompt };
     EffectiveState microphone_default { EffectiveState::Prompt };
     EffectiveState notifications_default { EffectiveState::Prompt };
+    EffectiveState camera_default { EffectiveState::Prompt };
 };
 
 }

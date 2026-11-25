@@ -1667,6 +1667,70 @@ void RTCPeerConnection::on_set_local_description_result_received(u64 request_id,
     }
 }
 
+static void collect_mids_from_sdp(Utf16String const& sdp, Vector<Utf16String>& mids)
+{
+    auto utf8_sdp = sdp.to_well_formed_utf8();
+    utf8_sdp.bytes_as_string_view().for_each_split_view('\n', SplitBehavior::KeepEmpty, [&](StringView raw_line) {
+        auto line = raw_line.trim_whitespace();
+        if (line.starts_with("a=mid:"sv))
+            mids.append(Utf16String::from_utf8(line.substring_view("a=mid:"sv.length())));
+    });
+}
+
+void RTCPeerConnection::sync_transceiver_mids_from_sdp(Utf16String const& sdp)
+{
+    auto utf8_sdp = sdp.to_well_formed_utf8();
+    Optional<Bindings::MediaStreamTrackKind> section_kind;
+    Optional<Utf16String> section_mid;
+
+    auto flush_section = [&]() {
+        if (!section_kind.has_value() || !section_mid.has_value())
+            return;
+        for (auto& transceiver : m_transceivers) {
+            if (!transceiver->is_stopped() && transceiver->mid().has_value() && *transceiver->mid() == *section_mid)
+                return;
+        }
+        for (auto& transceiver : m_transceivers) {
+            if (!transceiver->is_stopped() && !transceiver->mid().has_value() && transceiver->kind() == *section_kind) {
+                transceiver->set_mid(*section_mid);
+                return;
+            }
+        }
+    };
+
+    utf8_sdp.bytes_as_string_view().for_each_split_view('\n', SplitBehavior::KeepEmpty, [&](StringView raw_line) {
+        auto line = raw_line.trim_whitespace();
+        if (line.starts_with("m="sv)) {
+            flush_section();
+            section_mid.clear();
+            if (line.starts_with("m=audio "sv))
+                section_kind = Bindings::MediaStreamTrackKind::Audio;
+            else if (line.starts_with("m=video "sv))
+                section_kind = Bindings::MediaStreamTrackKind::Video;
+            else
+                section_kind.clear();
+            return;
+        }
+        if (section_kind.has_value() && line.starts_with("a=mid:"sv))
+            section_mid = Utf16String::from_utf8(line.substring_view("a=mid:"sv.length()));
+    });
+    flush_section();
+}
+
+void RTCPeerConnection::clear_uncommitted_transceiver_mids()
+{
+    Vector<Utf16String> committed_mids;
+    if (m_current_local_description)
+        collect_mids_from_sdp(m_current_local_description->sdp(), committed_mids);
+    if (m_current_remote_description)
+        collect_mids_from_sdp(m_current_remote_description->sdp(), committed_mids);
+
+    for (auto& transceiver : m_transceivers) {
+        if (transceiver->mid().has_value() && !committed_mids.contains_slow(*transceiver->mid()))
+            transceiver->set_mid({});
+    }
+}
+
 void RTCPeerConnection::settle_local_description(u64 request_id, bool ok, String const& error_message)
 {
     auto promise = m_pending_void_requests.take(request_id);
@@ -1686,6 +1750,7 @@ void RTCPeerConnection::settle_local_description(u64 request_id, bool ok, String
         case Bindings::RTCSdpType::Offer:
         case Bindings::RTCSdpType::Pranswer:
             m_pending_local_description = description;
+            sync_transceiver_mids_from_sdp(payload->sdp);
             break;
         case Bindings::RTCSdpType::Answer:
             m_current_local_description = description;
@@ -1693,10 +1758,12 @@ void RTCPeerConnection::settle_local_description(u64 request_id, bool ok, String
             m_pending_local_description = nullptr;
             m_pending_remote_description = nullptr;
             m_restart_ice = false;
+            sync_transceiver_mids_from_sdp(payload->sdp);
             break;
         case Bindings::RTCSdpType::Rollback:
             m_pending_local_description = nullptr;
             m_pending_remote_description = nullptr;
+            clear_uncommitted_transceiver_mids();
             break;
         }
     }
@@ -1722,6 +1789,7 @@ void RTCPeerConnection::on_set_remote_description_result_received(u64 request_id
         case Bindings::RTCSdpType::Offer:
         case Bindings::RTCSdpType::Pranswer:
             m_pending_remote_description = description;
+            sync_transceiver_mids_from_sdp(payload->sdp);
             break;
         case Bindings::RTCSdpType::Answer:
             m_current_remote_description = description;
@@ -1729,10 +1797,12 @@ void RTCPeerConnection::on_set_remote_description_result_received(u64 request_id
             m_pending_local_description = nullptr;
             m_pending_remote_description = nullptr;
             m_restart_ice = false;
+            sync_transceiver_mids_from_sdp(payload->sdp);
             break;
         case Bindings::RTCSdpType::Rollback:
             m_pending_local_description = nullptr;
             m_pending_remote_description = nullptr;
+            clear_uncommitted_transceiver_mids();
             break;
         }
     }

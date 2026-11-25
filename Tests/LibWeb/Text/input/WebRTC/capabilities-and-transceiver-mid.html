@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+asyncTest(async done => {
+    try {
+        const audioRecvCaps = RTCRtpReceiver.getCapabilities("audio");
+        const videoRecvCaps = RTCRtpReceiver.getCapabilities("video");
+        const audioSendCaps = RTCRtpSender.getCapabilities("audio");
+        const videoSendCaps = RTCRtpSender.getCapabilities("video");
+
+        println(`audio opus capability: ${audioRecvCaps.codecs.some(c => c.mimeType.toLowerCase() === "audio/opus")}`);
+        println(`audio header extensions: ${audioRecvCaps.headerExtensions.length > 0}`);
+        println(`video VP8+H264 capability: ${videoRecvCaps.codecs.some(c => c.mimeType === "video/VP8") && videoRecvCaps.codecs.some(c => c.mimeType === "video/H264")}`);
+        println(`invalid receiver kind null: ${RTCRtpReceiver.getCapabilities("invalid") === null}`);
+        println(`invalid sender kind null: ${RTCRtpSender.getCapabilities("invalid") === null}`);
+        println(`sender matches receiver audio count: ${audioSendCaps.codecs.length === audioRecvCaps.codecs.length}`);
+        println(`sender matches receiver video count: ${videoSendCaps.codecs.length === videoRecvCaps.codecs.length}`);
+
+        const pc = new RTCPeerConnection();
+        const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+        const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
+
+        println(`mid before SDP: ${audioTransceiver.mid === null}, ${videoTransceiver.mid === null}`);
+
+        audioTransceiver.setCodecPreferences([audioRecvCaps.codecs[0]]);
+        audioTransceiver.setCodecPreferences([]);
+        let invalidModError = "";
+        try {
+            audioTransceiver.setCodecPreferences([{ mimeType: "video/VP8", clockRate: 90000 }]);
+        } catch (error) {
+            invalidModError = error.name;
+        }
+        println(`invalid setCodecPreferences: ${invalidModError}`);
+
+        const recvParams = audioTransceiver.receiver.getParameters();
+        println(`receiver getParameters shape: ${Array.isArray(recvParams.codecs) && Array.isArray(recvParams.headerExtensions)}`);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const sdpMids = [...pc.localDescription.sdp.matchAll(/^a=mid:([^\r\n]+)/gm)].map(m => m[1]);
+        println(`mid after setLocalDescription: ${typeof audioTransceiver.mid === "string" && audioTransceiver.mid === sdpMids[0]}, ${typeof videoTransceiver.mid === "string" && videoTransceiver.mid === sdpMids[1]}`);
+
+        const pcRemote = new RTCPeerConnection();
+        const remoteAudio = pcRemote.addTransceiver("audio", { direction: "recvonly" });
+        const remoteVideo = pcRemote.addTransceiver("video", { direction: "recvonly" });
+        await pcRemote.setRemoteDescription(pc.localDescription);
+        println(`remote mid after setRemoteDescription: ${remoteAudio.mid === sdpMids[0]}, ${remoteVideo.mid === sdpMids[1]}`);
+
+        const encAudio = await navigator.mediaCapabilities.encodingInfo({
+            type: "webrtc",
+            audio: { contentType: "audio/opus", channels: "2", bitrate: 64000, samplerate: 48000 },
+        });
+        const encVideo = await navigator.mediaCapabilities.encodingInfo({
+            type: "webrtc",
+            video: { contentType: "video/VP8", width: 640, height: 480, bitrate: 500000, framerate: 30 },
+        });
+        const decAudio = await navigator.mediaCapabilities.decodingInfo({
+            type: "webrtc",
+            audio: { contentType: "audio/opus" },
+        });
+        const decVideo = await navigator.mediaCapabilities.decodingInfo({
+            type: "webrtc",
+            video: { contentType: "video/VP8", width: 640, height: 480, bitrate: 500000, framerate: 30 },
+        });
+        println(`encodingInfo audio opus: ${encAudio.supported}, ${encAudio.smooth}, ${encAudio.powerEfficient}`);
+        println(`encodingInfo video vp8: ${encVideo.supported}`);
+        println(`decodingInfo webrtc audio opus: ${decAudio.supported}`);
+        println(`decodingInfo webrtc video vp8: ${decVideo.supported}`);
+
+        pc.close();
+        pcRemote.close();
+    } catch (error) {
+        println(`FAIL: ${error.name}: ${error.message}`);
+    } finally {
+        done();
+    }
+});
+</script>

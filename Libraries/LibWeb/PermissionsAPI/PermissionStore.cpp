@@ -102,6 +102,7 @@ bool PermissionStore::store_snapshot(Web::Permissions::PermissionSnapshot const&
         m_geolocation_default = snapshot.geolocation_default;
         m_microphone_default = snapshot.microphone_default;
         m_notifications_default = snapshot.notifications_default;
+        m_camera_default = snapshot.camera_default;
         changed = true;
     }
 
@@ -158,6 +159,8 @@ Web::Permissions::EffectiveState PermissionStore::state_for(Web::Permissions::Pe
             return m_microphone_default;
         case Web::Permissions::PermissionName::Notifications:
             return m_notifications_default;
+        case Web::Permissions::PermissionName::Camera:
+            return m_camera_default;
         }
         VERIFY_NOT_REACHED();
     };

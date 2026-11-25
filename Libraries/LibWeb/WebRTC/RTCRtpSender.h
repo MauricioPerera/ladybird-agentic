@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebRTC/RTCRtpParameters.h>
@@ -22,6 +24,8 @@ class RTCRtpSender final : public Bindings::GCAllocatedWrappable {
 public:
     static GC::Ref<RTCRtpSender> create(GC::Ref<RTCPeerConnection>, u64 sender_id, u32 ssrc);
     virtual ~RTCRtpSender() override;
+
+    static Optional<RTCRtpCapabilities> get_capabilities(Utf16View kind);
 
     GC::Ptr<MediaCapture::MediaStreamTrack> track() const { return m_track; }
     void set_track(GC::Ptr<MediaCapture::MediaStreamTrack> track);

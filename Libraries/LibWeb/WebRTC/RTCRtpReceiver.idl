@@ -5,8 +5,8 @@
 interface RTCRtpReceiver {
     readonly attribute MediaStreamTrack track;
     [FIXME] readonly attribute RTCDtlsTransport? transport;
-    [FIXME] static RTCRtpCapabilities? getCapabilities(DOMString kind);
-    [FIXME] RTCRtpReceiveParameters getParameters();
+    static RTCRtpCapabilities? getCapabilities(DOMString kind);
+    RTCRtpReceiveParameters getParameters();
     [FIXME] sequence<RTCRtpContributingSource> getContributingSources();
     [FIXME] sequence<RTCRtpSynchronizationSource> getSynchronizationSources();
     [FIXME] Promise<RTCStatsReport> getStats();

@@ -203,6 +203,8 @@ private:
     };
     HashMap<u64, PendingDescription> m_pending_description_payloads;
     bool is_setting_local_description() const;
+    void sync_transceiver_mids_from_sdp(Utf16String const& sdp);
+    void clear_uncommitted_transceiver_mids();
     void settle_local_description(u64 request_id, bool ok, String const& error_message);
     // ICE events the helper sent before the local description they follow was set; see on_ice_candidate_received().
     Vector<Function<void()>> m_held_ice_events;

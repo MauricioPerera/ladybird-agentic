@@ -29,6 +29,77 @@ RTCRtpReceiver::RTCRtpReceiver(GC::Ref<MediaCapture::MediaStreamTrack> track)
 
 RTCRtpReceiver::~RTCRtpReceiver() = default;
 
+static RTCRtpCodec make_rtp_codec(Utf16String mime_type, u32 clock_rate, Optional<u16> channels = {}, Optional<Utf16String> sdp_fmtp_line = {})
+{
+    RTCRtpCodec codec;
+    codec.channels = channels;
+    codec.clock_rate = clock_rate;
+    codec.mime_type = move(mime_type);
+    codec.sdp_fmtp_line = move(sdp_fmtp_line);
+    return codec;
+}
+
+static RTCRtpHeaderExtensionCapability make_header_extension_capability(Utf16String uri)
+{
+    RTCRtpHeaderExtensionCapability ext;
+    ext.uri = move(uri);
+    return ext;
+}
+
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtpreceiver-getcapabilities
+Optional<RTCRtpCapabilities> RTCRtpReceiver::get_capabilities(Utf16View kind)
+{
+    if (kind == "audio"sv) {
+        RTCRtpCapabilities capabilities;
+        capabilities.codecs.append(make_rtp_codec("audio/opus"_utf16, 48000, 2, "minptime=10;useinbandfec=1"_utf16));
+        capabilities.codecs.append(make_rtp_codec("audio/G722"_utf16, 8000));
+        capabilities.codecs.append(make_rtp_codec("audio/PCMU"_utf16, 8000));
+        capabilities.codecs.append(make_rtp_codec("audio/PCMA"_utf16, 8000));
+        capabilities.codecs.append(make_rtp_codec("audio/CN"_utf16, 8000));
+        capabilities.codecs.append(make_rtp_codec("audio/telephone-event"_utf16, 48000));
+        capabilities.codecs.append(make_rtp_codec("audio/telephone-event"_utf16, 8000));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:mid"_utf16));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"_utf16));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"_utf16));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:ssrc-audio-level"_utf16));
+        return capabilities;
+    }
+
+    if (kind == "video"sv) {
+        RTCRtpCapabilities capabilities;
+        capabilities.codecs.append(make_rtp_codec("video/VP8"_utf16, 90000));
+        capabilities.codecs.append(make_rtp_codec("video/VP9"_utf16, 90000, {}, "profile-id=0"_utf16));
+        capabilities.codecs.append(make_rtp_codec("video/H264"_utf16, 90000, {}, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"_utf16));
+        capabilities.codecs.append(make_rtp_codec("video/H264"_utf16, 90000, {}, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"_utf16));
+        capabilities.codecs.append(make_rtp_codec("video/AV1"_utf16, 90000));
+        capabilities.codecs.append(make_rtp_codec("video/rtx"_utf16, 90000));
+        capabilities.codecs.append(make_rtp_codec("video/red"_utf16, 90000));
+        capabilities.codecs.append(make_rtp_codec("video/ulpfec"_utf16, 90000));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:mid"_utf16));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"_utf16));
+        capabilities.header_extensions.append(make_header_extension_capability("urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"_utf16));
+        return capabilities;
+    }
+
+    return {};
+}
+
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtpreceiver-getparameters
+RTCRtpReceiveParameters RTCRtpReceiver::get_parameters() const
+{
+    RTCRtpReceiveParameters result;
+    if (m_track->track_kind() == Bindings::MediaStreamTrackKind::Audio) {
+        RTCRtpCodecParameters opus;
+        opus.channels = 2;
+        opus.clock_rate = 48000;
+        opus.mime_type = "audio/opus"_utf16;
+        opus.sdp_fmtp_line = "minptime=10;useinbandfec=1"_utf16;
+        opus.payload_type = 111;
+        result.codecs.append(move(opus));
+    }
+    return result;
+}
+
 GC::Ref<MediaCapture::MediaStreamTrack> RTCRtpReceiver::track() const { return m_track; }
 
 void RTCRtpReceiver::set_associated_remote_streams(Vector<GC::Ref<MediaCapture::MediaStream>>&& streams)

@@ -52,6 +52,12 @@ void RTCRtpSender::set_ssrc(u32 ssrc)
 
 RTCRtpSender::~RTCRtpSender() = default;
 
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtpsender-getcapabilities
+Optional<RTCRtpCapabilities> RTCRtpSender::get_capabilities(Utf16View kind)
+{
+    return RTCRtpReceiver::get_capabilities(kind);
+}
+
 JS::Realm& RTCRtpSender::relevant_realm() const
 {
     return m_connection->relevant_realm();

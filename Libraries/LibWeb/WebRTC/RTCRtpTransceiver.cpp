@@ -51,6 +51,40 @@ void RTCRtpTransceiver::set_direction(Bindings::RTCRtpTransceiverDirection direc
     m_connection->update_negotiation_needed_flag();
 }
 
+// https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-setcodecpreferences
+WebIDL::ExceptionOr<void> RTCRtpTransceiver::set_codec_preferences(Vector<RTCRtpCodec> const& codecs)
+{
+    if (m_connection->is_closed() || m_stopping || m_stopped)
+        return WebIDL::InvalidStateError::create("Transceiver is stopped or connection is closed"_utf16);
+
+    if (codecs.is_empty()) {
+        m_preferred_codecs.clear();
+        return {};
+    }
+
+    auto kind = m_kind == Bindings::MediaStreamTrackKind::Audio ? u"audio"sv : u"video"sv;
+    auto capabilities = RTCRtpReceiver::get_capabilities(kind);
+    if (!capabilities.has_value())
+        return WebIDL::InvalidModificationError::create("Unsupported codec in setCodecPreferences"_utf16);
+
+    for (auto const& codec : codecs) {
+        bool supported = any_of(capabilities->codecs, [&](RTCRtpCodec const& capability) {
+            if (!codec.mime_type.equals_ignoring_ascii_case(capability.mime_type))
+                return false;
+            if (codec.clock_rate != capability.clock_rate)
+                return false;
+            if (codec.channels.has_value() && capability.channels.has_value() && *codec.channels != *capability.channels)
+                return false;
+            return true;
+        });
+        if (!supported)
+            return WebIDL::InvalidModificationError::create("Unsupported codec in setCodecPreferences"_utf16);
+    }
+
+    m_preferred_codecs = codecs;
+    return {};
+}
+
 // https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop
 WebIDL::ExceptionOr<void> RTCRtpTransceiver::stop_method()
 {

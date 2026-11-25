@@ -111,6 +111,8 @@ EffectiveState PermissionManager::global_default(PermissionName name) const
         return m_microphone_default;
     case PermissionName::Notifications:
         return m_notifications_default;
+    case PermissionName::Camera:
+        return m_camera_default;
     }
     VERIFY_NOT_REACHED();
 }
@@ -236,7 +238,7 @@ void PermissionManager::set_decision(PermissionName name, URL::Origin const& ori
 
 void PermissionManager::reset_origin(URL::Origin const& origin)
 {
-    for (auto name : { PermissionName::Geolocation, PermissionName::Microphone, PermissionName::Notifications })
+    for (auto name : Web::Permissions::PERMISSION_NAMES)
         bump_generation(name, origin);
 
     auto removed = m_entries.remove_all_matching([&](auto const& entry) { return entry.origin.is_same_origin(origin); });
@@ -358,6 +360,8 @@ void PermissionManager::set_global_default(PermissionName name, EffectiveState s
             return m_microphone_default;
         case PermissionName::Notifications:
             return m_notifications_default;
+        case PermissionName::Camera:
+            return m_camera_default;
         }
         VERIFY_NOT_REACHED();
     }();
@@ -383,6 +387,7 @@ Web::Permissions::PermissionSnapshot PermissionManager::snapshot() const
     snapshot.geolocation_default = global_default(PermissionName::Geolocation);
     snapshot.microphone_default = global_default(PermissionName::Microphone);
     snapshot.notifications_default = global_default(PermissionName::Notifications);
+    snapshot.camera_default = global_default(PermissionName::Camera);
 
     auto add_entry = [&](PermissionName name, URL::Origin const& origin) {
         auto state = effective_state(name, origin);

@@ -25,6 +25,8 @@ Optional<Web::Permissions::PermissionName> permission_name_from(Utf16View name)
         return Web::Permissions::PermissionName::Microphone;
     if (name == "notifications"_utf16)
         return Web::Permissions::PermissionName::Notifications;
+    if (name == "camera"_utf16)
+        return Web::Permissions::PermissionName::Camera;
     return {};
 }
 
@@ -38,6 +40,8 @@ static Optional<PermissionsPolicy::PolicyControlledFeature> policy_controlled_fe
     case Web::Permissions::PermissionName::Notifications:
         // Notifications is a powerful feature, but not a policy-controlled one.
         return {};
+    case Web::Permissions::PermissionName::Camera:
+        return PermissionsPolicy::PolicyControlledFeature::Camera;
     }
     VERIFY_NOT_REACHED();
 }
@@ -165,6 +169,7 @@ void web_permissions_api_request_permission_to_use(HTML::EnvironmentSettingsObje
 static_assert(to_underlying(Web::Permissions::PermissionName::Geolocation) == 0);
 static_assert(to_underlying(Web::Permissions::PermissionName::Microphone) == 1);
 static_assert(to_underlying(Web::Permissions::PermissionName::Notifications) == 2);
+static_assert(to_underlying(Web::Permissions::PermissionName::Camera) == 3);
 static_assert(to_underlying(PermissionState::Granted) == 0);
 static_assert(to_underlying(PermissionState::Denied) == 1);
 static_assert(to_underlying(PermissionState::Prompt) == 2);

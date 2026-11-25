@@ -1,0 +1,16 @@
+audio opus capability: true
+audio header extensions: true
+video VP8+H264 capability: true
+invalid receiver kind null: true
+invalid sender kind null: true
+sender matches receiver audio count: true
+sender matches receiver video count: true
+mid before SDP: true, true
+invalid setCodecPreferences: InvalidModificationError
+receiver getParameters shape: true
+mid after setLocalDescription: true, true
+remote mid after setRemoteDescription: true, true
+encodingInfo audio opus: true, true, true
+encodingInfo video vp8: false
+decodingInfo webrtc audio opus: true
+decodingInfo webrtc video vp8: true

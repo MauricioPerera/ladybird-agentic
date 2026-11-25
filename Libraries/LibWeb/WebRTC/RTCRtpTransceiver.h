@@ -6,10 +6,14 @@
 
 #pragma once
 
+#include <AK/Optional.h>
+#include <AK/Utf16String.h>
+#include <AK/Vector.h>
 #include <LibWeb/Bindings/MediaStreamTrack.h>
 #include <LibWeb/Bindings/RTCRtpTransceiver.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
+#include <LibWeb/WebRTC/RTCRtpParameters.h>
 
 namespace Web::WebRTC {
 
@@ -27,12 +31,17 @@ public:
 
     GC::Ref<RTCRtpSender> sender() const { return m_sender; }
     GC::Ref<RTCRtpReceiver> receiver() const { return m_receiver; }
+    Optional<Utf16String> const& mid() const { return m_mid; }
+    void set_mid(Optional<Utf16String> mid) { m_mid = move(mid); }
     Bindings::RTCRtpTransceiverDirection direction() const { return m_direction; }
     void set_direction(Bindings::RTCRtpTransceiverDirection);
     Bindings::MediaStreamTrackKind kind() const { return m_kind; }
     Optional<Bindings::RTCRtpTransceiverDirection> current_direction() const { return m_current_direction; }
     bool is_stopped() const { return m_stopped; }
     bool is_stopping() const { return m_stopping; }
+
+    Vector<RTCRtpCodec> const& preferred_codecs() const { return m_preferred_codecs; }
+    WebIDL::ExceptionOr<void> set_codec_preferences(Vector<RTCRtpCodec> const& codecs);
 
     u64 transceiver_id() const { return m_transceiver_id; }
     void set_transceiver_id(u64 id) { m_transceiver_id = id; }
@@ -71,6 +80,10 @@ private:
 
     Bindings::MediaStreamTrackKind m_kind;
     u64 m_transceiver_id { 0 };
+    // [[Mid]]
+    Optional<Utf16String> m_mid;
+    // [[PreferredCodecs]]
+    Vector<RTCRtpCodec> m_preferred_codecs;
     // [[FiredDirection]]
     Optional<Bindings::RTCRtpTransceiverDirection> m_fired_direction;
 };

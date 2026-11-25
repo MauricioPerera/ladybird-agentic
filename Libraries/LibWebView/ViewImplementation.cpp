@@ -5278,7 +5278,7 @@ Vector<SitePermissionRow> ViewImplementation::site_permission_rows() const
     auto const& manager = *session().permission_manager;
 
     Vector<SitePermissionRow> rows;
-    for (auto name : { Web::Permissions::PermissionName::Geolocation, Web::Permissions::PermissionName::Microphone, Web::Permissions::PermissionName::Notifications }) {
+    for (auto name : Web::Permissions::PERMISSION_NAMES) {
         auto decision = manager.decision(name, origin);
         rows.append({
             .name = name,

@@ -167,6 +167,7 @@ private:
     Web::Permissions::EffectiveState m_geolocation_default { Web::Permissions::EffectiveState::Prompt };
     Web::Permissions::EffectiveState m_microphone_default { Web::Permissions::EffectiveState::Prompt };
     Web::Permissions::EffectiveState m_notifications_default { Web::Permissions::EffectiveState::Prompt };
+    Web::Permissions::EffectiveState m_camera_default { Web::Permissions::EffectiveState::Prompt };
     bool m_os_denies_geolocation { false };
 
     u64 m_revision { 0 };

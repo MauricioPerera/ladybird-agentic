@@ -74,6 +74,7 @@ private:
     Web::Permissions::EffectiveState m_geolocation_default { Web::Permissions::EffectiveState::Prompt };
     Web::Permissions::EffectiveState m_microphone_default { Web::Permissions::EffectiveState::Prompt };
     Web::Permissions::EffectiveState m_notifications_default { Web::Permissions::EffectiveState::Prompt };
+    Web::Permissions::EffectiveState m_camera_default { Web::Permissions::EffectiveState::Prompt };
 };
 
 bool permission_key_is_equal_to(Web::Permissions::PermissionName, URL::Origin const& key1, URL::Origin const& key2);

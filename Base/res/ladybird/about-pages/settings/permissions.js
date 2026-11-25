@@ -24,6 +24,7 @@ const SITE_SETTINGS = {
     },
     geolocation: { title: "Location", policies: PERMISSION_POLICIES },
     microphone: { title: "Microphone", policies: PERMISSION_POLICIES },
+    camera: { title: "Camera", policies: PERMISSION_POLICIES },
     notifications: { title: "Notifications", policies: PERMISSION_POLICIES },
 };
 

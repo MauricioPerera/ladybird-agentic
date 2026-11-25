@@ -6,9 +6,12 @@
 
 #pragma once
 
+#include <AK/Optional.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/MediaStreamTrack.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/WebRTC/RTCRtpParameters.h>
 
 namespace Web::WebRTC {
 
@@ -21,6 +24,9 @@ class RTCRtpReceiver final : public Bindings::GCAllocatedWrappable {
 public:
     static GC::Ref<RTCRtpReceiver> create(Bindings::MediaStreamTrackKind);
     virtual ~RTCRtpReceiver() override;
+
+    static Optional<RTCRtpCapabilities> get_capabilities(Utf16View kind);
+    RTCRtpReceiveParameters get_parameters() const;
 
     GC::Ref<MediaCapture::MediaStreamTrack> track() const;
 

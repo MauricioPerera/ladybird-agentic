@@ -66,8 +66,13 @@ def run_test(webdriver_binary):
                 assert payload["value"] is None, raw
                 assert query("geolocation") == state, (state, query("geolocation"))
 
+            status, payload, raw = request("permissions", {"descriptor": {"name": "camera"}, "state": "granted"})
+            assert status == 200, raw
+            assert payload["value"] is None, raw
+            assert query("camera") == "granted", query("camera")
+
             for body in (
-                {"descriptor": {"name": "camera"}, "state": "granted"},
+                {"descriptor": {"name": "unknown-permission"}, "state": "granted"},
                 {"descriptor": {"name": "geolocation"}, "state": "maybe"},
                 {"descriptor": "geolocation", "state": "granted"},
                 {"state": "granted"},

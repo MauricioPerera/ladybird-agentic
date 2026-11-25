@@ -55,6 +55,9 @@ impl PermissionName {
         if *name == "notifications" {
             return Some(Self::Notifications);
         }
+        if *name == "camera" {
+            return Some(Self::Camera);
+        }
         None
     }
 }

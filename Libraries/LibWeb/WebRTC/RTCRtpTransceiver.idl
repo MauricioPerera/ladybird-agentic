@@ -3,13 +3,13 @@
 
 [Exposed=Window]
 interface RTCRtpTransceiver {
-    [FIXME] readonly attribute DOMString? mid;
+    readonly attribute DOMString? mid;
     [SameObject] readonly attribute RTCRtpSender sender;
     [SameObject] readonly attribute RTCRtpReceiver receiver;
     attribute RTCRtpTransceiverDirection direction;
     readonly attribute RTCRtpTransceiverDirection? currentDirection;
     [ImplementedAs=stop_method] undefined stop();
-    [FIXME] undefined setCodecPreferences(sequence<RTCRtpCodec> codecs);
+    undefined setCodecPreferences(sequence<RTCRtpCodec> codecs);
 };
 
 dictionary RTCRtpTransceiverInit {
