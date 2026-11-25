@@ -39,6 +39,7 @@
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/SuggestionProvider.h>
 #include <UI/Qt/SystemAppearance.h>
+#include <UI/Qt/TabRecorder.h>
 #include <UI/Qt/Theme.h>
 
 #include <QAction>
@@ -883,6 +884,22 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_screen_wake_lock_state_changed = [this](auto wake_lock_state) {
         set_screen_wake_lock_state(wake_lock_state);
     };
+
+    m_recorder = new TabRecorder(*m_view, this);
+    QObject::connect(m_recorder, &TabRecorder::recording_started, this, [this](QString const&) {
+        emit recording_state_changed();
+    });
+    QObject::connect(m_recorder, &TabRecorder::recording_stopped, this, [this](QString const&, QString const&) {
+        emit recording_state_changed();
+    });
+    QObject::connect(m_recorder, &TabRecorder::recording_failed, this, [this](QString const&) {
+        emit recording_state_changed();
+    });
+
+    view().on_webrtc_speaker_activity = [this](u64 speaker_key, bool is_local, bool is_speaking, float level) {
+        if (m_recorder)
+            m_recorder->notify_webrtc_speaker_activity(speaker_key, is_local, is_speaking, level);
+    };
 }
 
 void Tab::create_tab_context_menu()
@@ -998,6 +1015,7 @@ void Tab::create_tab_context_menu()
 // The window's toolbar can hold the address field while the tab goes away with the window.
 Tab::~Tab()
 {
+    stop_recording();
     if (m_deferred_tab.has_value() && m_deferred_tab->discarded_tab_state_id.has_value())
         WebContentView::forget_state_of_discarded_tab(*m_deferred_tab->discarded_tab_state_id);
     delete m_location_edit;
@@ -1781,6 +1799,7 @@ void Tab::cancel_window_close_preflight()
 
 Function<void()> Tab::prepare_for_window_close()
 {
+    stop_recording();
     if (!is_loaded())
         return [] { };
 
@@ -1788,6 +1807,44 @@ Function<void()> Tab::prepare_for_window_close()
     m_suppress_javascript_dialogs_until_navigation = true;
     m_javascript_dialog->dismiss();
     return view().prepare_for_close_without_prompting();
+}
+
+bool Tab::is_recording() const
+{
+    return m_recorder && m_recorder->is_recording();
+}
+
+AK::Duration Tab::recording_elapsed() const
+{
+    return m_recorder ? m_recorder->elapsed() : AK::Duration::zero();
+}
+
+void Tab::toggle_recording()
+{
+    if (!is_loaded() || !m_recorder)
+        return;
+    if (m_recorder->is_recording()) {
+        if (auto rc = m_recorder->stop(); rc.is_error())
+            dbgln("Tab: failed to stop recording: {}", rc.error());
+        return;
+    }
+
+    auto page_title = ak_string_from_qstring(title());
+    if (auto rc = m_recorder->start(page_title); rc.is_error()) {
+        dbgln("Tab: failed to start recording: {}", rc.error());
+        QMessageBox::warning(this, "Tab Recording Failed", qstring_from_ak_string(rc.error().string_literal()));
+    }
+}
+
+void Tab::stop_recording()
+{
+    if (m_recorder && m_recorder->is_recording())
+        (void)m_recorder->stop();
+}
+
+String Tab::recordings_directory() const
+{
+    return TabRecorder::recordings_directory();
 }
 
 }

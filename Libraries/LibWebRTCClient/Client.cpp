@@ -80,10 +80,10 @@ void Client::on_track_ended(u64 pc_id, u64 receiver_id)
         on_track_ended_event(pc_id, receiver_id);
 }
 
-void Client::on_encoded_audio_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload)
+void Client::on_encoded_audio_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, u32 contributing_source, ByteBuffer payload)
 {
     if (on_encoded_audio_frame_event)
-        on_encoded_audio_frame_event(pc_id, receiver_id, ssrc, rtp_timestamp, sequence_number, payload_type, move(payload));
+        on_encoded_audio_frame_event(pc_id, receiver_id, ssrc, rtp_timestamp, sequence_number, payload_type, contributing_source, move(payload));
 }
 
 void Client::on_encoded_video_frame(u64 pc_id, u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload)

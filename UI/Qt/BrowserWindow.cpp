@@ -554,6 +554,11 @@ void BrowserWindow::initialize_application_actions()
         if (m_tabs_container->count() > 1)
             m_tabs_container->set_current_index(m_tabs_container->count() - 1);
     });
+
+    new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), this, [this]() {
+        if (m_current_tab)
+            m_current_tab->toggle_recording();
+    });
 }
 
 void BrowserWindow::initialize_application_menu()

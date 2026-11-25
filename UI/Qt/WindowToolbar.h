@@ -32,6 +32,7 @@ class FeedbackPopover;
 class LocationEdit;
 class PerformanceMonitorWidget;
 class Popover;
+class RecordButton;
 class ReloadButton;
 class FieldPanel;
 class Tab;
@@ -116,6 +117,7 @@ private:
     BrowserWindow& browser_window() const;
     void show_tab(Tab&);
     void show_location_edit(LocationEdit*);
+    void update_record_button();
     QToolButton* create_navigation_history_toolbar_button(QWidget& parent, QAction&, int direction);
     void recreate_icons();
     void update_chrome_style();
@@ -178,6 +180,9 @@ private:
     QAction* m_stop_action { nullptr };
     QAction* m_open_downloads_page_action { nullptr };
     ReloadButton* m_reload_button { nullptr };
+
+    RecordButton* m_record_button { nullptr };
+    QTimer* m_recording_timer { nullptr };
 
     DownloadsButton* m_downloads_button { nullptr };
     QPointer<DownloadsPopover> m_downloads_popover;

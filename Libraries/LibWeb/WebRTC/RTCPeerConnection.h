@@ -132,7 +132,7 @@ public:
     void on_negotiation_needed_received();
     void on_remote_track_added(u64 receiver_id, u64 transceiver_id, String kind, Vector<String> stream_ids);
     void on_remote_track_ended(u64 receiver_id);
-    void on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload);
+    void on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, u32 contributing_source, ByteBuffer payload);
     void on_encoded_video_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, String mime_type, bool is_keyframe, ByteBuffer payload);
     void on_audio_track_ssrc_assigned(u64 sender_id, u32 ssrc);
     void on_video_track_ssrc_assigned(u64 sender_id, u32 ssrc, String mime_type);
@@ -239,7 +239,18 @@ private:
     // WebAudio, or another peer connection.
     HashMap<u64, NonnullOwnPtr<Media::AudioDecoder>> m_receiver_audio_decoders;
     Vector<float> m_decoded_audio_scratch;
-    void feed_decoded_audio(u64 receiver_id, ByteBuffer payload, u32 rtp_timestamp);
+    void feed_decoded_audio(u64 receiver_id, u32 ssrc, u32 contributing_source, ByteBuffer payload, u32 rtp_timestamp);
+
+    struct SpeakerVadState {
+        bool is_local { false };
+        bool speaking { false };
+        Optional<MonotonicTime> last_speech_time;
+        Optional<MonotonicTime> last_emit_time;
+    };
+    HashMap<u64, u32> m_receiver_last_csrc;
+    HashMap<u64, SpeakerVadState> m_speaker_vad_states;
+    void update_speaker_vad(u64 speaker_key, bool is_local, float rms_level);
+    void clear_all_speaker_vad();
 
     struct ReceiverVideoDecoder {
         AK_MAKE_NONCOPYABLE(ReceiverVideoDecoder);

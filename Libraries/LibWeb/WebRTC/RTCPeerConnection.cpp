@@ -7,6 +7,7 @@
 #include <AK/Debug.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Math.h>
 #include <AK/Time.h>
 #include <LibCore/EventLoop.h>
 #include <LibGC/Heap.h>
@@ -27,9 +28,11 @@
 #    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.h>
 #    include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.h>
 #endif
+#include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/Bindings/RTCPeerConnection.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -245,6 +248,7 @@ void RTCPeerConnection::close_the_connection_algorithm(bool disappear)
     m_held_ice_events.clear();
     m_receiver_audio_decoders.clear();
     m_receiver_video_decoders.clear();
+    clear_all_speaker_vad();
     agent.unregister_peer_connection(m_pc_id);
     // 6. If connection.[[SctpTransport]] is not null...
     if (m_sctp) {
@@ -1698,11 +1702,17 @@ void RTCPeerConnection::encode_and_route_outgoing_pcm(u64 sender_id, ByteBuffer 
     auto sample_spec = Audio::SampleSpecification(SAMPLE_RATE, Audio::ChannelMap::stereo());
     block.initialize(sample_spec, timestamp, SAMPLES_PER_FRAME);
     auto const* samples = reinterpret_cast<i16 const*>(pcm_s16le.data());
+    double sum_sq = 0.0;
     for (size_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
         auto channel_data = block.channel_data(channel);
-        for (size_t frame = 0; frame < SAMPLES_PER_FRAME; ++frame)
-            channel_data[frame] = static_cast<float>(samples[(frame * CHANNEL_COUNT) + channel]) * (1.0f / 32768.0f);
+        for (size_t frame = 0; frame < SAMPLES_PER_FRAME; ++frame) {
+            float sample = static_cast<float>(samples[(frame * CHANNEL_COUNT) + channel]) * (1.0f / 32768.0f);
+            channel_data[frame] = sample;
+            sum_sq += static_cast<double>(sample) * static_cast<double>(sample);
+        }
     }
+    float rms = AK::sqrt(static_cast<float>(sum_sq / static_cast<double>(INTERLEAVED_SAMPLES)));
+    update_speaker_vad(0, true, rms);
 
     if (auto rc = pipeline.encoder->receive_pcm_data(timestamp, block); rc.is_error()) {
         dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: opus receive_pcm_data failed: {}", rc.error().description());
@@ -1974,25 +1984,29 @@ void RTCPeerConnection::on_encoded_video_frame_received(u64 receiver_id, u32 ssr
     drain_decoded_video_frames(receiver_id);
 }
 
-void RTCPeerConnection::on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, ByteBuffer payload)
+void RTCPeerConnection::on_encoded_audio_frame_received(u64 receiver_id, u32 ssrc, u32 rtp_timestamp, u16 sequence_number, u8 payload_type, u32 contributing_source, ByteBuffer payload)
 {
     auto receiver_iter = m_remote_receivers_by_id.get(receiver_id);
     if (!receiver_iter.has_value())
         return;
     auto receiver = *receiver_iter;
 
+    m_receiver_last_csrc.set(receiver_id, contributing_source);
+
     auto transform = receiver->transform();
     auto* script_transform_ref = transform.get_pointer<GC::Ref<RTCRtpScriptTransform>>();
     if (!script_transform_ref) {
         if (transform.has<Empty>())
-            feed_decoded_audio(receiver_id, move(payload), rtp_timestamp);
+            feed_decoded_audio(receiver_id, ssrc, contributing_source, move(payload), rtp_timestamp);
         return;
     }
     auto& script_transform = **script_transform_ref;
     if (!script_transform.has_frame_written_callback()) {
-        script_transform.set_on_frame_written([self = GC::Weak { *this }, receiver_id](ByteBuffer transformed_payload, u32, u8, u32 rtp_timestamp, u16) {
-            if (self)
-                self->feed_decoded_audio(receiver_id, move(transformed_payload), rtp_timestamp);
+        script_transform.set_on_frame_written([self = GC::Weak { *this }, receiver_id, ssrc](ByteBuffer transformed_payload, u32, u8, u32 rtp_timestamp, u16) {
+            if (self) {
+                auto csrc = self->m_receiver_last_csrc.get(receiver_id).value_or(ssrc);
+                self->feed_decoded_audio(receiver_id, ssrc, csrc, move(transformed_payload), rtp_timestamp);
+            }
         });
     }
 
@@ -2000,7 +2014,7 @@ void RTCPeerConnection::on_encoded_audio_frame_received(u64 receiver_id, u32 ssr
 }
 
 // Decode one decrypted Opus packet and deliver the PCM through the receiver's track.
-void RTCPeerConnection::feed_decoded_audio(u64 receiver_id, ByteBuffer payload, u32 rtp_timestamp)
+void RTCPeerConnection::feed_decoded_audio(u64 receiver_id, u32 ssrc, u32 contributing_source, ByteBuffer payload, u32 rtp_timestamp)
 {
     if (m_is_closed)
         return;
@@ -2032,8 +2046,52 @@ void RTCPeerConnection::feed_decoded_audio(u64 receiver_id, ByteBuffer payload, 
 
     m_decoded_audio_scratch.resize(block.sample_count());
     block.copy_to_interleaved(m_decoded_audio_scratch.span());
+    if (!m_decoded_audio_scratch.is_empty()) {
+        double sum_sq = 0.0;
+        for (float sample : m_decoded_audio_scratch)
+            sum_sq += static_cast<double>(sample) * static_cast<double>(sample);
+        float rms = AK::sqrt(static_cast<float>(sum_sq / static_cast<double>(m_decoded_audio_scratch.size())));
+        u64 effective_source = contributing_source != 0 ? contributing_source : ssrc;
+        u64 speaker_key = (receiver_id << 32) | effective_source;
+        update_speaker_vad(speaker_key, false, rms);
+    }
     dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: decoded audio receiver={} frames={} spec={}", receiver_id, block.frame_count(), block.sample_specification());
     (*receiver)->track()->deliver_audio_frames(m_decoded_audio_scratch.data(), block.frame_count(), block.channel_count(), block.sample_specification().sample_rate());
+}
+
+void RTCPeerConnection::update_speaker_vad(u64 speaker_key, bool is_local, float rms_level)
+{
+    constexpr float VAD_RMS_THRESHOLD = 0.015f;
+    constexpr auto VAD_HOLDOVER = AK::Duration::from_milliseconds(450);
+
+    auto now = MonotonicTime::now_coarse();
+    auto& state = m_speaker_vad_states.ensure(speaker_key);
+    state.is_local = is_local;
+    if (rms_level >= VAD_RMS_THRESHOLD)
+        state.last_speech_time = now;
+
+    bool should_speak = rms_level >= VAD_RMS_THRESHOLD
+        || (state.last_speech_time.has_value() && (now - *state.last_speech_time) <= VAD_HOLDOVER);
+    bool state_changed = (should_speak != state.speaking);
+    bool heartbeat_due = should_speak
+        && (!state.last_emit_time.has_value() || (now - *state.last_emit_time) >= AK::Duration::from_milliseconds(250));
+    if (!state_changed && !heartbeat_due)
+        return;
+
+    state.speaking = should_speak;
+    state.last_emit_time = now;
+    Bindings::principal_host_defined_page(relevant_realm()).client().page_did_report_webrtc_speaker_activity(speaker_key, is_local, should_speak, rms_level);
+}
+
+void RTCPeerConnection::clear_all_speaker_vad()
+{
+    auto& page_client = Bindings::principal_host_defined_page(relevant_realm()).client();
+    for (auto const& entry : m_speaker_vad_states) {
+        if (entry.value.speaking)
+            page_client.page_did_report_webrtc_speaker_activity(entry.key, entry.value.is_local, false, 0.0f);
+    }
+    m_speaker_vad_states.clear();
+    m_receiver_last_csrc.clear();
 }
 
 static Bindings::RTCSdpType parse_sdp_type(StringView s)

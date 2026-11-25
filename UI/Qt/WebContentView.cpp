@@ -2054,6 +2054,17 @@ void WebContentView::set_bookmarks_bar_overlay_height([[maybe_unused]] int heigh
 #endif
 }
 
+void WebContentView::set_recording_active(bool active)
+{
+    if (m_is_recording == active)
+        return;
+    m_is_recording = active;
+    set_presents_from_cpu_memory(active);
+#ifdef LADYBIRD_QT_USE_D3D_RHI_WIDGET
+    update_whether_view_hosts_remote_layer();
+#endif
+}
+
 void WebContentView::update_viewport_size()
 {
     auto scaled_width = int(width() * device_pixel_ratio());

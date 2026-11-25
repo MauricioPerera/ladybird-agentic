@@ -422,6 +422,7 @@ public:
     decltype(Hub::View::on_find_in_page) on_find_in_page;
     decltype(Hub::View::on_page_background_color_change) on_page_background_color_change;
     decltype(Hub::View::on_screen_wake_lock_state_changed) on_screen_wake_lock_state_changed;
+    decltype(Hub::View::on_webrtc_speaker_activity) on_webrtc_speaker_activity;
     decltype(Hub::View::on_web_content_crashed) on_web_content_crashed;
     decltype(Hub::View::on_crash_overlay_state_change) on_crash_overlay_state_change;
     decltype(Hub::View::on_crash_report_saved) on_crash_report_saved;

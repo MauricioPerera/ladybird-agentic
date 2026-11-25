@@ -2296,6 +2296,12 @@ void WebContentPage::did_change_screen_wake_lock_state(Web::ScreenWakeLockState 
         view().did_change_screen_wake_lock_state({}, wake_lock_state);
 }
 
+void WebContentPage::did_report_webrtc_speaker_activity(u64 speaker_key, bool is_local, bool is_speaking, float level)
+{
+    if (displays_tab())
+        view().did_report_webrtc_speaker_activity({}, speaker_key, is_local, is_speaking, level);
+}
+
 void WebContentPage::did_start_using_gamepads()
 {
     GamepadManager::the().page_did_start_using_gamepads(*this);

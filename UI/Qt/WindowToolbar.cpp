@@ -33,12 +33,15 @@
 #include <UI/Qt/RemoteDownloads.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/SystemAppearance.h>
+#include <UI/Qt/Tab.h>
+#include <UI/Qt/TabRecorder.h>
 #include <UI/Qt/Theme.h>
 #include <UI/Qt/WebContentView.h>
 #include <UI/Qt/WindowControlButton.h>
 #include <UI/Qt/WindowToolbar.h>
 
 #include <QApplication>
+#include <QDesktopServices>
 #include <QDynamicPropertyChangeEvent>
 #include <QFont>
 #include <QFontMetrics>
@@ -56,6 +59,7 @@
 #include <QStylePainter>
 #include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <QWindow>
@@ -685,6 +689,82 @@ private:
     qreal m_dot_scale { 1 };
 };
 
+class RecordButton final : public ToolbarButton {
+public:
+    AK_ALLOC_WITH_KMALLOC;
+
+    explicit RecordButton(QWidget* parent)
+        : ToolbarButton(parent)
+    {
+        setObjectName("LadybirdRecordButton");
+        setToolTip("Record Tab Audio & Video (Ctrl+Shift+R)");
+        setAccessibleName("Record Tab");
+        setCheckable(true);
+        setAutoRaise(true);
+        setFocusPolicy(Qt::NoFocus);
+        setFixedSize(TOOLBAR_BUTTON_SIZE);
+        setAttribute(Qt::WA_LayoutUsesWidgetRect);
+        setContextMenuPolicy(Qt::CustomContextMenu);
+    }
+
+    void set_recording_state(bool recording, i64 elapsed_seconds)
+    {
+        bool changed = (m_recording != recording || m_elapsed_seconds != elapsed_seconds);
+        m_recording = recording;
+        m_elapsed_seconds = elapsed_seconds;
+        setChecked(recording);
+        if (recording) {
+            setFixedSize({ 74, TOOLBAR_BUTTON_SIZE.height() });
+            i64 minutes = elapsed_seconds / 60;
+            i64 seconds = elapsed_seconds % 60;
+            auto label = QString::asprintf("REC %02lld:%02lld", static_cast<long long>(minutes), static_cast<long long>(seconds));
+            setToolTip(QString("Stop Recording (%1) (Ctrl+Shift+R)").arg(label));
+        } else {
+            setFixedSize(TOOLBAR_BUTTON_SIZE);
+            setToolTip("Record Tab Audio & Video (Ctrl+Shift+R)");
+        }
+        if (changed)
+            update();
+    }
+
+protected:
+    virtual void paintEvent(QPaintEvent* event) override
+    {
+        ToolbarButton::paintEvent(event);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        if (m_recording) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(229, 72, 77));
+            painter.drawRoundedRect(QRectF(9.0, (height() - 10.0) / 2.0, 10.0, 10.0), 2.5, 2.5);
+
+            i64 minutes = m_elapsed_seconds / 60;
+            i64 seconds = m_elapsed_seconds % 60;
+            auto text = QString::asprintf("%02lld:%02lld", static_cast<long long>(minutes), static_cast<long long>(seconds));
+            painter.setPen(QColor(229, 72, 77));
+            auto font = painter.font();
+            font.setPointSizeF(9.0);
+            font.setWeight(QFont::DemiBold);
+            painter.setFont(font);
+            painter.drawText(QRectF(23.0, 0.0, width() - 29.0, height()), Qt::AlignVCenter | Qt::AlignLeft, text);
+        } else {
+            auto center = QRectF(rect()).center();
+            auto palette = Theme::chrome_palette(*this);
+            painter.setPen(QPen(Theme::chrome(palette).icon, 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(center, 7.0, 7.0);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(229, 72, 77));
+            painter.drawEllipse(center, 4.0, 4.0);
+        }
+    }
+
+private:
+    bool m_recording { false };
+    i64 m_elapsed_seconds { 0 };
+};
+
 template<typename ButtonType = ToolbarButton>
 static ButtonType* create_toolbar_button(QWidget& parent, QAction& action)
 {
@@ -1223,6 +1303,35 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     toolbar_container_layout->setSpacing(0);
     toolbar_container_layout->setContentsMargins(0, 0, 0, TOOLBAR_BOTTOM_LINE_HEIGHT);
 
+    m_record_button = new RecordButton(m_toolbar);
+    QObject::connect(m_record_button, &QToolButton::clicked, this, [this] {
+        if (m_tab)
+            m_tab->toggle_recording();
+        update_record_button();
+    });
+    QObject::connect(m_record_button, &QWidget::customContextMenuRequested, this, [this](QPoint const& pos) {
+        QMenu menu(m_record_button);
+        if (m_tab && m_tab->is_loaded()) {
+            auto* toggle_action = menu.addAction(m_tab->is_recording() ? "Stop Recording" : "Start Recording (Tab Audio & Video)");
+            QObject::connect(toggle_action, &QAction::triggered, this, [this] {
+                if (m_tab)
+                    m_tab->toggle_recording();
+            });
+            menu.addSeparator();
+        }
+        auto* open_folder_action = menu.addAction("Open Recordings Folder");
+        QObject::connect(open_folder_action, &QAction::triggered, this, [] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(qstring_from_ak_string(TabRecorder::recordings_directory())));
+        });
+        menu.exec(m_record_button->mapToGlobal(pos));
+    });
+
+    m_recording_timer = new QTimer(this);
+    m_recording_timer->setInterval(1000);
+    QObject::connect(m_recording_timer, &QTimer::timeout, this, [this] {
+        update_record_button();
+    });
+
     m_downloads_button = new DownloadsButton(m_toolbar);
     QObject::connect(m_downloads_button, &QToolButton::clicked, this, [this] {
         // NB: The button only stays checked while the list is open, which showing it sees to.
@@ -1436,6 +1545,7 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->addWidget(m_navigation_buttons, 0, Qt::AlignVCenter);
     m_navigation_buttons->show();
     toolbar_layout->addWidget(&field_slot(), 1);
+    toolbar_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -1474,6 +1584,7 @@ void WindowToolbar::lay_out_in_sidebar()
     m_window_controls_separator->hide();
 
     auto* footer_layout = static_cast<QBoxLayout*>(m_sidebar_footer->layout());
+    footer_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
     footer_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         footer_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -1761,6 +1872,7 @@ void WindowToolbar::bind(Tab* tab)
     if (!tab || !tab->is_loaded()) {
         show_location_edit(nullptr);
         m_reload_button->show_loading_at_once(false);
+        update_record_button();
         if (tab)
             QObject::connect(tab, &Tab::loaded, this, [this, tab] { show_tab(*tab); }, Qt::SingleShotConnection);
         return;
@@ -1787,6 +1899,25 @@ void WindowToolbar::show_tab(Tab& tab)
     QObject::connect(&tab, &Tab::performance_stats_changed, this, [this] {
         m_performance_monitor->set_stats(m_tab->performance_stats());
     });
+    QObject::connect(&tab, &Tab::recording_state_changed, this, [this] {
+        update_record_button();
+    });
+    update_record_button();
+}
+
+void WindowToolbar::update_record_button()
+{
+    if (!m_record_button)
+        return;
+
+    bool recording = m_tab && m_tab->is_recording();
+    i64 elapsed_sec = recording ? max<i64>(0, m_tab->recording_elapsed().to_seconds()) : 0;
+    m_record_button->set_recording_state(recording, elapsed_sec);
+
+    if (recording && !m_recording_timer->isActive())
+        m_recording_timer->start();
+    else if (!recording && m_recording_timer->isActive())
+        m_recording_timer->stop();
 }
 
 void WindowToolbar::show_location_edit(LocationEdit* location_edit)

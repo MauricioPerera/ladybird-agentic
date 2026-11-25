@@ -98,7 +98,7 @@ bool WebContentView::has_visible_child_over_page() const
 void WebContentView::update_whether_view_hosts_remote_layer()
 {
     auto should_host = internalWinId() != 0 && !is_page_covered_by_overlay() && !has_visible_child_over_page() && !has_floating_surface_over_page()
-        && !m_vertical_tabs_overlay_page && !m_bookmarks_bar_overlays_page;
+        && !m_vertical_tabs_overlay_page && !m_bookmarks_bar_overlays_page && !m_is_recording;
     if (m_hosts_remote_layer == should_host)
         return;
     m_hosts_remote_layer = should_host;

@@ -422,6 +422,7 @@ private:
     virtual NonnullRefPtr<Core::Promise<NonnullRefPtr<Audio::RecordStream>>> create_audio_record_stream(StringView device_id, Function<void(ReadonlyBytes, Audio::SampleSpecification const&)>) override;
     virtual void page_did_change_media_session_state(Optional<Web::MediaSession::MediaSessionState> const&) override;
     virtual void page_did_change_screen_wake_lock_state(Web::ScreenWakeLockState) override;
+    virtual void page_did_report_webrtc_speaker_activity(u64 speaker_key, bool is_local, bool is_speaking, float level) override;
     virtual void page_did_start_using_gamepads() override;
     virtual void page_did_play_gamepad_effect(Web::Gamepad::GamepadHandle, Web::Gamepad::GamepadEffect const&) override;
     virtual void page_did_request_stop_gamepad_effects(Web::Gamepad::GamepadHandle) override;

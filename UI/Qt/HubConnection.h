@@ -233,6 +233,7 @@ private:
     virtual void view_find_in_page(u64 view_id, size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void view_page_background_color_change(u64 view_id, Gfx::Color color) override;
     virtual void view_screen_wake_lock_state_changed(u64 view_id, Web::ScreenWakeLockState state) override;
+    virtual void view_webrtc_speaker_activity(u64 view_id, u64 speaker_key, bool is_local, bool is_speaking, float level) override;
     virtual void view_web_content_crashed(u64 view_id, WebView::ViewImplementation::WebContentCrashReason reason) override;
     virtual void view_crash_overlay_state_change(u64 view_id, bool active) override;
     virtual void view_crash_report_saved(u64 view_id) override;

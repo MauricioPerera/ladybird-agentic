@@ -11,6 +11,7 @@
 #include <AK/HashMap.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
+#include <AK/Time.h>
 #include <AK/Vector.h>
 #include <AK/kmalloc.h>
 #include <LibCompositing/Types.h>
@@ -75,6 +76,7 @@ struct DeferredTab {
 
 class Popover;
 class SiteSettingsPopover;
+class TabRecorder;
 class Tab final
     : public QWidget
     , public WebView::SettingsObserver {
@@ -121,6 +123,12 @@ public:
     void show_find_in_page();
     void find_previous();
     void find_next();
+
+    bool is_recording() const;
+    AK::Duration recording_elapsed() const;
+    void toggle_recording();
+    void stop_recording();
+    String recordings_directory() const;
 
     void request_close();
     void request_window_close_preflight(Function<void(bool)> on_complete);
@@ -185,6 +193,7 @@ signals:
     void audio_state_changed(int id);
     void mcp_access_changed(int id);
     void microphone_in_use_changed();
+    void recording_state_changed();
     void loading_changed();
     void performance_stats_changed();
     void loaded();
@@ -237,6 +246,7 @@ private:
     QPointer<Tab> m_tab_to_activate_on_close;
     QPointer<LocationEdit> m_location_edit;
     WebContentView* m_view { nullptr };
+    TabRecorder* m_recorder { nullptr };
     FindInPageWidget* m_find_in_page { nullptr };
     Optional<WakeLock::DisplaySleepInhibitor> m_screen_display_sleep_inhibitor;
     BrowserWindow* m_window { nullptr };

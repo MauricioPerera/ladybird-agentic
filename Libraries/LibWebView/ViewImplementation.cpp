@@ -3613,6 +3613,12 @@ void ViewImplementation::did_change_screen_wake_lock_state(Badge<WebContentPage>
         on_screen_wake_lock_state_changed(m_screen_wake_lock_state);
 }
 
+void ViewImplementation::did_report_webrtc_speaker_activity(Badge<WebContentPage>, u64 speaker_key, bool is_local, bool is_speaking, float level)
+{
+    if (on_webrtc_speaker_activity)
+        on_webrtc_speaker_activity(speaker_key, is_local, is_speaking, level);
+}
+
 bool ViewImplementation::had_user_edits() const
 {
     // Each page of the tab reports for the documents it hosts.

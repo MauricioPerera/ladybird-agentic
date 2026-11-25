@@ -2048,6 +2048,7 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
                         match track.read_rtp().await {
                             Ok((packet, _)) => {
                                 let ssrc = packet.header.ssrc;
+                                let contributing_source = packet.header.csrc.first().copied().unwrap_or(ssrc);
                                 let new_ssrc = ssrcs_seen.insert(ssrc);
                                 if new_ssrc || pkt_count < 5 || pkt_count.is_multiple_of(200) {
                                     log::info!(
@@ -2075,6 +2076,7 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
                                         pc_id,
                                         receiver_id,
                                         ssrc,
+                                        contributing_source,
                                         rtp_timestamp: packet.header.timestamp,
                                         sequence_number: packet.header.sequence_number,
                                         payload_type: packet.header.payload_type,

@@ -6,13 +6,21 @@
 
 #include <AK/Atomic.h>
 #include <AK/FixedArray.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
+#include <AK/ScopeGuard.h>
+#include <LibCore/File.h>
 #include <LibCore/System.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/YUVData.h>
 #include <LibMediaCodecs/CodedFrame.h>
 #include <LibMediaCodecs/FFmpeg/FFmpegVideoDecoder.h>
+#include <LibMediaCodecs/SpeakerTimeline.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationCamera.h>
+#include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationMp4Recorder.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.h>
 #include <LibMediaCodecs/WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.h>
 
@@ -358,4 +366,121 @@ TEST_CASE(video_capture_concurrent_streams_share_device)
     EXPECT(!stream2->is_running());
     EXPECT_EQ(ended1.load(AK::MemoryOrder::memory_order_relaxed), 0u);
     EXPECT_EQ(ended2.load(AK::MemoryOrder::memory_order_relaxed), 0u);
+}
+
+TEST_CASE(speaker_timeline_tracks_local_and_multiple_remote_speakers)
+{
+    Media::SpeakerTimeline timeline;
+
+    // Remote speaker 1 speaks [0.0s .. 1.2s]
+    timeline.record_webrtc_activity(101, false, true, 0.25f, AK::Duration::from_milliseconds(0));
+    timeline.record_webrtc_activity(101, false, false, 0.0f, AK::Duration::from_milliseconds(1200));
+
+    // Remote speaker 2 speaks [1.3s .. 2.5s]
+    timeline.record_webrtc_activity(202, false, true, 0.30f, AK::Duration::from_milliseconds(1300));
+    timeline.record_webrtc_activity(202, false, false, 0.0f, AK::Duration::from_milliseconds(2500));
+
+    // Local user speaks [2.7s .. 3.6s]
+    timeline.record_webrtc_activity(0, true, true, 0.40f, AK::Duration::from_milliseconds(2700));
+    timeline.record_webrtc_activity(0, true, false, 0.0f, AK::Duration::from_milliseconds(3600));
+
+    // Short 80 ms blip (<150 ms) should be discarded.
+    timeline.record_webrtc_activity(101, false, true, 0.12f, AK::Duration::from_milliseconds(4000));
+    timeline.record_webrtc_activity(101, false, false, 0.0f, AK::Duration::from_milliseconds(4080));
+
+    // Two turns for speaker 1 separated by 200 ms (<=500 ms) should coalesce.
+    timeline.record_webrtc_activity(101, false, true, 0.20f, AK::Duration::from_milliseconds(4500));
+    timeline.record_webrtc_activity(101, false, false, 0.0f, AK::Duration::from_milliseconds(5000));
+    timeline.record_webrtc_activity(101, false, true, 0.22f, AK::Duration::from_milliseconds(5200));
+    timeline.record_webrtc_activity(101, false, false, 0.0f, AK::Duration::from_milliseconds(5800));
+
+    timeline.finalize(AK::Duration::from_milliseconds(6000));
+
+    auto const& segments = timeline.segments();
+    EXPECT_EQ(segments.size(), 4u);
+    EXPECT_EQ(segments[0].speaker, "Asistente 1"_string);
+    EXPECT(!segments[0].is_local);
+    EXPECT_EQ(segments[1].speaker, "Asistente 2"_string);
+    EXPECT(!segments[1].is_local);
+    EXPECT_EQ(segments[2].speaker, "Yo"_string);
+    EXPECT(segments[2].is_local);
+    EXPECT_EQ(segments[3].speaker, "Asistente 1"_string);
+    EXPECT_EQ(segments[3].start.to_milliseconds(), 4500);
+    EXPECT_EQ(segments[3].end.to_milliseconds(), 5800);
+
+    auto const& speakers = timeline.speakers();
+    EXPECT_EQ(speakers.size(), 3u);
+
+    auto json_str = timeline.to_json("meeting.mp4"sv, AK::Duration::from_milliseconds(6000));
+    auto parsed = TRY_OR_FAIL(JsonValue::from_string(json_str));
+    auto const& obj = parsed.as_object();
+    EXPECT_EQ(obj.get_string("recording"sv).value(), "meeting.mp4"_string);
+    EXPECT_EQ(obj.get_array("speakers"sv).value().size(), 3u);
+    EXPECT_EQ(obj.get_array("segments"sv).value().size(), 4u);
+}
+
+TEST_CASE(mp4_recorder_writes_valid_h264_aac_mp4)
+{
+    StringView const test_path = "ladybird_test_mp4_recorder.mp4"sv;
+    if (FileSystem::exists(test_path))
+        MUST(FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed));
+    ScopeGuard cleanup = [&] {
+        if (FileSystem::exists(test_path))
+            (void)FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed);
+    };
+
+    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
+    config.width = 320;
+    config.height = 240;
+    config.fps = 20;
+    config.video_bitrate_bps = 1'000'000;
+    config.record_audio = true;
+    config.audio_sample_rate = 48000;
+    config.audio_channels = 2;
+    config.audio_bitrate_bps = 128'000;
+
+    {
+        auto recorder = TRY_OR_FAIL(Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(test_path, config));
+
+        Vector<u8> bgra_frame;
+        bgra_frame.resize(320u * 240u * 4u);
+        Vector<i16> pcm_chunk;
+        pcm_chunk.resize(960u * 2u);
+
+        for (u32 i = 0; i < 10; ++i) {
+            u8 shade = static_cast<u8>(40 + i * 18);
+            for (size_t px = 0; px < 320u * 240u; ++px) {
+                bgra_frame[px * 4 + 0] = shade;
+                bgra_frame[px * 4 + 1] = static_cast<u8>(255 - shade);
+                bgra_frame[px * 4 + 2] = 96;
+                bgra_frame[px * 4 + 3] = 255;
+            }
+            auto ts = AK::Duration::from_milliseconds(static_cast<i64>(i) * 50);
+            TRY_OR_FAIL(recorder->write_video_frame(bgra_frame.span(), 320, 240, 320 * 4, false, ts, AK::Duration::from_milliseconds(50)));
+        }
+
+        if (recorder->has_audio_stream()) {
+            for (u32 c = 0; c < 25; ++c) {
+                for (size_t f = 0; f < 960; ++f) {
+                    i16 sample = static_cast<i16>(((c * 960 + f) % 100 < 50) ? 4000 : -4000);
+                    pcm_chunk[f * 2 + 0] = sample;
+                    pcm_chunk[f * 2 + 1] = sample;
+                }
+                auto ts = AK::Duration::from_milliseconds(static_cast<i64>(c) * 20);
+                ReadonlyBytes pcm_bytes { reinterpret_cast<u8 const*>(pcm_chunk.data()), pcm_chunk.size() * sizeof(i16) };
+                TRY_OR_FAIL(recorder->write_audio_pcm_s16le(pcm_bytes, ts, AK::Duration::from_milliseconds(20)));
+            }
+        }
+
+        TRY_OR_FAIL(recorder->finalize());
+    }
+
+    EXPECT(FileSystem::exists(test_path));
+    auto file = TRY_OR_FAIL(Core::File::open(test_path, Core::File::OpenMode::Read));
+    auto bytes = TRY_OR_FAIL(file->read_until_eof());
+    EXPECT(bytes.size() > 1024u);
+
+    auto sv = StringView { bytes.bytes() };
+    EXPECT(sv.contains("ftyp"sv));
+    EXPECT(sv.contains("moov"sv));
 }

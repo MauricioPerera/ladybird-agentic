@@ -1170,6 +1170,12 @@ void HubConnection::view_screen_wake_lock_state_changed(u64 view_id, Web::Screen
         view->on_screen_wake_lock_state_changed(move(state));
 }
 
+void HubConnection::view_webrtc_speaker_activity(u64 view_id, u64 speaker_key, bool is_local, bool is_speaking, float level)
+{
+    if (auto* view = RemoteView::find(view_id); view && view->on_webrtc_speaker_activity)
+        view->on_webrtc_speaker_activity(speaker_key, is_local, is_speaking, level);
+}
+
 void HubConnection::view_web_content_crashed(u64 view_id, WebView::ViewImplementation::WebContentCrashReason reason)
 {
     if (auto* view = RemoteView::find(view_id); view && view->on_web_content_crashed)

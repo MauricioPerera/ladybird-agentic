@@ -1049,6 +1049,7 @@ public:
     // Every microphone track captures through its own, for this page.
     virtual NonnullRefPtr<Core::Promise<NonnullRefPtr<Audio::RecordStream>>> create_audio_record_stream(StringView device_id, Function<void(ReadonlyBytes, Audio::SampleSpecification const&)>);
     virtual void page_did_change_screen_wake_lock_state(ScreenWakeLockState) { }
+    virtual void page_did_report_webrtc_speaker_activity([[maybe_unused]] u64 speaker_key, [[maybe_unused]] bool is_local, [[maybe_unused]] bool is_speaking, [[maybe_unused]] float level) { }
 
     virtual void page_did_start_using_gamepads() { }
     virtual void page_did_play_gamepad_effect([[maybe_unused]] Gamepad::GamepadHandle handle, Gamepad::GamepadEffect const&) { }

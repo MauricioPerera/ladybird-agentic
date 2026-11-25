@@ -603,6 +603,7 @@ public:
     bool tab_indicator_visible(TabIndicator indicator) const { return m_tab_indicators.is_visible(indicator); }
     Vector<bool> const& playing_audio_indicator_transitions() const { return m_playing_audio_indicator_transitions; }
     void did_change_screen_wake_lock_state(Badge<WebContentPage>, Web::ScreenWakeLockState);
+    void did_report_webrtc_speaker_activity(Badge<WebContentPage>, u64 speaker_key, bool is_local, bool is_speaking, float level);
 
     void did_reset_state_for_testing(Badge<WebContentPage>, Web::HTML::SessionHistoryEntryDescriptor);
     bool capture_session_history_snapshot_for_testing(Badge<WebContentPage>);
@@ -772,6 +773,7 @@ public:
     Function<void(Gfx::Color)> on_theme_color_change;
     Function<void(Gfx::Color)> on_page_background_color_change;
     Function<void(Web::ScreenWakeLockState)> on_screen_wake_lock_state_changed;
+    Function<void(u64 speaker_key, bool is_local, bool is_speaking, float level)> on_webrtc_speaker_activity;
     enum class WebContentCrashReason {
         ProcessCrash,
         RejectedIPC,

@@ -15,6 +15,7 @@ set(SOURCES
     Color/ColorMetadata.cpp
     DecoderCapabilities.cpp
     DecoderError.cpp
+    SpeakerTimeline.cpp
     FFmpeg/FFmpegFunctions.cpp
     FFmpeg/FFmpegHelpers.cpp
     FFmpeg/FFmpegVideoDecoder.cpp
@@ -41,6 +42,7 @@ if (WIN32)
     list(APPEND SOURCES
         WindowsMediaFoundation/WindowsMediaFoundation.cpp
         WindowsMediaFoundation/WindowsMediaFoundationCamera.cpp
+        WindowsMediaFoundation/WindowsMediaFoundationMp4Recorder.cpp
         WindowsMediaFoundation/WindowsMediaFoundationVideoDecoder.cpp
         WindowsMediaFoundation/WindowsMediaFoundationVideoEncoder.cpp
     )

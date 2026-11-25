@@ -2323,6 +2323,11 @@ void PageClient::page_did_change_screen_wake_lock_state(Web::ScreenWakeLockState
     client().async_did_change_screen_wake_lock_state(m_id, wake_lock_state);
 }
 
+void PageClient::page_did_report_webrtc_speaker_activity(u64 speaker_key, bool is_local, bool is_speaking, float level)
+{
+    client().async_did_report_webrtc_speaker_activity(m_id, speaker_key, is_local, is_speaking, level);
+}
+
 void PageClient::page_did_start_using_gamepads()
 {
     if (m_did_start_using_gamepads)

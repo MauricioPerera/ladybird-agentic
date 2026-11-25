@@ -314,6 +314,7 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_change_media_session_state(Web::PageId page_id, Optional<Web::MediaSession::MediaSessionState> state) =|
 
     did_change_screen_wake_lock_state(Web::PageId page_id, Web::ScreenWakeLockState wake_lock_state) =|
+    did_report_webrtc_speaker_activity(Web::PageId page_id, u64 speaker_key, bool is_local, bool is_speaking, float level) =|
 
     did_start_using_gamepads(Web::PageId page_id) =|
     gamepad_play_effect(Web::Gamepad::GamepadHandle handle, Web::Gamepad::GamepadEffect effect) =|

@@ -71,6 +71,7 @@ add_library(ladybird_impl STATIC
     SystemAppearance.cpp
     Tab.cpp
     TabBar.cpp
+    TabRecorder.cpp
     Theme.cpp
     VersionPage.cpp
     WebCompatReportReview.cpp
@@ -89,7 +90,7 @@ if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
 endif()
 
 target_link_libraries(ladybird_impl PUBLIC Qt::Core Qt::Gui Qt::Widgets)
-target_link_libraries(ladybird_impl PRIVATE LibDatabase LibFileSystem LibUnicode)
+target_link_libraries(ladybird_impl PRIVATE LibDatabase LibFileSystem LibUnicode LibMediaCodecs)
 
 if (TARGET Qt6::Positioning)
     target_sources(ladybird_impl PRIVATE GeolocationProviderQt.cpp GeolocationProviderQt.h)
@@ -283,6 +284,10 @@ endif()
 if (HAS_DIRECTX)
     target_sources(ladybird_impl PRIVATE WebContentViewWindows.cpp)
     target_link_libraries(ladybird_impl PRIVATE Qt::GuiPrivate d3d11)
+endif()
+
+if (WIN32)
+    target_link_libraries(ladybird_impl PRIVATE ole32)
 endif()
 
 qt_add_executable(ladybird main.cpp ladybird.qrc)
