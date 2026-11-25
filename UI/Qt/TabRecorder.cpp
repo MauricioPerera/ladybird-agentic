@@ -16,9 +16,14 @@
 #include <LibMediaCodecs/SpeakerTimeline.h>
 #include <LibThreading/Thread.h>
 
+#include <QApplication>
+#include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPolygonF>
 #include <QStandardPaths>
 
 #include <cstring>
@@ -28,9 +33,13 @@
 #    ifndef WIN32_LEAN_AND_MEAN
 #        define WIN32_LEAN_AND_MEAN
 #    endif
+#    include <windows.h>
+#    include <initguid.h>
 #    include <audioclient.h>
 #    include <mmdeviceapi.h>
-#    include <windows.h>
+#    include <propsys.h>
+#    include <propkeydef.h>
+#    include <functiondiscoverykeys_devpkey.h>
 #    include <wrl/client.h>
 #endif
 
@@ -38,8 +47,7 @@ namespace Ladybird {
 
 namespace {
 
-constexpr u32 TARGET_FPS = 20;
-constexpr int FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
+constexpr u32 DEFAULT_TARGET_FPS = 30;
 constexpr u32 TARGET_AUDIO_SAMPLE_RATE = 48000;
 constexpr u16 TARGET_AUDIO_CHANNELS = 2;
 constexpr size_t AUDIO_CHUNK_FRAMES = 960; // 20 ms at 48 kHz
@@ -64,6 +72,58 @@ String sanitize_filename_part(StringView input)
 #ifdef Q_OS_WIN
 
 using Microsoft::WRL::ComPtr;
+
+Vector<wchar_t> utf8_to_wide(StringView value)
+{
+    if (value.is_empty())
+        return {};
+    int length = MultiByteToWideChar(CP_UTF8, 0, value.characters_without_null_termination(), static_cast<int>(value.length()), nullptr, 0);
+    if (length <= 0)
+        return {};
+    Vector<wchar_t> wide;
+    wide.resize(static_cast<size_t>(length) + 1);
+    int written = MultiByteToWideChar(CP_UTF8, 0, value.characters_without_null_termination(), static_cast<int>(value.length()), wide.data(), length);
+    if (written <= 0)
+        return {};
+    wide[static_cast<size_t>(written)] = L'\0';
+    return wide;
+}
+
+Optional<String> wide_to_utf8(WCHAR const* wide)
+{
+    if (!wide || *wide == L'\0')
+        return {};
+    int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 1)
+        return {};
+    auto buffer_or_err = ByteBuffer::create_uninitialized(static_cast<size_t>(needed - 1));
+    if (buffer_or_err.is_error())
+        return {};
+    auto buffer = buffer_or_err.release_value();
+    int written = WideCharToMultiByte(CP_UTF8, 0, wide, -1, reinterpret_cast<char*>(buffer.data()), needed, nullptr, nullptr);
+    if (written <= 1)
+        return {};
+    auto str_or_err = String::from_utf8(StringView { reinterpret_cast<char const*>(buffer.data()), static_cast<size_t>(written - 1) });
+    if (str_or_err.is_error())
+        return {};
+    return str_or_err.release_value();
+}
+
+Optional<String> read_endpoint_friendly_name(IMMDevice& device)
+{
+    ComPtr<IPropertyStore> properties;
+    if (FAILED(device.OpenPropertyStore(STGM_READ, &properties)) || !properties)
+        return {};
+
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    ScopeGuard clear_prop = [&] { PropVariantClear(&value); };
+    if (FAILED(properties->GetValue(PKEY_Device_FriendlyName, &value)))
+        return {};
+    if (value.vt != VT_LPWSTR || !value.pwszVal)
+        return {};
+    return wide_to_utf8(value.pwszVal);
+}
 
 struct ScopedComInitializer {
     explicit ScopedComInitializer(DWORD coinit = COINIT_MULTITHREADED)
@@ -200,7 +260,7 @@ bool detect_sample_format(WAVEFORMATEX const* fmt, SampleEncoding& encoding, u32
     return false;
 }
 
-bool open_wasapi_source(WasapiCaptureSource& out, bool loopback)
+bool open_wasapi_source(WasapiCaptureSource& out, bool loopback, StringView preferred_device_id = {})
 {
     ComPtr<IMMDeviceEnumerator> enumerator;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
@@ -208,9 +268,23 @@ bool open_wasapi_source(WasapiCaptureSource& out, bool loopback)
         return false;
 
     ComPtr<IMMDevice> device;
-    hr = enumerator->GetDefaultAudioEndpoint(loopback ? eRender : eCapture, eConsole, &device);
-    if (FAILED(hr) || !device)
-        return false;
+    if (!loopback && !preferred_device_id.is_empty()) {
+        auto wide_id = utf8_to_wide(preferred_device_id);
+        if (!wide_id.is_empty()) {
+            ComPtr<IMMDevice> selected_device;
+            if (SUCCEEDED(enumerator->GetDevice(wide_id.data(), &selected_device)) && selected_device) {
+                DWORD state = 0;
+                if (SUCCEEDED(selected_device->GetState(&state)) && state == DEVICE_STATE_ACTIVE)
+                    device = move(selected_device);
+            }
+        }
+    }
+
+    if (!device) {
+        hr = enumerator->GetDefaultAudioEndpoint(loopback ? eRender : eCapture, eConsole, &device);
+        if (FAILED(hr) || !device)
+            return false;
+    }
 
     ComPtr<IAudioClient> audio_client;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(audio_client.GetAddressOf()));
@@ -392,8 +466,72 @@ TabRecorder::TabRecorder(WebContentView& view, QObject* parent)
     , m_view(view)
 {
     m_frame_timer.setTimerType(Qt::PreciseTimer);
-    m_frame_timer.setInterval(FRAME_INTERVAL_MS);
+    m_frame_timer.setInterval(1000 / DEFAULT_TARGET_FPS);
     QObject::connect(&m_frame_timer, &QTimer::timeout, this, [this] { capture_video_tick(); });
+}
+
+TabRecorderSettings& TabRecorder::settings()
+{
+    static TabRecorderSettings s_settings;
+    return s_settings;
+}
+
+Vector<MicrophoneDeviceInfo> TabRecorder::enumerate_microphones()
+{
+    Vector<MicrophoneDeviceInfo> result;
+#ifdef Q_OS_WIN
+    ScopedComInitializer com(COINIT_MULTITHREADED);
+    if (!com.initialized())
+        return result;
+
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))) || !enumerator)
+        return result;
+
+    Optional<String> default_id;
+    {
+        ComPtr<IMMDevice> default_device;
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &default_device)) && default_device) {
+            LPWSTR default_id_wide = nullptr;
+            if (SUCCEEDED(default_device->GetId(&default_id_wide)) && default_id_wide) {
+                ScopeGuard free_default_id = [&] { CoTaskMemFree(default_id_wide); };
+                default_id = wide_to_utf8(default_id_wide);
+            }
+        }
+    }
+
+    ComPtr<IMMDeviceCollection> collection;
+    if (FAILED(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection)) || !collection)
+        return result;
+
+    UINT count = 0;
+    if (FAILED(collection->GetCount(&count)))
+        return result;
+
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IMMDevice> device;
+        if (FAILED(collection->Item(i, &device)) || !device)
+            continue;
+
+        LPWSTR id_wide = nullptr;
+        if (FAILED(device->GetId(&id_wide)) || !id_wide)
+            continue;
+        ScopeGuard free_id = [&] { CoTaskMemFree(id_wide); };
+
+        auto id_utf8 = wide_to_utf8(id_wide);
+        if (!id_utf8.has_value() || id_utf8->is_empty())
+            continue;
+
+        auto label = read_endpoint_friendly_name(*device.Get()).value_or("Microphone"_string);
+        bool is_default = default_id.has_value() && *default_id == *id_utf8;
+        result.append(MicrophoneDeviceInfo {
+            .device_id = *id_utf8,
+            .label = move(label),
+            .is_default = is_default,
+        });
+    }
+#endif
+    return result;
 }
 
 TabRecorder::~TabRecorder()
@@ -427,6 +565,10 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
 #ifndef Q_OS_WIN
     return Error::from_string_literal("Native tab recording is currently only supported on Windows");
 #else
+    m_active_settings = settings();
+    u32 target_fps = clamp<u32>(m_active_settings.fps, 10, 60);
+    m_frame_timer.setInterval(max(16, static_cast<int>(1000 / target_fps)));
+
     auto dir = recordings_directory();
     auto timestamp_qstr = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
     auto sanitized = sanitize_filename_part(page_title);
@@ -439,7 +581,10 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     auto qdir = QDir(qstring_from_ak_string(dir));
     m_recording_filename = MUST(String::formatted("{}.mp4", base_name));
     m_mp4_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath(qstring_from_ak_string(m_recording_filename))));
-    m_speakers_json_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath(qstring_from_ak_string(MUST(String::formatted("{}.speakers.json", base_name))))));
+    if (m_active_settings.export_speaker_timeline)
+        m_speakers_json_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath(qstring_from_ak_string(MUST(String::formatted("{}.speakers.json", base_name))))));
+    else
+        m_speakers_json_path = {};
 
     // Switch view to CPU backing stores so visible_snapshot reads frames cleanly without occlusion.
     m_view.set_recording_active(true);
@@ -464,9 +609,9 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     Media::WindowsMediaFoundation::Mp4RecorderConfig config;
     config.width = target_width;
     config.height = target_height;
-    config.fps = TARGET_FPS;
+    config.fps = target_fps;
     config.video_bitrate_bps = 4'000'000;
-    config.record_audio = true;
+    config.record_audio = m_active_settings.record_microphone || m_active_settings.record_system_audio;
     config.audio_sample_rate = TARGET_AUDIO_SAMPLE_RATE;
     config.audio_channels = TARGET_AUDIO_CHANNELS;
     config.audio_bitrate_bps = 192'000;
@@ -478,7 +623,10 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     }
 
     m_recorder = recorder_or_error.release_value();
-    m_timeline = make<Media::SpeakerTimeline>();
+    if (m_active_settings.export_speaker_timeline)
+        m_timeline = make<Media::SpeakerTimeline>();
+    else
+        m_timeline.clear();
     m_stop_requested = false;
     m_snapshot_in_flight = false;
     m_audio_worker_stop.store(false, AK::MemoryOrder::memory_order_release);
@@ -652,6 +800,35 @@ void TabRecorder::enqueue_video_frame(QImage snapshot)
     if (snapshot.format() != QImage::Format_RGB32 && snapshot.format() != QImage::Format_ARGB32 && snapshot.format() != QImage::Format_ARGB32_Premultiplied)
         snapshot = snapshot.convertToFormat(QImage::Format_RGB32);
 
+    if (m_active_settings.show_cursor && m_view.width() > 0 && m_view.height() > 0) {
+        QPoint local_pos = m_view.mapFromGlobal(QCursor::pos());
+        if (m_view.rect().contains(local_pos)) {
+            qreal cx = (static_cast<qreal>(local_pos.x()) * snapshot.width()) / static_cast<qreal>(m_view.width());
+            qreal cy = (static_cast<qreal>(local_pos.y()) * snapshot.height()) / static_cast<qreal>(m_view.height());
+
+            QPainter painter(&snapshot);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+
+            if (QApplication::mouseButtons() != Qt::NoButton) {
+                painter.setPen(QPen(QColor(229, 72, 77, 220), 2.0));
+                painter.setBrush(QColor(229, 72, 77, 110));
+                painter.drawEllipse(QPointF(cx, cy), 14.0, 14.0);
+            }
+
+            QPolygonF arrow;
+            arrow << QPointF(cx, cy)
+                  << QPointF(cx, cy + 19.0)
+                  << QPointF(cx + 4.5, cy + 14.5)
+                  << QPointF(cx + 8.0, cy + 22.0)
+                  << QPointF(cx + 10.5, cy + 20.5)
+                  << QPointF(cx + 7.0, cy + 13.5)
+                  << QPointF(cx + 13.5, cy + 13.5);
+            painter.setPen(QPen(QColor(24, 24, 28), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(Qt::white);
+            painter.drawPolygon(arrow);
+        }
+    }
+
     auto timestamp = max(AK::Duration::zero(), MonotonicTime::now_coarse() - m_start_time);
     {
         AK::MutexLocker locker(m_video_queue_mutex);
@@ -673,7 +850,8 @@ void TabRecorder::run_video_worker()
 #ifdef Q_OS_WIN
     ScopedComInitializer com(COINIT_MULTITHREADED);
     AK::Duration last_written_ts = AK::Duration::from_milliseconds(-1);
-    constexpr auto frame_duration = AK::Duration::from_milliseconds(FRAME_INTERVAL_MS);
+    u32 fps = clamp<u32>(m_active_settings.fps, 10, 60);
+    auto frame_duration = AK::Duration::from_milliseconds(max<i64>(16, 1000 / fps));
 
     for (;;) {
         Optional<QueuedVideoFrame> next_frame;
@@ -720,8 +898,10 @@ void TabRecorder::run_audio_worker()
 
     WasapiCaptureSource loopback;
     WasapiCaptureSource mic;
-    (void)open_wasapi_source(loopback, true);
-    (void)open_wasapi_source(mic, false);
+    if (m_active_settings.record_system_audio)
+        (void)open_wasapi_source(loopback, true);
+    if (m_active_settings.record_microphone)
+        (void)open_wasapi_source(mic, false, m_active_settings.microphone_device_id);
 
     Vector<float> loopback_chunk;
     Vector<float> mic_chunk;
@@ -750,31 +930,40 @@ void TabRecorder::run_audio_worker()
             continue;
         }
 
-        drain_wasapi_source(loopback);
-        drain_wasapi_source(mic);
-
-        float loopback_rms = pop_chunk_and_compute_rms(loopback, loopback_chunk.span());
-        float mic_rms = pop_chunk_and_compute_rms(mic, mic_chunk.span());
+        float loopback_rms = 0.0f;
+        float mic_rms = 0.0f;
+        if (loopback.initialized) {
+            drain_wasapi_source(loopback);
+            loopback_rms = pop_chunk_and_compute_rms(loopback, loopback_chunk.span());
+        }
+        if (mic.initialized) {
+            drain_wasapi_source(mic);
+            mic_rms = pop_chunk_and_compute_rms(mic, mic_chunk.span());
+        }
 
         auto chunk_ts = AK::Duration::from_milliseconds(static_cast<i64>(chunk_index * 20));
         auto vad_now = MonotonicTime::now_coarse();
 
-        if (loopback_rms >= FALLBACK_VAD_RMS_THRESHOLD)
-            loopback_last_speech = vad_now;
-        bool next_loopback_speaking = loopback_rms >= FALLBACK_VAD_RMS_THRESHOLD
-            || (loopback_last_speech.has_value() && (vad_now - *loopback_last_speech) <= FALLBACK_VAD_HOLDOVER);
-        if (next_loopback_speaking != loopback_speaking && m_timeline) {
-            loopback_speaking = next_loopback_speaking;
-            m_timeline->record_fallback_audio_activity(false, loopback_speaking, loopback_rms, chunk_ts);
+        if (loopback.initialized) {
+            if (loopback_rms >= FALLBACK_VAD_RMS_THRESHOLD)
+                loopback_last_speech = vad_now;
+            bool next_loopback_speaking = loopback_rms >= FALLBACK_VAD_RMS_THRESHOLD
+                || (loopback_last_speech.has_value() && (vad_now - *loopback_last_speech) <= FALLBACK_VAD_HOLDOVER);
+            if (next_loopback_speaking != loopback_speaking && m_timeline) {
+                loopback_speaking = next_loopback_speaking;
+                m_timeline->record_fallback_audio_activity(false, loopback_speaking, loopback_rms, chunk_ts);
+            }
         }
 
-        if (mic_rms >= FALLBACK_VAD_RMS_THRESHOLD)
-            mic_last_speech = vad_now;
-        bool next_mic_speaking = mic_rms >= FALLBACK_VAD_RMS_THRESHOLD
-            || (mic_last_speech.has_value() && (vad_now - *mic_last_speech) <= FALLBACK_VAD_HOLDOVER);
-        if (next_mic_speaking != mic_speaking && m_timeline) {
-            mic_speaking = next_mic_speaking;
-            m_timeline->record_fallback_audio_activity(true, mic_speaking, mic_rms, chunk_ts);
+        if (mic.initialized) {
+            if (mic_rms >= FALLBACK_VAD_RMS_THRESHOLD)
+                mic_last_speech = vad_now;
+            bool next_mic_speaking = mic_rms >= FALLBACK_VAD_RMS_THRESHOLD
+                || (mic_last_speech.has_value() && (vad_now - *mic_last_speech) <= FALLBACK_VAD_HOLDOVER);
+            if (next_mic_speaking != mic_speaking && m_timeline) {
+                mic_speaking = next_mic_speaking;
+                m_timeline->record_fallback_audio_activity(true, mic_speaking, mic_rms, chunk_ts);
+            }
         }
 
         for (size_t i = 0; i < mixed_pcm.size(); ++i) {

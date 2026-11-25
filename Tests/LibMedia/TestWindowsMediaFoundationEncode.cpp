@@ -484,3 +484,50 @@ TEST_CASE(mp4_recorder_writes_valid_h264_aac_mp4)
     EXPECT(sv.contains("ftyp"sv));
     EXPECT(sv.contains("moov"sv));
 }
+
+TEST_CASE(mp4_recorder_video_only_writes_valid_mp4)
+{
+    StringView const test_path = "ladybird_test_mp4_recorder_video_only.mp4"sv;
+    if (FileSystem::exists(test_path))
+        MUST(FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed));
+    ScopeGuard cleanup = [&] {
+        if (FileSystem::exists(test_path))
+            (void)FileSystem::remove(test_path, FileSystem::RecursionMode::Disallowed);
+    };
+
+    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
+    config.width = 320;
+    config.height = 240;
+    config.fps = 30;
+    config.video_bitrate_bps = 1'000'000;
+    config.record_audio = false;
+
+    {
+        auto recorder = TRY_OR_FAIL(Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(test_path, config));
+        EXPECT(!recorder->has_audio_stream());
+
+        Vector<u8> bgra_frame;
+        bgra_frame.resize(320u * 240u * 4u);
+        for (u32 i = 0; i < 8; ++i) {
+            for (size_t px = 0; px < 320u * 240u; ++px) {
+                bgra_frame[px * 4 + 0] = static_cast<u8>(i * 25);
+                bgra_frame[px * 4 + 1] = 128;
+                bgra_frame[px * 4 + 2] = 200;
+                bgra_frame[px * 4 + 3] = 255;
+            }
+            auto ts = AK::Duration::from_milliseconds(static_cast<i64>(i) * 33);
+            TRY_OR_FAIL(recorder->write_video_frame(bgra_frame.span(), 320, 240, 320 * 4, false, ts, AK::Duration::from_milliseconds(33)));
+        }
+
+        TRY_OR_FAIL(recorder->finalize());
+    }
+
+    EXPECT(FileSystem::exists(test_path));
+    auto file = TRY_OR_FAIL(Core::File::open(test_path, Core::File::OpenMode::Read));
+    auto bytes = TRY_OR_FAIL(file->read_until_eof());
+    EXPECT(bytes.size() > 1024u);
+
+    auto sv = StringView { bytes.bytes() };
+    EXPECT(sv.contains("ftyp"sv));
+    EXPECT(sv.contains("moov"sv));
+}

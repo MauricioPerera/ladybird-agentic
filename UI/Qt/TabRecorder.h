@@ -41,6 +41,21 @@ namespace Ladybird {
 
 class WebContentView;
 
+struct MicrophoneDeviceInfo {
+    String device_id;
+    String label;
+    bool is_default { false };
+};
+
+struct TabRecorderSettings {
+    bool record_microphone { true };
+    bool record_system_audio { true };
+    String microphone_device_id;
+    bool show_cursor { true };
+    bool export_speaker_timeline { true };
+    u32 fps { 30 };
+};
+
 class TabRecorder final : public QObject {
     Q_OBJECT
 
@@ -55,6 +70,9 @@ public:
 
     explicit TabRecorder(WebContentView& view, QObject* parent = nullptr);
     virtual ~TabRecorder() override;
+
+    static TabRecorderSettings& settings();
+    static Vector<MicrophoneDeviceInfo> enumerate_microphones();
 
     bool is_recording() const { return m_is_recording; }
     AK::Duration elapsed() const;
@@ -87,6 +105,7 @@ private:
 
     bool m_is_recording { false };
     bool m_snapshot_in_flight { false };
+    TabRecorderSettings m_active_settings;
     MonotonicTime m_start_time { MonotonicTime::now_coarse() };
     String m_mp4_path;
     String m_speakers_json_path;

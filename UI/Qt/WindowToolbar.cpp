@@ -40,6 +40,7 @@
 #include <UI/Qt/WindowControlButton.h>
 #include <UI/Qt/WindowToolbar.h>
 
+#include <QActionGroup>
 #include <QApplication>
 #include <QDesktopServices>
 #include <QDynamicPropertyChangeEvent>
@@ -697,7 +698,7 @@ public:
         : ToolbarButton(parent)
     {
         setObjectName("LadybirdRecordButton");
-        setToolTip("Record Tab Audio & Video (Ctrl+Shift+R)");
+        setToolTip("Record Tab (Ctrl+Shift+R) — Right-click for microphone & options");
         setAccessibleName("Record Tab");
         setCheckable(true);
         setAutoRaise(true);
@@ -721,7 +722,7 @@ public:
             setToolTip(QString("Stop Recording (%1) (Ctrl+Shift+R)").arg(label));
         } else {
             setFixedSize(TOOLBAR_BUTTON_SIZE);
-            setToolTip("Record Tab Audio & Video (Ctrl+Shift+R)");
+            setToolTip("Record Tab (Ctrl+Shift+R) — Right-click for microphone & options");
         }
         if (changed)
             update();
@@ -1311,14 +1312,81 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     });
     QObject::connect(m_record_button, &QWidget::customContextMenuRequested, this, [this](QPoint const& pos) {
         QMenu menu(m_record_button);
+        bool currently_recording = m_tab && m_tab->is_recording();
         if (m_tab && m_tab->is_loaded()) {
-            auto* toggle_action = menu.addAction(m_tab->is_recording() ? "Stop Recording" : "Start Recording (Tab Audio & Video)");
+            auto* toggle_action = menu.addAction(currently_recording ? "Stop Recording (Ctrl+Shift+R)" : "Start Recording (Ctrl+Shift+R)");
             QObject::connect(toggle_action, &QAction::triggered, this, [this] {
                 if (m_tab)
                     m_tab->toggle_recording();
             });
             menu.addSeparator();
         }
+
+        auto& rec_settings = TabRecorder::settings();
+
+        auto* mic_toggle = menu.addAction("Record Microphone");
+        mic_toggle->setCheckable(true);
+        mic_toggle->setChecked(rec_settings.record_microphone);
+        mic_toggle->setEnabled(!currently_recording);
+        QObject::connect(mic_toggle, &QAction::toggled, this, [](bool checked) {
+            TabRecorder::settings().record_microphone = checked;
+        });
+
+        auto* mic_menu = menu.addMenu("Microphone");
+        mic_menu->setEnabled(!currently_recording && rec_settings.record_microphone);
+        auto* mic_group = new QActionGroup(mic_menu);
+        mic_group->setExclusive(true);
+
+        auto* default_mic_action = mic_menu->addAction("System Default");
+        default_mic_action->setCheckable(true);
+        default_mic_action->setChecked(rec_settings.microphone_device_id.is_empty());
+        mic_group->addAction(default_mic_action);
+        QObject::connect(default_mic_action, &QAction::triggered, this, [] {
+            TabRecorder::settings().microphone_device_id = {};
+        });
+
+        auto mics = TabRecorder::enumerate_microphones();
+        if (!mics.is_empty()) {
+            mic_menu->addSeparator();
+            for (auto const& mic : mics) {
+                auto label = mic.is_default
+                    ? QString("%1 (Default)").arg(qstring_from_ak_string(mic.label))
+                    : qstring_from_ak_string(mic.label);
+                auto* mic_action = mic_menu->addAction(label);
+                mic_action->setCheckable(true);
+                mic_action->setChecked(rec_settings.microphone_device_id == mic.device_id);
+                mic_group->addAction(mic_action);
+                QObject::connect(mic_action, &QAction::triggered, this, [device_id = mic.device_id] {
+                    TabRecorder::settings().microphone_device_id = device_id;
+                });
+            }
+        }
+
+        auto* page_audio_toggle = menu.addAction("Record Page / System Audio");
+        page_audio_toggle->setCheckable(true);
+        page_audio_toggle->setChecked(rec_settings.record_system_audio);
+        page_audio_toggle->setEnabled(!currently_recording);
+        QObject::connect(page_audio_toggle, &QAction::toggled, this, [](bool checked) {
+            TabRecorder::settings().record_system_audio = checked;
+        });
+
+        auto* cursor_toggle = menu.addAction("Show Mouse Cursor");
+        cursor_toggle->setCheckable(true);
+        cursor_toggle->setChecked(rec_settings.show_cursor);
+        cursor_toggle->setEnabled(!currently_recording);
+        QObject::connect(cursor_toggle, &QAction::toggled, this, [](bool checked) {
+            TabRecorder::settings().show_cursor = checked;
+        });
+
+        auto* speakers_toggle = menu.addAction("Export Speaker Timeline (.speakers.json)");
+        speakers_toggle->setCheckable(true);
+        speakers_toggle->setChecked(rec_settings.export_speaker_timeline);
+        speakers_toggle->setEnabled(!currently_recording);
+        QObject::connect(speakers_toggle, &QAction::toggled, this, [](bool checked) {
+            TabRecorder::settings().export_speaker_timeline = checked;
+        });
+
+        menu.addSeparator();
         auto* open_folder_action = menu.addAction("Open Recordings Folder");
         QObject::connect(open_folder_action, &QAction::triggered, this, [] {
             QDesktopServices::openUrl(QUrl::fromLocalFile(qstring_from_ak_string(TabRecorder::recordings_directory())));
