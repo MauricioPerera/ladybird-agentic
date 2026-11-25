@@ -17,7 +17,9 @@ use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice::network_type::NetworkType;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType};
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType,
+};
 
 /// What a peer connection's ICE agent may reveal about, and do on, the local network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +62,25 @@ pub fn build_api(local_network: LocalNetwork) -> Result<API> {
         webrtc::interceptor::registry::Registry::new(),
         &mut media_engine,
     )?;
+    // Register RTX codecs after default interceptors so NACK feedback is not attached to video/rtx itself.
+    for (rtx_pt, apt) in [(97, 96), (99, 98), (101, 100), (103, 102), (124, 125), (42, 41)] {
+        media_engine.register_codec(
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: "video/rtx".to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: format!("apt={apt}"),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: rtx_pt,
+                ..Default::default()
+            },
+            RTPCodecType::Video,
+        )?;
+    }
     let mut setting_engine = SettingEngine::default();
+    setting_engine.enable_sender_rtx(true);
     // Restrict ICE to IPv4. Link-local IPv6 binds need a scope id that webrtc-rs
     // doesn't pass through, so any v6 host candidate fails to bind and we end up
     // with no candidate pairs at all.

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+asyncTest(async done => {
+    const pc = new RTCPeerConnection();
+    try {
+        try {
+            await pc.setLocalDescription({ type: "offer", sdp: "v=0\r\n" });
+            println("pre-offer rejection: unexpected resolve");
+        } catch (error) {
+            println(`pre-offer rejection: ${error.name}`);
+        }
+
+        const videoTransceiver = pc.addTransceiver("video", { direction: "sendonly" });
+        const offer = await pc.createOffer();
+        println(`has rtx: ${offer.sdp.includes("a=rtpmap:") && offer.sdp.includes("rtx/90000")}`);
+        println(`has FID: ${offer.sdp.includes("a=ssrc-group:FID ")}`);
+        println(`has ssrc: ${offer.sdp.includes("a=ssrc:")}`);
+        println(`has msid: ${offer.sdp.includes("a=msid:")}`);
+
+        const munged = offer.sdp.replace(/^(a=rtpmap:\d+ VP8\/90000\r?\n)/m, "$1a=rtcp-fb:96 rrtr\r\n");
+        await pc.setLocalDescription({ type: "offer", sdp: munged });
+        println(`munged applied: ${pc.localDescription.sdp.includes("a=rtcp-fb:96 rrtr")}`);
+        println(`transceiver mid set: ${typeof videoTransceiver.mid === "string" && videoTransceiver.mid.length > 0}`);
+
+        try {
+            await pc.setLocalDescription({ type: "offer", sdp: "not-valid-sdp" });
+            println("invalid sdp: unexpected resolve");
+        } catch (error) {
+            println(`invalid sdp rejected: ${error.name === "InvalidAccessError" || error.name === "OperationError"}`);
+        }
+    } catch (error) {
+        println(`FAIL: ${error.name}: ${error.message}`);
+    } finally {
+        pc.close();
+        done();
+    }
+});
+</script>

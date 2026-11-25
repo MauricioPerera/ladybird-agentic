@@ -1,0 +1,8 @@
+pre-offer rejection: InvalidModificationError
+has rtx: true
+has FID: true
+has ssrc: true
+has msid: true
+munged applied: true
+transceiver mid set: true
+invalid sdp rejected: true

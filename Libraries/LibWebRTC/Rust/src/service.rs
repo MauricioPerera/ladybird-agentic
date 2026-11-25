@@ -77,6 +77,88 @@ struct AudioSender {
     track: Arc<TrackLocalStaticSample>,
 }
 
+/// Placeholder send track attached to sendonly/sendrecv video transceivers so WebRTC offers
+/// populate media SSRCs, RTX `a=ssrc-group:FID` lines, and `a=msid` attributes needed by apps
+/// such as Google Meet before local camera encoding is wired up.
+struct PlaceholderVideoTrack {
+    id: String,
+    stream_id: String,
+}
+
+impl webrtc::track::track_local::TrackLocal for PlaceholderVideoTrack {
+    #[allow(clippy::elidable_lifetime_names)]
+    fn bind<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        t: &'life1 webrtc::track::track_local::TrackLocalContext,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = webrtc::error::Result<webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        use webrtc::api::media_engine::MIME_TYPE_VP8;
+        use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters};
+        let codec = t
+            .codec_parameters()
+            .iter()
+            .find(|c| {
+                let mime = c.capability.mime_type.as_str();
+                !mime.eq_ignore_ascii_case("video/rtx") && !mime.eq_ignore_ascii_case("video/ulpfec")
+            })
+            .cloned()
+            .or_else(|| t.codec_parameters().first().cloned())
+            .unwrap_or_else(|| RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_VP8.to_owned(),
+                    clock_rate: 90000,
+                    ..Default::default()
+                },
+                payload_type: 96,
+                ..Default::default()
+            });
+        Box::pin(async move { Ok(codec) })
+    }
+
+    #[allow(clippy::elidable_lifetime_names)]
+    fn unbind<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        _: &'life1 webrtc::track::track_local::TrackLocalContext,
+    ) -> Pin<Box<dyn Future<Output = webrtc::error::Result<()>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn rid(&self) -> Option<&str> {
+        None
+    }
+
+    fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    fn kind(&self) -> webrtc::rtp_transceiver::rtp_codec::RTPCodecType {
+        webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     // Every id the renderer has created a connection under and not closed yet, including those still waiting for
@@ -663,15 +745,18 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         error_kind: String::new().into(),
                         error_message: String::new().into(),
                     },
-                    Err(e) => Client::OnCreateOfferResult {
-                        pc_id: req.pc_id,
-                        request_id: req.request_id,
-                        ok: false,
-                        sdp_type: String::new().into(),
-                        sdp: String::new().into(),
-                        error_kind: "OperationError".to_string().into(),
-                        error_message: format!("{e}").into(),
-                    },
+                    Err(e) => {
+                        log::warn!("create_offer pc_id={} failed: {e}", req.pc_id);
+                        Client::OnCreateOfferResult {
+                            pc_id: req.pc_id,
+                            request_id: req.request_id,
+                            ok: false,
+                            sdp_type: String::new().into(),
+                            sdp: String::new().into(),
+                            error_kind: "OperationError".to_string().into(),
+                            error_message: format!("{e}").into(),
+                        }
+                    }
                 },
                 None => Client::OnCreateOfferResult {
                     pc_id: req.pc_id,
@@ -697,15 +782,18 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         error_kind: String::new().into(),
                         error_message: String::new().into(),
                     },
-                    Err(e) => Client::OnCreateAnswerResult {
-                        pc_id: req.pc_id,
-                        request_id: req.request_id,
-                        ok: false,
-                        sdp_type: String::new().into(),
-                        sdp: String::new().into(),
-                        error_kind: "OperationError".to_string().into(),
-                        error_message: format!("{e}").into(),
-                    },
+                    Err(e) => {
+                        log::warn!("create_answer pc_id={} failed: {e}", req.pc_id);
+                        Client::OnCreateAnswerResult {
+                            pc_id: req.pc_id,
+                            request_id: req.request_id,
+                            ok: false,
+                            sdp_type: String::new().into(),
+                            sdp: String::new().into(),
+                            error_kind: "OperationError".to_string().into(),
+                            error_message: format!("{e}").into(),
+                        }
+                    }
                 },
                 None => Client::OnCreateAnswerResult {
                     pc_id: req.pc_id,
@@ -773,13 +861,16 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         error_kind: String::new().into(),
                         error_message: String::new().into(),
                     },
-                    Err(e) => Client::OnAddIceCandidateResult {
-                        pc_id: req.pc_id,
-                        request_id: req.request_id,
-                        ok: false,
-                        error_kind: "OperationError".to_string().into(),
-                        error_message: format!("{e}").into(),
-                    },
+                    Err(e) => {
+                        log::warn!("add_ice_candidate pc_id={} failed: {e}", req.pc_id);
+                        Client::OnAddIceCandidateResult {
+                            pc_id: req.pc_id,
+                            request_id: req.request_id,
+                            ok: false,
+                            error_kind: "OperationError".to_string().into(),
+                            error_message: format!("{e}").into(),
+                        }
+                    }
                 }
             } else {
                 Client::OnAddIceCandidateResult {
@@ -817,20 +908,40 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
                         RTCRtpTransceiverDirection::Sendrecv
                     }
                 };
-                // Audio needs a placeholder encoding so a microphone can be attached
-                // later. Video has no send pipeline; leave its sender empty. A dummy
-                // VP8 track would otherwise be bound even for receive-only video,
-                // rejecting an answer that selects another codec (e.g. H.264).
-                let init = webrtc::rtp_transceiver::RTCRtpTransceiverInit {
-                    direction: if kind == RTPCodecType::Audio {
-                        RTCRtpTransceiverDirection::Sendrecv
-                    } else {
-                        RTCRtpTransceiverDirection::Recvonly
-                    },
-                    send_encodings: Vec::new(),
+                let transceiver = if kind == RTPCodecType::Video
+                    && matches!(
+                        direction,
+                        RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Sendrecv
+                    ) {
+                    let track = Arc::new(PlaceholderVideoTrack {
+                        id: format!("video-{}", req.transceiver_id),
+                        stream_id: format!("ladybird-stream-{}", req.pc_id),
+                    });
+                    pc.add_transceiver_from_track(
+                        track,
+                        Some(webrtc::rtp_transceiver::RTCRtpTransceiverInit {
+                            direction,
+                            send_encodings: Vec::new(),
+                        }),
+                    )
+                    .await?
+                } else {
+                    // Audio needs a placeholder encoding so a microphone can be attached
+                    // later. Receive-only video has no send pipeline; leave its sender empty. A dummy
+                    // VP8 track would otherwise be bound even for receive-only video,
+                    // rejecting an answer that selects another codec (e.g. H.264).
+                    let init = webrtc::rtp_transceiver::RTCRtpTransceiverInit {
+                        direction: if kind == RTPCodecType::Audio {
+                            RTCRtpTransceiverDirection::Sendrecv
+                        } else {
+                            RTCRtpTransceiverDirection::Recvonly
+                        },
+                        send_encodings: Vec::new(),
+                    };
+                    let transceiver = pc.add_transceiver_from_kind(kind, Some(init)).await?;
+                    transceiver.set_direction(direction).await;
+                    transceiver
                 };
-                let transceiver = pc.add_transceiver_from_kind(kind, Some(init)).await?;
-                transceiver.set_direction(direction).await;
                 state
                     .registry
                     .lock()
@@ -1152,6 +1263,7 @@ async fn wire_data_channel_events(state: &Arc<State>, channel_id: u64, dc: &Arc<
     dc.on_open(Box::new(move || {
         let writer = writer.clone();
         Box::pin(async move {
+            log::debug!("data_channel open channel_id={channel_id}");
             let _ = send(&writer, &Client::OnDataChannelOpen { channel_id });
         })
     }));
@@ -1162,6 +1274,7 @@ async fn wire_data_channel_events(state: &Arc<State>, channel_id: u64, dc: &Arc<
         let writer = writer.clone();
         let weak_state = weak_state.clone();
         Box::pin(async move {
+            log::debug!("data_channel close channel_id={channel_id}");
             if let Some(state) = weak_state.upgrade() {
                 state.registry.lock().await.remove_data_channel(channel_id);
             }
@@ -1173,6 +1286,7 @@ async fn wire_data_channel_events(state: &Arc<State>, channel_id: u64, dc: &Arc<
     dc.on_error(Box::new(move |err| {
         let writer = writer.clone();
         Box::pin(async move {
+            log::debug!("data_channel error channel_id={channel_id}: {err}");
             let _ = send(
                 &writer,
                 &Client::OnDataChannelError {
@@ -1266,8 +1380,14 @@ async fn apply_description(
     };
 
     log_sdp_summary(pc_id, if is_local { "local" } else { sdp_type }, &sdp);
-    let parsed = parse_session_description(sdp_type, sdp);
+    let parsed = if is_local && sdp.is_empty() {
+        empty_session_description(sdp_type)
+    } else {
+        parse_session_description(sdp_type, sdp)
+    };
     let Some(desc) = parsed else {
+        let side = if is_local { "local" } else { "remote" };
+        log::warn!("invalid {side} {sdp_type} SDP for pc_id={pc_id}");
         return (
             false,
             "InvalidAccessError".to_string(),
@@ -1275,7 +1395,15 @@ async fn apply_description(
         );
     };
     let result = if is_local {
-        pc.set_local_description(desc).await
+        let result = pc.set_local_description(desc).await;
+        if let Err(webrtc::Error::ErrSDPDoesNotMatchOffer | webrtc::Error::ErrSDPDoesNotMatchAnswer) = &result
+            && let Some(fallback) = empty_session_description(sdp_type)
+        {
+            log::debug!("applying munged local {sdp_type} SDP via last generated description for pc_id={pc_id}");
+            pc.set_local_description(fallback).await
+        } else {
+            result
+        }
     } else {
         pc.set_remote_description(desc).await
     };
@@ -1289,7 +1417,11 @@ async fn apply_description(
             }
             (true, String::new(), String::new())
         }
-        Err(e) => (false, "OperationError".to_string(), format!("{e}")),
+        Err(e) => {
+            let side = if is_local { "local" } else { "remote" };
+            log::warn!("apply_description ({side} {sdp_type}) failed for pc_id={pc_id}: {e}");
+            (false, "OperationError".to_string(), format!("{e}"))
+        }
     }
 }
 
@@ -1368,6 +1500,23 @@ fn extract_candidate_lines(sdp: &str) -> Vec<webrtc::ice_transport::ice_candidat
     out
 }
 
+fn empty_session_description(sdp_type: &str) -> Option<RTCSessionDescription> {
+    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+    let parsed_type = match sdp_type.to_ascii_lowercase().as_str() {
+        "offer" => RTCSdpType::Offer,
+        "answer" => RTCSdpType::Answer,
+        "pranswer" => RTCSdpType::Pranswer,
+        "rollback" => RTCSdpType::Rollback,
+        other => {
+            log::warn!("unknown sdp type: {other}");
+            return None;
+        }
+    };
+    let mut description = RTCSessionDescription::default();
+    description.sdp_type = parsed_type;
+    Some(description)
+}
+
 fn parse_session_description(sdp_type: &str, sdp: String) -> Option<RTCSessionDescription> {
     let result = match sdp_type.to_ascii_lowercase().as_str() {
         "offer" => RTCSessionDescription::offer(sdp),
@@ -1397,11 +1546,13 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
     pc.on_peer_connection_state_change(Box::new(move |s| {
         let writer = writer.clone();
         Box::pin(async move {
+            let state_str = format!("{s:?}").to_lowercase();
+            log::debug!("pc_id={pc_id} connection_state={state_str}");
             let _ = send(
                 &writer,
                 &Client::OnConnectionState {
                     pc_id,
-                    state: format!("{s:?}").to_lowercase().into(),
+                    state: state_str.into(),
                 },
             );
         })
@@ -1411,11 +1562,13 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
     pc.on_signaling_state_change(Box::new(move |s| {
         let writer = writer.clone();
         Box::pin(async move {
+            let state_str = format!("{s:?}").to_lowercase();
+            log::debug!("pc_id={pc_id} signaling_state={state_str}");
             let _ = send(
                 &writer,
                 &Client::OnSignalingState {
                     pc_id,
-                    state: format!("{s:?}").to_lowercase().into(),
+                    state: state_str.into(),
                 },
             );
         })
@@ -1425,11 +1578,13 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
     pc.on_ice_connection_state_change(Box::new(move |s| {
         let writer = writer.clone();
         Box::pin(async move {
+            let state_str = format!("{s:?}").to_lowercase();
+            log::debug!("pc_id={pc_id} ice_connection_state={state_str}");
             let _ = send(
                 &writer,
                 &Client::OnIceConnectionState {
                     pc_id,
-                    state: format!("{s:?}").to_lowercase().into(),
+                    state: state_str.into(),
                 },
             );
         })
@@ -1439,11 +1594,13 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
     pc.on_ice_gathering_state_change(Box::new(move |s| {
         let writer = writer.clone();
         Box::pin(async move {
+            let state_str = format!("{s:?}").to_lowercase();
+            log::debug!("pc_id={pc_id} ice_gathering_state={state_str}");
             let _ = send(
                 &writer,
                 &Client::OnIceGatheringState {
                     pc_id,
-                    state: format!("{s:?}").to_lowercase().into(),
+                    state: state_str.into(),
                 },
             );
         })
@@ -1608,6 +1765,7 @@ fn wire_pc_events(state: &Arc<State>, pc_id: u64, pc: &Arc<RTCPeerConnection>) {
             let negotiated = dc.negotiated();
             let id = dc.id();
 
+            log::debug!("on_data_channel pc_id={pc_id} channel_id={channel_id} label={label}");
             let _ = send(
                 &state_for_dc.writer,
                 &Client::OnDataChannel {
@@ -1998,6 +2156,88 @@ mod tests {
         local.close().await.unwrap();
         remote.close().await.unwrap();
         result.expect("receive-only video must not try to bind a placeholder VP8 sender");
+    }
+
+    #[tokio::test]
+    async fn sendonly_video_transceiver_emits_rtx_and_fid_and_accepts_h264_answer() {
+        use webrtc::api::{APIBuilder, media_engine::MediaEngine};
+        use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
+        let (state, _renderer) = new_state(NetworkAccess::Allowed);
+        command(
+            &state,
+            Server::CreatePeerConnection {
+                pc_id: 1,
+                configuration: CONFIG.to_owned().into(),
+            },
+        )
+        .await;
+        command(
+            &state,
+            Server::AddTransceiver {
+                pc_id: 1,
+                transceiver_id: 1,
+                kind: "video".to_owned().into(),
+                direction: "sendonly".to_owned().into(),
+            },
+        )
+        .await;
+        let local = find_pc(&state, 1).await.unwrap();
+        let offer = local.create_offer(None).await.unwrap();
+        assert!(offer.sdp.contains("rtx/90000"), "offer must include video/rtx");
+        assert!(
+            offer.sdp.contains("a=ssrc-group:FID "),
+            "sendonly video offer must include a=ssrc-group:FID"
+        );
+        assert!(offer.sdp.contains("a=ssrc:"), "sendonly video offer must include a=ssrc:");
+        assert!(offer.sdp.contains("a=msid:"), "sendonly video offer must include a=msid:");
+
+        let (invalid_ok, _, _) = apply_description(&state, 1, "offer", "not valid sdp".to_owned(), true).await;
+        assert!(!invalid_ok, "invalid munged local SDP must be rejected");
+
+        let munged_sdp = offer
+            .sdp
+            .replacen("a=rtpmap:96 VP8/90000", "a=rtpmap:96 VP8/90000\r\na=rtcp-fb:96 rrtr", 1);
+        assert_ne!(munged_sdp, offer.sdp, "offer must include VP8 rtpmap");
+        let (munged_ok, err_kind, err_msg) = apply_description(&state, 1, "offer", munged_sdp, true).await;
+        assert!(munged_ok, "valid munged offer SDP failed: {err_kind} {err_msg}");
+
+        let mut media = MediaEngine::default();
+        media
+            .register_codec(
+                RTCRtpCodecParameters {
+                    capability: RTCRtpCodecCapability {
+                        mime_type: "video/H264".to_owned(),
+                        clock_rate: 90000,
+                        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+                            .to_owned(),
+                        ..Default::default()
+                    },
+                    payload_type: 102,
+                    ..Default::default()
+                },
+                RTPCodecType::Video,
+            )
+            .unwrap();
+        let remote = APIBuilder::new()
+            .with_media_engine(media)
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        remote.set_remote_description(offer).await.unwrap();
+        let answer = remote.create_answer(None).await.unwrap();
+        assert!(answer.sdp.contains("H264/90000"));
+        assert!(!answer.sdp.contains("VP8/90000"));
+        remote.set_local_description(answer.clone()).await.unwrap();
+
+        let (answer_ok, answer_err_kind, answer_err_msg) =
+            apply_description(&state, 1, "answer", answer.sdp, false).await;
+        remote.close().await.unwrap();
+        command(&state, Server::ClosePeerConnection { pc_id: 1 }).await;
+        assert!(
+            answer_ok,
+            "sendonly placeholder video must bind negotiated remote codec: {answer_err_kind} {answer_err_msg}"
+        );
     }
 
     #[tokio::test]

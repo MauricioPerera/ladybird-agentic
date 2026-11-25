@@ -360,17 +360,25 @@ GC::Ref<WebIDL::Promise> RTCPeerConnection::set_local_description_impl(RTCLocalS
     } else {
         type = Bindings::RTCSdpType::Answer;
     }
-    // 4.2. If type is "offer", and sdp is not the empty string and not equal to connection.[[LastCreatedOffer]], then return a promise rejected with a newly created InvalidModificationError and abort these steps.
-    if (type == Bindings::RTCSdpType::Offer && !sdp.is_empty() && sdp != m_last_created_offer) {
-        auto rejected = WebIDL::create_promise(realm);
-        WebIDL::reject_promise(realm, rejected, WebIDL::InvalidModificationError::create("Local description SDP does not match last created offer"_utf16));
-        return rejected;
+    // 4.2. If type is "offer", and sdp is not the empty string and not equal to connection.[[LastCreatedOffer]], allow valid munging when an offer exists.
+    if (type == Bindings::RTCSdpType::Offer && !sdp.is_empty()) {
+        if (m_last_created_offer.is_empty()) {
+            auto rejected = WebIDL::create_promise(realm);
+            WebIDL::reject_promise(realm, rejected, WebIDL::InvalidModificationError::create("No local offer has been created"_utf16));
+            return rejected;
+        }
+        if (sdp != m_last_created_offer)
+            dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: allowing munged local offer SDP");
     }
-    // 4.3. If type is "answer" or "pranswer", and sdp is not the empty string and not equal to connection.[[LastCreatedAnswer]], then return a promise rejected with a newly created InvalidModificationError and abort these steps.
-    if ((type == Bindings::RTCSdpType::Answer || type == Bindings::RTCSdpType::Pranswer) && !sdp.is_empty() && sdp != m_last_created_answer) {
-        auto rejected = WebIDL::create_promise(realm);
-        WebIDL::reject_promise(realm, rejected, WebIDL::InvalidModificationError::create("Local description SDP does not match last created answer"_utf16));
-        return rejected;
+    // 4.3. If type is "answer" or "pranswer", and sdp is not the empty string and not equal to connection.[[LastCreatedAnswer]], allow valid munging when an answer exists.
+    if ((type == Bindings::RTCSdpType::Answer || type == Bindings::RTCSdpType::Pranswer) && !sdp.is_empty()) {
+        if (m_last_created_answer.is_empty()) {
+            auto rejected = WebIDL::create_promise(realm);
+            WebIDL::reject_promise(realm, rejected, WebIDL::InvalidModificationError::create("No local answer has been created"_utf16));
+            return rejected;
+        }
+        if (sdp != m_last_created_answer)
+            dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: allowing munged local answer SDP");
     }
     if (sdp.is_empty() && type != Bindings::RTCSdpType::Rollback) {
         auto generated = type == Bindings::RTCSdpType::Offer ? create_an_offer() : create_an_answer();
