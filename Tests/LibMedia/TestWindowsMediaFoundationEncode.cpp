@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Atomic.h>
 #include <AK/FixedArray.h>
+#include <LibCore/System.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/YUVData.h>
@@ -162,5 +164,50 @@ TEST_CASE(video_capture_enumeration_does_not_crash)
     for (size_t i = 0; i < devices.size(); ++i) {
         EXPECT(!devices[i].device_id.is_empty());
         EXPECT_EQ(devices[i].is_default, i == 0);
+    }
+}
+
+TEST_CASE(video_capture_open_and_stop_does_not_deadlock)
+{
+    auto devices = Media::WindowsMediaFoundation::enumerate_video_capture_devices();
+    if (devices.is_empty())
+        return;
+
+    auto const& device_id = devices[0].device_id;
+
+    // Open and immediately stop before any frame arrives.
+    {
+        auto stream_or_err = Media::WindowsMediaFoundation::VideoCaptureStream::create(
+            device_id,
+            640,
+            480,
+            30,
+            [](Gfx::DecodedImageFrame) {});
+        if (stream_or_err.is_error())
+            return;
+        auto stream = stream_or_err.release_value();
+        EXPECT(stream->is_running());
+        stream->stop();
+        EXPECT(!stream->is_running());
+    }
+
+    // Open, allow frames to arrive asynchronously, then stop cleanly.
+    {
+        Atomic<size_t> frame_count { 0 };
+        auto stream_or_err = Media::WindowsMediaFoundation::VideoCaptureStream::create(
+            device_id,
+            640,
+            480,
+            30,
+            [&](Gfx::DecodedImageFrame) {
+                frame_count.fetch_add(1, AK::MemoryOrder::memory_order_relaxed);
+            });
+        if (stream_or_err.is_error())
+            return;
+        auto stream = stream_or_err.release_value();
+        for (int attempt = 0; attempt < 40 && frame_count.load(AK::MemoryOrder::memory_order_relaxed) == 0; ++attempt)
+            MUST(Core::System::sleep_ms(50));
+        stream->stop();
+        EXPECT(!stream->is_running());
     }
 }

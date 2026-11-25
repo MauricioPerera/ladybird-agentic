@@ -36,6 +36,14 @@ struct MediaStreamPlayback::Mixer final : public AtomicRefCounted<Mixer> {
     Atomic<bool> playing { false };
 };
 
+struct MediaStreamPlayback::VideoDeliveryState final : public AtomicRefCounted<VideoDeliveryState> {
+    Mutex mutex;
+    MediaStreamPlayback* owner { nullptr };
+    Optional<Gfx::DecodedImageFrame> pending_frame;
+    bool scheduled { false };
+    bool alive { true };
+};
+
 static void receive_frames(MediaStreamPlayback::Mixer& mixer, MediaStreamPlayback::TrackInput& input, float const* samples, size_t frame_count, u8 channel_count, u32 sample_rate)
 {
     if (!mixer.playing.load(AK::MemoryOrder::memory_order_relaxed) || frame_count == 0 || channel_count == 0 || sample_rate == 0)
@@ -109,6 +117,13 @@ MediaStreamPlayback::~MediaStreamPlayback()
     m_mixer->playing.store(false);
     // This can run while the garbage collector is sweeping, when the tracks may already be gone, so the sinks
     // are only switched off here. Callers stop playback properly through set_tracks({}) beforehand.
+    if (m_video_delivery_state) {
+        MutexLocker locker(m_video_delivery_state->mutex);
+        m_video_delivery_state->alive = false;
+        m_video_delivery_state->owner = nullptr;
+        m_video_delivery_state->pending_frame.clear();
+        m_video_delivery_state = nullptr;
+    }
     for (auto& subscription : m_subscriptions)
         subscription.sink->deactivate();
     if (m_video_subscription.has_value())
@@ -124,6 +139,13 @@ void MediaStreamPlayback::set_video_frame_callback(Function<void(Optional<Gfx::D
 
 void MediaStreamPlayback::clear_video_subscription()
 {
+    if (m_video_delivery_state) {
+        MutexLocker locker(m_video_delivery_state->mutex);
+        m_video_delivery_state->alive = false;
+        m_video_delivery_state->owner = nullptr;
+        m_video_delivery_state->pending_frame.clear();
+        m_video_delivery_state = nullptr;
+    }
     if (!m_video_subscription.has_value())
         return;
     auto subscription = m_video_subscription.release_value();
@@ -190,11 +212,21 @@ void MediaStreamPlayback::set_tracks(ReadonlySpan<GC::Ref<MediaCapture::MediaStr
             if (m_on_video_frame)
                 m_on_video_frame({});
         } else {
+            auto delivery_state = adopt_ref(*new VideoDeliveryState);
+            delivery_state->owner = this;
+            m_video_delivery_state = delivery_state;
+
             auto sink = adopt_ref(*new MediaCapture::VideoFrameSink);
-            sink->on_frame = [weak_self = make_weak_ptr(), owner_thread_id = m_owner_thread_id, owner_loop_weak = m_owner_loop_weak](Gfx::DecodedImageFrame const& frame) {
+            sink->on_frame = [delivery_state, owner_thread_id = m_owner_thread_id, owner_loop_weak = m_owner_loop_weak](Gfx::DecodedImageFrame const& frame) {
                 if (std::this_thread::get_id() == owner_thread_id) {
-                    if (weak_self)
-                        weak_self->deliver_video_frame_on_owner_thread(frame);
+                    MediaStreamPlayback* owner = nullptr;
+                    {
+                        MutexLocker locker(delivery_state->mutex);
+                        if (!delivery_state->alive || !delivery_state->owner)
+                            return;
+                        owner = delivery_state->owner;
+                    }
+                    owner->deliver_video_frame_on_owner_thread(frame);
                     return;
                 }
                 if (!owner_loop_weak)
@@ -202,9 +234,27 @@ void MediaStreamPlayback::set_tracks(ReadonlySpan<GC::Ref<MediaCapture::MediaStr
                 auto loop = owner_loop_weak->take();
                 if (!loop.is_alive())
                     return;
-                loop->deferred_invoke([weak_self, frame]() mutable {
-                    if (weak_self)
-                        weak_self->deliver_video_frame_on_owner_thread(move(frame));
+                {
+                    MutexLocker locker(delivery_state->mutex);
+                    if (!delivery_state->alive)
+                        return;
+                    delivery_state->pending_frame = frame;
+                    if (delivery_state->scheduled)
+                        return;
+                    delivery_state->scheduled = true;
+                }
+                loop->deferred_invoke([delivery_state]() mutable {
+                    Optional<Gfx::DecodedImageFrame> next_frame;
+                    MediaStreamPlayback* owner = nullptr;
+                    {
+                        MutexLocker locker(delivery_state->mutex);
+                        delivery_state->scheduled = false;
+                        if (!delivery_state->alive || !delivery_state->owner || !delivery_state->pending_frame.has_value())
+                            return;
+                        next_frame = delivery_state->pending_frame.release_value();
+                        owner = delivery_state->owner;
+                    }
+                    owner->deliver_video_frame_on_owner_thread(next_frame.release_value());
                 });
             };
             m_video_subscription = VideoSubscription { selected_video_track, sink };

@@ -234,12 +234,16 @@ bool MediaDevices::has_live_device_of_kind(Utf16FlyString const& kind) const
 // https://w3c.github.io/mediacapture-main/#set-device-information-exposure-0
 void MediaDevices::set_device_information_exposure(bool audio_requested, bool video_requested, bool value)
 {
+    auto& settings_object = HTML::relevant_settings_object(*m_window);
+
     // 1. If "video" is in requestedTypes, run the following sub-steps.
     if (video_requested) {
         // 1.1 Set mediaDevices.[[canExposeCameraInfo]] to value.
         m_can_expose_camera_info = value;
 
-        // FIXME: 1.2 If value is true and if device exposure can be extended with "microphone", set mediaDevices.[[canExposeMicrophoneInfo]] to true.
+        // 1.2 If value is true and if device exposure can be extended with "microphone", set mediaDevices.[[canExposeMicrophoneInfo]] to true.
+        if (value && PermissionsAPI::permission_state(Web::Permissions::PermissionName::Microphone, settings_object) == PermissionsAPI::PermissionState::Granted)
+            m_can_expose_microphone_info = true;
     }
 
     // 2. If "audio" is in requestedTypes, run the following sub-steps.
@@ -247,7 +251,9 @@ void MediaDevices::set_device_information_exposure(bool audio_requested, bool vi
         // 2.1 Set mediaDevices.[[canExposeMicrophoneInfo]] to value.
         m_can_expose_microphone_info = value;
 
-        // FIXME: 2.2 If value is true and if device exposure can be extended with "camera", set mediaDevices.[[canExposeCameraInfo]] to true.
+        // 2.2 If value is true and if device exposure can be extended with "camera", set mediaDevices.[[canExposeCameraInfo]] to true.
+        if (value && PermissionsAPI::permission_state(Web::Permissions::PermissionName::Camera, settings_object) == PermissionsAPI::PermissionState::Granted)
+            m_can_expose_camera_info = true;
     }
     process_pending_enumerate_devices_requests();
     process_pending_get_user_media_requests();

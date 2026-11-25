@@ -49,6 +49,7 @@ public:
 
     struct Mixer;
     struct TrackInput;
+    struct VideoDeliveryState;
 
 private:
     explicit MediaStreamPlayback(NonnullRefPtr<Media::AudioOutputFactory>);
@@ -74,6 +75,7 @@ private:
         NonnullRefPtr<MediaCapture::VideoFrameSink> sink;
     };
     Optional<VideoSubscription> m_video_subscription;
+    RefPtr<VideoDeliveryState> m_video_delivery_state;
     Function<void(Optional<Gfx::DecodedImageFrame>)> m_on_video_frame;
     Optional<Gfx::DecodedImageFrame> m_latest_video_frame;
     bool m_has_delivered_first_video_frame { false };
