@@ -164,12 +164,16 @@ bool MediaDevices::microphone_information_can_be_exposed()
     if (has_live_device_of_kind(AUDIO_INPUT_KIND))
         return true;
     // 2. Return mediaDevices.[[canExposeMicrophoneInfo]].
-    return m_can_expose_microphone_info;
+    if (m_can_expose_microphone_info)
+        return true;
+    return PermissionsAPI::permission_state(Web::Permissions::PermissionName::Microphone, HTML::relevant_settings_object(*m_window)) == PermissionsAPI::PermissionState::Granted;
 }
 
 bool MediaDevices::camera_information_can_be_exposed() const
 {
-    return has_live_device_of_kind(VIDEO_INPUT_KIND) || m_can_expose_camera_info;
+    if (has_live_device_of_kind(VIDEO_INPUT_KIND) || m_can_expose_camera_info)
+        return true;
+    return PermissionsAPI::permission_state(Web::Permissions::PermissionName::Camera, HTML::relevant_settings_object(*m_window)) == PermissionsAPI::PermissionState::Granted;
 }
 
 bool MediaDevices::can_use_microphone_feature() const
@@ -481,6 +485,27 @@ static void extract_double_constraint_preference(Optional<Variant<double, Bindin
         target = static_cast<u32>(preferred);
 }
 
+template<typename Device, typename GetId, typename IsDefault>
+static Vector<Device> filter_devices_by_id_constraint(
+    Vector<Device> const& devices,
+    DeviceIdConstraint const& constraint,
+    GetId&& get_id,
+    IsDefault&& is_default)
+{
+    bool wants_default = constraint.device_ids.contains_slow("default"_utf16);
+    bool has_explicit_default = any_of(devices, [&](auto const& device) { return is_default(device); });
+
+    Vector<Device> filtered;
+    for (size_t index = 0; index < devices.size(); ++index) {
+        auto const& device = devices[index];
+        bool matches_id = constraint.device_ids.contains_slow(get_id(device));
+        bool matches_default = wants_default && (is_default(device) || (!has_explicit_default && index == 0));
+        if (matches_id || matches_default)
+            filtered.append(device);
+    }
+    return filtered;
+}
+
 // https://w3c.github.io/mediacapture-main/#dom-mediadevices-getusermedia
 void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, GetUserMediaOptions options)
 {
@@ -504,22 +529,27 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
         if (options.audio_requested) {
             Vector<Audio::AudioDeviceInfo> audio_candidates = audio_input_devices;
             if (audio_candidates.is_empty()) {
+                dbgln("MediaDevices::getUserMedia rejected (NotFoundError): no audio input devices available");
                 reject_not_found("No audio input devices available"_utf16);
                 return;
             }
 
             auto device_ids_are_known = any_of(audio_candidates, [](auto const& device) { return !device.dom_device_id.is_empty(); });
             if (options.audio_device_id_constraint.has_value() && options.audio_device_id_constraint->is_required && device_ids_are_known) {
-                audio_candidates.remove_all_matching([&](auto const& device) {
-                    return !options.audio_device_id_constraint->device_ids.contains_slow(Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()));
-                });
+                audio_candidates = filter_devices_by_id_constraint(
+                    audio_candidates,
+                    *options.audio_device_id_constraint,
+                    [](auto const& device) { return Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()); },
+                    [](auto const& device) { return device.is_default; });
                 if (audio_candidates.is_empty()) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotFoundError): requested audio input device not found");
                     reject_not_found("Requested audio input device not found"_utf16);
                     return;
                 }
             }
 
             if (PermissionsAPI::permission_state(Web::Permissions::PermissionName::Microphone) == PermissionsAPI::PermissionState::Denied) {
+                dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): microphone permission denied");
                 reject_permission_failure();
                 return;
             }
@@ -528,21 +558,26 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
         if (options.video_requested) {
             Vector<VideoCameraCandidate> video_candidates = video_input_devices;
             if (video_candidates.is_empty()) {
+                dbgln("MediaDevices::getUserMedia rejected (NotFoundError): no video input devices available");
                 reject_not_found("No video input devices available"_utf16);
                 return;
             }
 
             if (options.video_device_id_constraint.has_value() && options.video_device_id_constraint->is_required) {
-                video_candidates.remove_all_matching([&](auto const& device) {
-                    return !options.video_device_id_constraint->device_ids.contains_slow(Utf16String::from_utf8(device.device_id));
-                });
+                video_candidates = filter_devices_by_id_constraint(
+                    video_candidates,
+                    *options.video_device_id_constraint,
+                    [](auto const& device) { return Utf16String::from_utf8(device.device_id); },
+                    [](auto const& device) { return device.is_default; });
                 if (video_candidates.is_empty()) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotFoundError): requested video input device not found");
                     reject_not_found("Requested video input device not found"_utf16);
                     return;
                 }
             }
 
             if (PermissionsAPI::permission_state(Web::Permissions::PermissionName::Camera) == PermissionsAPI::PermissionState::Denied) {
+                dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): camera permission denied");
                 reject_permission_failure();
                 return;
             }
@@ -558,16 +593,19 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
 
                 auto& document = media_devices->m_window->associated_document();
                 if (!document.is_fully_active()) {
+                    dbgln("MediaDevices::getUserMedia rejected (InvalidStateError): document is not fully active");
                     WebIDL::reject_promise(*promise, WebIDL::InvalidStateError::create("Document is not fully active"_utf16));
                     return;
                 }
                 if (options.audio_requested
                     && PermissionsAPI::permission_state(Web::Permissions::PermissionName::Microphone, HTML::relevant_settings_object(*media_devices->m_window)) != PermissionsAPI::PermissionState::Granted) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): microphone permission not granted");
                     WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
                     return;
                 }
                 if (options.video_requested
                     && PermissionsAPI::permission_state(Web::Permissions::PermissionName::Camera, HTML::relevant_settings_object(*media_devices->m_window)) != PermissionsAPI::PermissionState::Granted) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): camera permission not granted");
                     WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
                     return;
                 }
@@ -576,13 +614,15 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                 if (options.audio_requested) {
                     auto final_audio_set = Audio::AudioDevices::the().input_devices();
                     if (options.audio_device_id_constraint.has_value()) {
-                        auto matching_devices = final_audio_set;
-                        matching_devices.remove_all_matching([&](auto const& device) {
-                            return !options.audio_device_id_constraint->device_ids.contains_slow(Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()));
-                        });
+                        auto matching_devices = filter_devices_by_id_constraint(
+                            final_audio_set,
+                            *options.audio_device_id_constraint,
+                            [](auto const& device) { return Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()); },
+                            [](auto const& device) { return device.is_default; });
                         if (!matching_devices.is_empty()) {
                             final_audio_set = move(matching_devices);
                         } else if (options.audio_device_id_constraint->is_required) {
+                            dbgln("MediaDevices::getUserMedia rejected (NotFoundError): requested final audio input device not found");
                             WebIDL::reject_promise(*promise, WebIDL::NotFoundError::create("Requested audio input device not found"_utf16));
                             return;
                         }
@@ -597,6 +637,7 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                         break;
                     }
                     if (!chosen_audio.has_value()) {
+                        dbgln("MediaDevices::getUserMedia rejected (NotReadableError): no readable audio input devices available");
                         WebIDL::reject_promise(*promise, WebIDL::NotReadableError::create("No readable audio input devices available"_utf16));
                         return;
                     }
@@ -606,13 +647,15 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                 if (options.video_requested) {
                     auto final_video_set = enumerate_available_cameras();
                     if (options.video_device_id_constraint.has_value()) {
-                        auto matching_devices = final_video_set;
-                        matching_devices.remove_all_matching([&](auto const& device) {
-                            return !options.video_device_id_constraint->device_ids.contains_slow(Utf16String::from_utf8(device.device_id));
-                        });
+                        auto matching_devices = filter_devices_by_id_constraint(
+                            final_video_set,
+                            *options.video_device_id_constraint,
+                            [](auto const& device) { return Utf16String::from_utf8(device.device_id); },
+                            [](auto const& device) { return device.is_default; });
                         if (!matching_devices.is_empty()) {
                             final_video_set = move(matching_devices);
                         } else if (options.video_device_id_constraint->is_required) {
+                            dbgln("MediaDevices::getUserMedia rejected (NotFoundError): requested final video input device not found");
                             WebIDL::reject_promise(*promise, WebIDL::NotFoundError::create("Requested video input device not found"_utf16));
                             return;
                         }
@@ -627,6 +670,7 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                         break;
                     }
                     if (!chosen_video.has_value()) {
+                        dbgln("MediaDevices::getUserMedia rejected (NotReadableError): no readable video input devices available");
                         WebIDL::reject_promise(*promise, WebIDL::NotReadableError::create("No readable video input devices available"_utf16));
                         return;
                     }
@@ -643,12 +687,14 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                             Utf16String::from_utf8(chosen_video->label));
                         MediaTrackSettings video_settings;
                         video_settings.device_id = granted_video_id;
+                        video_settings.group_id = Utf16String::from_utf8(chosen_video->group_id);
                         video_track->set_settings(move(video_settings));
                         video_track->set_media_devices({}, *media_devices);
 
                         if (auto video_start = video_track->start_video_capture(chosen_video->device_id, options.requested_video_width, options.requested_video_height, options.requested_video_fps); video_start.is_error()) {
                             if (audio_track)
                                 audio_track->stop();
+                            dbgln("MediaDevices::getUserMedia rejected (video start failed): {}", video_start.error());
                             WebIDL::reject_promise(*promise, device_access_failure(video_start.error(), true));
                             return;
                         }
@@ -659,6 +705,11 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                         media_devices->m_media_stream_track_sources.append(video_track);
                     }
 
+                    dbgln("MediaDevices::getUserMedia resolved: audio={} ('{}'), video={} ('{}')",
+                        audio_track ? 1 : 0,
+                        audio_track ? audio_track->label() : Utf16String {},
+                        chosen_video.has_value() ? 1 : 0,
+                        chosen_video.has_value() ? chosen_video->label : String {});
                     resolve_media_stream_promise(*promise, stream);
                 });
 
@@ -675,6 +726,7 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
 
                 MediaTrackSettings audio_settings;
                 audio_settings.device_id = granted_audio_id;
+                audio_settings.group_id = Utf16String::from_utf8_with_replacement_character(granted_audio.group_id.view());
                 audio_settings.sample_rate = granted_audio.sample_rate_hz;
                 audio_settings.channel_count = granted_audio.channel_count;
                 audio_track->set_settings(move(audio_settings));
@@ -685,12 +737,14 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                     HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
                     if (access.is_error()) {
+                        dbgln("MediaDevices::getUserMedia rejected (audio start failed): {}", access.error());
                         WebIDL::reject_promise(*promise, device_access_failure(access.error(), false));
                         return;
                     }
 
                     if (!media_devices->m_window->associated_document().is_fully_active()) {
                         audio_track->stop();
+                        dbgln("MediaDevices::getUserMedia rejected (InvalidStateError): document became inactive while starting audio");
                         WebIDL::reject_promise(*promise, WebIDL::InvalidStateError::create("Document is not fully active"_utf16));
                         return;
                     }
@@ -698,6 +752,7 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                     if (PermissionsAPI::permission_state(Web::Permissions::PermissionName::Microphone, HTML::relevant_settings_object(*media_devices->m_window)) != PermissionsAPI::PermissionState::Granted
                         || (options.video_requested && PermissionsAPI::permission_state(Web::Permissions::PermissionName::Camera, HTML::relevant_settings_object(*media_devices->m_window)) != PermissionsAPI::PermissionState::Granted)) {
                         audio_track->stop();
+                        dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): permission revoked while starting audio");
                         WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
                         return;
                     }
@@ -728,10 +783,12 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                 HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
                 if (!media_devices->m_window->associated_document().is_fully_active()) {
+                    dbgln("MediaDevices::getUserMedia rejected (InvalidStateError): document became inactive during camera prompt");
                     WebIDL::reject_promise(*promise, WebIDL::InvalidStateError::create("Document is not fully active"_utf16));
                     return;
                 }
                 if (camera_permission_result == PermissionsAPI::PermissionState::Denied) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): user denied camera prompt");
                     WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
                     return;
                 }
@@ -745,10 +802,12 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, G
                 HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
                 if (!media_devices->m_window->associated_document().is_fully_active()) {
+                    dbgln("MediaDevices::getUserMedia rejected (InvalidStateError): document became inactive during microphone prompt");
                     WebIDL::reject_promise(*promise, WebIDL::InvalidStateError::create("Document is not fully active"_utf16));
                     return;
                 }
                 if (microphone_permission_result == PermissionsAPI::PermissionState::Denied) {
+                    dbgln("MediaDevices::getUserMedia rejected (NotAllowedError): user denied microphone prompt");
                     WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
                     return;
                 }
@@ -770,6 +829,26 @@ void MediaDevices::queue_enumerate_devices_task(GC::Ref<WebIDL::Promise> promise
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
         auto result_list = media_devices->create_list_of_device_info_objects(media_devices->m_stored_device_list);
+        size_t audio_in = 0;
+        size_t video_in = 0;
+        size_t audio_out = 0;
+        for (auto const& info : result_list) {
+            switch (info->kind()) {
+            case Bindings::MediaDeviceKind::Audioinput:
+                ++audio_in;
+                break;
+            case Bindings::MediaDeviceKind::Videoinput:
+                ++video_in;
+                break;
+            case Bindings::MediaDeviceKind::Audiooutput:
+                ++audio_out;
+                break;
+            }
+        }
+        dbgln("MediaDevices::enumerateDevices -> total={} (audioin={}, videoin={}, audioout={}, exposed_mic={}, exposed_cam={})",
+            result_list.size(), audio_in, video_in, audio_out,
+            media_devices->microphone_information_can_be_exposed(),
+            media_devices->camera_information_can_be_exposed());
         resolve_media_device_info_list_promise(*promise, result_list);
     }));
 }
@@ -938,11 +1017,13 @@ void MediaDevices::get_user_media(Optional<MediaStreamConstraints> const& constr
     // AD-HOC: Keep the request queued until isInView and hasSystemFocus allow the deferred task
     // to continue without spinning in the event loop.
     if (!get_user_media_can_proceed()) {
+        dbgln("MediaDevices::getUserMedia queued (waiting on view/focus): audio={}, video={}", options.audio_requested, options.video_requested);
         m_pending_get_user_media_requests.append({ .promise = promise, .options = move(options) });
         return;
     }
 
     if (options.audio_requested && !Audio::AudioDevices::the().has_device_list()) {
+        dbgln("MediaDevices::getUserMedia queued (waiting on audio device list): audio={}, video={}", options.audio_requested, options.video_requested);
         m_pending_get_user_media_requests.append({ .promise = promise, .options = move(options) });
         return;
     }
@@ -1025,13 +1106,36 @@ void MediaDevices::run_with_fresh_audio_device_list(GC::Ref<GC::Function<void()>
 // https://w3c.github.io/mediacapture-main/#track-ended
 void MediaDevices::end_tracks_of_removed_devices()
 {
+    if (m_media_stream_track_sources.is_empty())
+        return;
+
+    bool has_live_audio_track = false;
+    bool has_live_video_track = false;
+    for (auto const& weak_track : m_media_stream_track_sources) {
+        auto track = weak_track.ptr();
+        if (!track || track->track_ready_state() == MediaStreamTrackState::Ended)
+            continue;
+        if (track->is_video())
+            has_live_video_track = true;
+        else
+            has_live_audio_track = true;
+    }
+    if (!has_live_audio_track && !has_live_video_track) {
+        m_media_stream_track_sources.clear();
+        return;
+    }
+
     Vector<Utf16String> present_audio_ids;
-    for (auto const& device : Audio::AudioDevices::the().input_devices())
-        present_audio_ids.append(Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()));
+    if (has_live_audio_track) {
+        for (auto const& device : Audio::AudioDevices::the().input_devices())
+            present_audio_ids.append(Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view()));
+    }
 
     Vector<Utf16String> present_video_ids;
-    for (auto const& device : enumerate_available_cameras())
-        present_video_ids.append(Utf16String::from_utf8(device.device_id));
+    if (has_live_video_track) {
+        for (auto const& device : enumerate_available_cameras())
+            present_video_ids.append(Utf16String::from_utf8(device.device_id));
+    }
 
     GC::RootVector<GC::Ref<MediaStreamTrack>> tracks_to_end;
     m_media_stream_track_sources.remove_all_matching([&](GC::Weak<MediaStreamTrack> const& weak_track) {

@@ -176,7 +176,7 @@ public:
     bool is_audio() const;
     bool is_video() const;
 
-    MediaTrackCapabilities get_capabilities() const { return {}; }
+    MediaTrackCapabilities get_capabilities() const;
     MediaTrackConstraints const& get_constraints() const;
     MediaTrackSettings const& get_settings() const;
     GC::Ref<WebIDL::Promise> apply_constraints(JS::Object const& relevant_global_object, Optional<MediaTrackConstraints> constraints);

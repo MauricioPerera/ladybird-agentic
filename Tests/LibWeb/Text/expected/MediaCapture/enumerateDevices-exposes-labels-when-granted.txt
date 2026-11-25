@@ -1,0 +1,3 @@
+initial state=prompt hidden=true
+granted audioInputsExposed=true
+defaultDeviceOk=true

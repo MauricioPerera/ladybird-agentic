@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+    asyncTest(async done => {
+        try {
+            const httpServer = httpTestServer();
+            const runId = crypto.randomUUID();
+            const popupUrl = new URL(await httpServer.createEcho("GET", `/enumerate-devices-granted-${runId}`, {
+                status: 200,
+                headers: { "Content-Type": "text/html" },
+                body: `<!DOCTYPE html><script>
+                    (async () => {
+                        try {
+                            const micStatus = await navigator.permissions.query({ name: "microphone" });
+                            const initial = await navigator.mediaDevices.enumerateDevices();
+                            const initialHidden = initial.length > 0 && initial.every(d => d.deviceId === "" && d.label === "");
+                            opener.postMessage("initial state=" + micStatus.state + " hidden=" + initialHidden, "*");
+
+                            await internals.setPermission("microphone", "granted");
+
+                            const granted = await navigator.mediaDevices.enumerateDevices();
+                            const audioInputs = granted.filter(d => d.kind === "audioinput");
+                            const audioInputsExposed = audioInputs.length > 0 && audioInputs.every(d => d.deviceId.length > 0 && d.label.length > 0);
+                            opener.postMessage("granted audioInputsExposed=" + audioInputsExposed, "*");
+
+                            const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: "default" } } });
+                            const track = stream.getAudioTracks()[0];
+                            const settings = track ? track.getSettings() : {};
+                            const caps = track ? track.getCapabilities() : {};
+                            const defaultOk = Boolean(track && track.readyState === "live" && settings.deviceId && settings.deviceId.length > 0 && caps.deviceId === settings.deviceId);
+                            if (track)
+                                track.stop();
+                            opener.postMessage("defaultDeviceOk=" + defaultOk, "*");
+                        } catch (error) {
+                            opener.postMessage("ERROR: " + error.name + ": " + error.message, "*");
+                        }
+                    })();
+                <\/script>`,
+            }));
+            popupUrl.hostname = uniqueLocalhostHostname("enumerate-devices-granted");
+
+            let popup;
+            const messages = [];
+            addEventListener("message", event => {
+                println(event.data);
+                messages.push(event.data);
+                if (messages.length >= 3 || event.data.startsWith("ERROR:")) {
+                    popup.close();
+                    done();
+                }
+            });
+            popup = window.open(popupUrl.href);
+        } catch (error) {
+            println(`ERROR: ${error.name}: ${error.message}`);
+            done();
+        }
+    });
+</script>

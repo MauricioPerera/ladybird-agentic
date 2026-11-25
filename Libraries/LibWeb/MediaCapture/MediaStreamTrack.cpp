@@ -344,6 +344,50 @@ u32 MediaStreamTrack::channel_count() const
     return 0;
 }
 
+// https://w3c.github.io/mediacapture-main/#dom-mediastreamtrack-getcapabilities
+MediaTrackCapabilities MediaStreamTrack::get_capabilities() const
+{
+    MediaTrackCapabilities capabilities;
+    capabilities.device_id = m_settings.device_id;
+    capabilities.group_id = m_settings.group_id;
+
+    if (is_video()) {
+        if (m_settings.width.has_value() && *m_settings.width > 0) {
+            Bindings::ULongRange range;
+            range.min = 1u;
+            range.max = max(*m_settings.width, 1920u);
+            capabilities.width = move(range);
+        }
+        if (m_settings.height.has_value() && *m_settings.height > 0) {
+            Bindings::ULongRange range;
+            range.min = 1u;
+            range.max = max(*m_settings.height, 1080u);
+            capabilities.height = move(range);
+        }
+        if (m_settings.frame_rate.has_value() && *m_settings.frame_rate > 0.0) {
+            Bindings::DoubleRange range;
+            range.min = 1.0;
+            range.max = max(*m_settings.frame_rate, 60.0);
+            capabilities.frame_rate = move(range);
+        }
+    } else if (is_audio()) {
+        if (m_settings.sample_rate.has_value() && *m_settings.sample_rate > 0) {
+            Bindings::ULongRange range;
+            range.min = *m_settings.sample_rate;
+            range.max = *m_settings.sample_rate;
+            capabilities.sample_rate = move(range);
+        }
+        if (m_settings.channel_count.has_value() && *m_settings.channel_count > 0) {
+            Bindings::ULongRange range;
+            range.min = 1u;
+            range.max = *m_settings.channel_count;
+            capabilities.channel_count = move(range);
+        }
+    }
+
+    return capabilities;
+}
+
 // https://w3c.github.io/mediacapture-main/#dom-mediastreamtrack-getconstraints
 MediaTrackConstraints const& MediaStreamTrack::get_constraints() const
 {
@@ -530,6 +574,8 @@ ErrorOr<void> MediaStreamTrack::start_video_capture(StringView device_id, u32 re
     m_settings.width = m_video_capture_stream->width();
     m_settings.height = m_video_capture_stream->height();
     m_settings.frame_rate = m_video_capture_stream->frame_rate();
+    if (*m_settings.width > 0 && *m_settings.height > 0)
+        m_settings.aspect_ratio = static_cast<double>(*m_settings.width) / static_cast<double>(*m_settings.height);
     return {};
 #else
     (void)device_id;
