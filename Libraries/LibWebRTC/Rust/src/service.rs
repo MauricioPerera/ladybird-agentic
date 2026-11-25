@@ -556,6 +556,16 @@ fn candidate_needs_name_resolution(candidate: &str) -> bool {
     address.parse::<IpAddr>().is_err() && !address.to_ascii_lowercase().ends_with(".local")
 }
 
+/// Whether a remote candidate names a transport protocol that webrtc-rs's ICE agent does not support
+/// (such as legacy `ssltcp` relay candidates sent by Google Meet).
+fn candidate_has_unsupported_transport(candidate: &str) -> bool {
+    let candidate = candidate.strip_prefix("a=").unwrap_or(candidate);
+    let Some(transport) = candidate.split_ascii_whitespace().nth(2) else {
+        return false;
+    };
+    transport.eq_ignore_ascii_case("ssltcp")
+}
+
 /// Drops the candidates in a remote description that only a DNS lookup could resolve.
 fn remove_candidates_needing_name_resolution(sdp: &str) -> String {
     let mut result = String::with_capacity(sdp.len());
@@ -837,8 +847,10 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
         }
         Message::AddIceCandidate(req) => {
             let candidate = to_string(req.candidate);
-            let event = if candidate_needs_name_resolution(&candidate) {
-                log::debug!("ignoring a remote candidate with a host name: {candidate}");
+            let event = if candidate_needs_name_resolution(&candidate)
+                || candidate_has_unsupported_transport(&candidate)
+            {
+                log::debug!("ignoring unsupported remote candidate: {candidate}");
                 Client::OnAddIceCandidateResult {
                     pc_id: req.pc_id,
                     request_id: req.request_id,
@@ -2320,5 +2332,21 @@ mod tests {
             1,
             "peer callbacks must not retain the service"
         );
+    }
+
+    #[test]
+    fn ssltcp_remote_candidates_are_ignored() {
+        assert!(candidate_has_unsupported_transport(
+            "candidate:2747206055 1 ssltcp 1518280447 192.0.2.1 443 typ relay raddr 0.0.0.0 rport 0 generation 0"
+        ));
+        assert!(candidate_has_unsupported_transport(
+            "a=candidate:1 1 SSLTCP 123 192.0.2.1 443 typ relay"
+        ));
+        assert!(!candidate_has_unsupported_transport(
+            "candidate:1 1 udp 2122260223 192.0.2.1 54321 typ host"
+        ));
+        assert!(!candidate_has_unsupported_transport(
+            "candidate:1 1 tcp 1518280447 192.0.2.1 9 typ host tcptype active"
+        ));
     }
 }

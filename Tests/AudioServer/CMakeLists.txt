@@ -4,6 +4,7 @@ set(TEST_SOURCES
     TestCaptureActivity.cpp
     TestCaptureDevices.cpp
     TestPlatformPlaybackStream.cpp
+    TestPlatformRecordStream.cpp
     TestPlaybackStreamMixer.cpp
     TestRemotePlaybackStream.cpp
     TestRemoteRecordStream.cpp
