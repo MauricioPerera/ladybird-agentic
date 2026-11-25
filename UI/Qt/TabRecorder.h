@@ -20,6 +20,7 @@
 #include <AK/kmalloc.h>
 #include <QImage>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 
 namespace Media {
@@ -71,6 +72,7 @@ signals:
 
 private:
     void capture_video_tick();
+    void enqueue_video_frame(QImage);
     void run_video_worker();
     void run_audio_worker();
     ErrorOr<void> write_speakers_json(AK::Duration total_duration);
@@ -84,6 +86,7 @@ private:
     QTimer m_frame_timer;
 
     bool m_is_recording { false };
+    bool m_snapshot_in_flight { false };
     MonotonicTime m_start_time { MonotonicTime::now_coarse() };
     String m_mp4_path;
     String m_speakers_json_path;

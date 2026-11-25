@@ -1287,6 +1287,8 @@ void WebContentView::paintEvent(QPaintEvent*)
 #if !defined(LADYBIRD_QT_USE_VULKAN_WINDOW)
 RefPtr<Gfx::Bitmap const> WebContentView::cpu_bitmap_of(Paintable const& paintable) const
 {
+    if (!paintable.shared_image_buffer)
+        return {};
     return paintable.shared_image_buffer->bitmap_if_present();
 }
 
@@ -1300,7 +1302,7 @@ RefPtr<Gfx::Bitmap const> WebContentView::cpu_bitmap_to_paint(Paintable const& p
 QImage WebContentView::visible_snapshot() const
 {
     auto paintable = current_paintable();
-    if (!paintable.has_value())
+    if (!paintable.has_value() || !paintable->shared_image_buffer)
         return {};
 
     if (auto bitmap = cpu_bitmap_of(*paintable)) {

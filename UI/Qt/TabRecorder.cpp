@@ -444,7 +444,7 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     // Switch view to CPU backing stores so visible_snapshot reads frames cleanly without occlusion.
     m_view.set_recording_active(true);
 
-    QImage initial_frame = m_view.visible_snapshot();
+    QImage initial_frame = m_view.holds_displayed_frame() ? m_view.visible_snapshot() : QImage {};
     u32 raw_width = initial_frame.isNull()
         ? static_cast<u32>(max(320, static_cast<int>(m_view.width() * m_view.device_pixel_ratio())))
         : static_cast<u32>(initial_frame.width());
@@ -480,6 +480,7 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     m_recorder = recorder_or_error.release_value();
     m_timeline = make<Media::SpeakerTimeline>();
     m_stop_requested = false;
+    m_snapshot_in_flight = false;
     m_audio_worker_stop.store(false, AK::MemoryOrder::memory_order_release);
     {
         AK::MutexLocker locker(m_video_queue_mutex);
@@ -538,6 +539,7 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
     m_frame_timer.stop();
     m_view.set_recording_active(false);
     m_is_recording = false;
+    m_snapshot_in_flight = false;
 
     auto total_duration = max(AK::Duration::from_milliseconds(1), MonotonicTime::now_coarse() - m_start_time);
 
@@ -620,8 +622,31 @@ void TabRecorder::capture_video_tick()
     if (!m_is_recording)
         return;
 
-    QImage snapshot = m_view.visible_snapshot();
-    if (snapshot.isNull())
+    if (m_view.holds_displayed_frame()) {
+        enqueue_video_frame(m_view.visible_snapshot());
+        return;
+    }
+
+    if (m_snapshot_in_flight)
+        return;
+    m_snapshot_in_flight = true;
+    m_view.take_visible_snapshot([self = QPointer { this }](QImage snapshot) {
+        if (!self)
+            return;
+        self->m_snapshot_in_flight = false;
+        if (self->m_is_recording)
+            self->enqueue_video_frame(move(snapshot));
+    });
+#endif
+}
+
+void TabRecorder::enqueue_video_frame(QImage snapshot)
+{
+#ifndef Q_OS_WIN
+    (void)snapshot;
+    return;
+#else
+    if (!m_is_recording || snapshot.isNull() || snapshot.width() <= 0 || snapshot.height() <= 0)
         return;
 
     if (snapshot.format() != QImage::Format_RGB32 && snapshot.format() != QImage::Format_ARGB32 && snapshot.format() != QImage::Format_ARGB32_Premultiplied)

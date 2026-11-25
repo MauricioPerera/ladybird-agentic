@@ -207,6 +207,9 @@ public:
     void remove_frame_notification_interest();
     void set_recording_active(bool);
     QImage visible_snapshot() const;
+    // What the view shows, which the Compositor takes where the view does not hold the frame itself.
+    void take_visible_snapshot(Function<void(QImage)>);
+    bool holds_displayed_frame() const;
 
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
     QAccessibleInterface* accessibility_interface_for_node(i64 node_id);
@@ -253,9 +256,6 @@ private:
     RefPtr<Gfx::Bitmap const> cpu_bitmap_of(Paintable const&) const;
     // The pixels of a frame for Qt to paint, which there is no need to read back while the page's window covers them.
     RefPtr<Gfx::Bitmap const> cpu_bitmap_to_paint(Paintable const&) const;
-    // What the view shows, which the Compositor takes where the view does not hold the frame itself.
-    void take_visible_snapshot(Function<void(QImage)>);
-    bool holds_displayed_frame() const;
 
     void update_viewport_size();
     void update_cursor(Gfx::Cursor cursor);
