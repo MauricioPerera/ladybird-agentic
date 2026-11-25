@@ -255,4 +255,25 @@ String SpeakerTimeline::to_json(StringView recording_filename, AK::Duration tota
     return root.serialized();
 }
 
+NonnullOwnPtr<SpeakerTimeline> SpeakerTimeline::create_continuation() const
+{
+    MutexLocker locker(m_mutex);
+
+    auto next = make<SpeakerTimeline>();
+    next->m_saw_webrtc_local = m_saw_webrtc_local;
+    next->m_saw_webrtc_remote = m_saw_webrtc_remote;
+    next->m_next_remote_index = m_next_remote_index;
+    for (auto const& entry : m_remote_labels)
+        next->m_remote_labels.set(entry.key, entry.value);
+
+    for (size_t i = 0; i < m_active_keys.size(); ++i) {
+        next->m_active_keys.append(m_active_keys[i]);
+        auto turn = m_active_turns[i];
+        turn.start = AK::Duration::zero();
+        next->m_active_turns.append(move(turn));
+    }
+
+    return next;
+}
+
 }

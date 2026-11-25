@@ -1819,6 +1819,11 @@ AK::Duration Tab::recording_elapsed() const
     return m_recorder ? m_recorder->elapsed() : AK::Duration::zero();
 }
 
+u32 Tab::recording_batch_index() const
+{
+    return m_recorder ? m_recorder->current_batch_index() : 0;
+}
+
 void Tab::toggle_recording()
 {
     if (!is_loaded() || !m_recorder)

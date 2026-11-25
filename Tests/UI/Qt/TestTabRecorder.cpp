@@ -61,3 +61,33 @@ TEST_CASE(enumerate_microphones_and_select_in_menu)
     default_action->trigger();
     EXPECT(Ladybird::TabRecorder::settings().microphone_device_id.is_empty());
 }
+
+TEST_CASE(settings_persist_batch_duration_and_options)
+{
+    auto original_settings = Ladybird::TabRecorder::settings();
+    ScopeGuard restore_settings = [&] {
+        Ladybird::TabRecorder::settings() = original_settings;
+        Ladybird::TabRecorder::save_settings();
+    };
+
+    auto& s = Ladybird::TabRecorder::settings();
+    s.record_microphone = false;
+    s.record_system_audio = true;
+    s.microphone_device_id = "test-mic-id-123"_string;
+    s.show_cursor = false;
+    s.export_speaker_timeline = true;
+    s.batch_duration_seconds = 60;
+    s.fps = 24;
+    Ladybird::TabRecorder::save_settings();
+
+    s = Ladybird::TabRecorderSettings {};
+    Ladybird::TabRecorder::load_settings();
+
+    EXPECT(!s.record_microphone);
+    EXPECT(s.record_system_audio);
+    EXPECT_EQ(s.microphone_device_id, "test-mic-id-123"_string);
+    EXPECT(!s.show_cursor);
+    EXPECT(s.export_speaker_timeline);
+    EXPECT_EQ(s.batch_duration_seconds, 60u);
+    EXPECT_EQ(s.fps, 24u);
+}

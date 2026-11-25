@@ -126,6 +126,7 @@ public:
 
     bool is_recording() const;
     AK::Duration recording_elapsed() const;
+    u32 recording_batch_index() const;
     void toggle_recording();
     void stop_recording();
     String recordings_directory() const;

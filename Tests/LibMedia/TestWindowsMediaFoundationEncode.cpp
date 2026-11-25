@@ -596,3 +596,95 @@ TEST_CASE(mp4_recorder_sustained_30fps_h264_aac_stress)
     EXPECT(sv.contains("ftyp"sv));
     EXPECT(sv.contains("moov"sv));
 }
+
+TEST_CASE(speaker_timeline_continuation_preserves_labels_and_active_turns)
+{
+    Media::SpeakerTimeline part1;
+    part1.record_webrtc_activity(501, false, true, 0.30f, AK::Duration::from_milliseconds(100));
+    part1.record_webrtc_activity(501, false, false, 0.0f, AK::Duration::from_milliseconds(900));
+    part1.record_webrtc_activity(502, false, true, 0.35f, AK::Duration::from_milliseconds(1500));
+    // Speaker 502 is still speaking across batch boundary at 2000ms.
+    auto part2 = part1.create_continuation();
+
+    part1.finalize(AK::Duration::from_milliseconds(2000));
+    EXPECT_EQ(part1.segments().size(), 2u);
+    EXPECT_EQ(part1.segments()[0].speaker, "Asistente 1"_string);
+    EXPECT_EQ(part1.segments()[1].speaker, "Asistente 2"_string);
+    EXPECT_EQ(part1.segments()[1].start.to_milliseconds(), 1500);
+    EXPECT_EQ(part1.segments()[1].end.to_milliseconds(), 2000);
+
+    // Speaker 502 stops at 600ms of part 2, then speaker 501 resumes -> labels must stay identical!
+    part2->record_webrtc_activity(502, false, false, 0.0f, AK::Duration::from_milliseconds(600));
+    part2->record_webrtc_activity(501, false, true, 0.25f, AK::Duration::from_milliseconds(800));
+    part2->record_webrtc_activity(501, false, false, 0.0f, AK::Duration::from_milliseconds(1400));
+    part2->finalize(AK::Duration::from_milliseconds(2000));
+
+    EXPECT_EQ(part2->segments().size(), 2u);
+    EXPECT_EQ(part2->segments()[0].speaker, "Asistente 2"_string);
+    EXPECT_EQ(part2->segments()[0].start.to_milliseconds(), 0);
+    EXPECT_EQ(part2->segments()[0].end.to_milliseconds(), 600);
+    EXPECT_EQ(part2->segments()[1].speaker, "Asistente 1"_string);
+    EXPECT_EQ(part2->segments()[1].start.to_milliseconds(), 800);
+    EXPECT_EQ(part2->segments()[1].end.to_milliseconds(), 1400);
+}
+
+TEST_CASE(mp4_recorder_sequential_batches_finalize_independently)
+{
+    StringView const paths[2] = {
+        "ladybird_test_batch_part1.mp4"sv,
+        "ladybird_test_batch_part2.mp4"sv,
+    };
+    ScopeGuard cleanup = [&] {
+        for (auto p : paths) {
+            if (FileSystem::exists(p))
+                (void)FileSystem::remove(p, FileSystem::RecursionMode::Disallowed);
+        }
+    };
+    for (auto p : paths) {
+        if (FileSystem::exists(p))
+            MUST(FileSystem::remove(p, FileSystem::RecursionMode::Disallowed));
+    }
+
+    Media::WindowsMediaFoundation::Mp4RecorderConfig config;
+    config.width = 320;
+    config.height = 240;
+    config.fps = 30;
+    config.video_bitrate_bps = 1'000'000;
+    config.record_audio = true;
+    config.audio_sample_rate = 48000;
+    config.audio_channels = 2;
+    config.audio_bitrate_bps = 128'000;
+
+    Vector<u8> bgra_frame;
+    bgra_frame.resize(320u * 240u * 4u);
+    Vector<i16> pcm_chunk;
+    pcm_chunk.resize(960u * 2u);
+    memset(pcm_chunk.data(), 0, pcm_chunk.size() * sizeof(i16));
+    ReadonlyBytes pcm_bytes { reinterpret_cast<u8 const*>(pcm_chunk.data()), pcm_chunk.size() * sizeof(i16) };
+
+    for (size_t part = 0; part < 2; ++part) {
+        auto recorder = TRY_OR_FAIL(Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(paths[part], config));
+        for (u32 i = 0; i < 6; ++i) {
+            memset(bgra_frame.data(), static_cast<int>(part * 80 + i * 20), bgra_frame.size());
+            auto vts = AK::Duration::from_milliseconds(static_cast<i64>(i) * 33);
+            TRY_OR_FAIL(recorder->write_video_frame(bgra_frame.span(), 320, 240, 320 * 4, false, vts, AK::Duration::from_milliseconds(33)));
+        }
+        if (recorder->has_audio_stream()) {
+            for (u32 c = 0; c < 10; ++c) {
+                auto ats = AK::Duration::from_milliseconds(static_cast<i64>(c) * 20);
+                TRY_OR_FAIL(recorder->write_audio_pcm_s16le(pcm_bytes, ats, AK::Duration::from_milliseconds(20)));
+            }
+        }
+        TRY_OR_FAIL(recorder->finalize());
+    }
+
+    for (auto p : paths) {
+        EXPECT(FileSystem::exists(p));
+        auto file = TRY_OR_FAIL(Core::File::open(p, Core::File::OpenMode::Read));
+        auto bytes = TRY_OR_FAIL(file->read_until_eof());
+        EXPECT(bytes.size() > 1024u);
+        auto sv = StringView { bytes.bytes() };
+        EXPECT(sv.contains("ftyp"sv));
+        EXPECT(sv.contains("moov"sv));
+    }
+}

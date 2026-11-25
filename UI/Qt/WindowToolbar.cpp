@@ -708,18 +708,22 @@ public:
         setContextMenuPolicy(Qt::CustomContextMenu);
     }
 
-    void set_recording_state(bool recording, i64 elapsed_seconds)
+    void set_recording_state(bool recording, i64 elapsed_seconds, u32 batch_index = 0)
     {
-        bool changed = (m_recording != recording || m_elapsed_seconds != elapsed_seconds);
+        bool changed = (m_recording != recording || m_elapsed_seconds != elapsed_seconds || m_batch_index != batch_index);
         m_recording = recording;
         m_elapsed_seconds = elapsed_seconds;
+        m_batch_index = batch_index;
         setChecked(recording);
         if (recording) {
             setFixedSize({ 74, TOOLBAR_BUTTON_SIZE.height() });
             i64 minutes = elapsed_seconds / 60;
             i64 seconds = elapsed_seconds % 60;
             auto label = QString::asprintf("REC %02lld:%02lld", static_cast<long long>(minutes), static_cast<long long>(seconds));
-            setToolTip(QString("Stop Recording (%1) (Ctrl+Shift+R)").arg(label));
+            if (batch_index > 0)
+                setToolTip(QString("Stop Recording (%1 — Part %2) (Ctrl+Shift+R)").arg(label).arg(batch_index));
+            else
+                setToolTip(QString("Stop Recording (%1) (Ctrl+Shift+R)").arg(label));
         } else {
             setFixedSize(TOOLBAR_BUTTON_SIZE);
             setToolTip("Record Tab (Ctrl+Shift+R) — Right-click for microphone & options");
@@ -764,6 +768,7 @@ protected:
 private:
     bool m_recording { false };
     i64 m_elapsed_seconds { 0 };
+    u32 m_batch_index { 0 };
 };
 
 template<typename ButtonType = ToolbarButton>
@@ -1330,6 +1335,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
         mic_toggle->setEnabled(!currently_recording);
         QObject::connect(mic_toggle, &QAction::toggled, this, [](bool checked) {
             TabRecorder::settings().record_microphone = checked;
+            TabRecorder::save_settings();
         });
 
         auto* mic_menu = menu.addMenu("Microphone");
@@ -1343,6 +1349,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
         mic_group->addAction(default_mic_action);
         QObject::connect(default_mic_action, &QAction::triggered, this, [] {
             TabRecorder::settings().microphone_device_id = {};
+            TabRecorder::save_settings();
         });
 
         auto mics = TabRecorder::enumerate_microphones();
@@ -1358,6 +1365,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
                 mic_group->addAction(mic_action);
                 QObject::connect(mic_action, &QAction::triggered, this, [device_id = mic.device_id] {
                     TabRecorder::settings().microphone_device_id = device_id;
+                    TabRecorder::save_settings();
                 });
             }
         }
@@ -1368,6 +1376,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
         page_audio_toggle->setEnabled(!currently_recording);
         QObject::connect(page_audio_toggle, &QAction::toggled, this, [](bool checked) {
             TabRecorder::settings().record_system_audio = checked;
+            TabRecorder::save_settings();
         });
 
         auto* cursor_toggle = menu.addAction("Show Mouse Cursor");
@@ -1376,6 +1385,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
         cursor_toggle->setEnabled(!currently_recording);
         QObject::connect(cursor_toggle, &QAction::toggled, this, [](bool checked) {
             TabRecorder::settings().show_cursor = checked;
+            TabRecorder::save_settings();
         });
 
         auto* speakers_toggle = menu.addAction("Export Speaker Timeline (.speakers.json)");
@@ -1384,7 +1394,34 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
         speakers_toggle->setEnabled(!currently_recording);
         QObject::connect(speakers_toggle, &QAction::toggled, this, [](bool checked) {
             TabRecorder::settings().export_speaker_timeline = checked;
+            TabRecorder::save_settings();
         });
+
+        auto* batch_menu = menu.addMenu("Save in Batches");
+        batch_menu->setEnabled(!currently_recording);
+        auto* batch_group = new QActionGroup(batch_menu);
+        batch_group->setExclusive(true);
+        struct BatchOption {
+            char const* label;
+            u32 seconds;
+        };
+        constexpr BatchOption batch_options[] = {
+            { "Single File (No Batching)", 0 },
+            { "Every 1 Minute", 60 },
+            { "Every 5 Minutes (Recommended)", 300 },
+            { "Every 10 Minutes", 600 },
+            { "Every 15 Minutes", 900 },
+        };
+        for (auto const& option : batch_options) {
+            auto* batch_action = batch_menu->addAction(option.label);
+            batch_action->setCheckable(true);
+            batch_action->setChecked(rec_settings.batch_duration_seconds == option.seconds);
+            batch_group->addAction(batch_action);
+            QObject::connect(batch_action, &QAction::triggered, this, [seconds = option.seconds] {
+                TabRecorder::settings().batch_duration_seconds = seconds;
+                TabRecorder::save_settings();
+            });
+        }
 
         menu.addSeparator();
         auto* open_folder_action = menu.addAction("Open Recordings Folder");
@@ -1980,7 +2017,8 @@ void WindowToolbar::update_record_button()
 
     bool recording = m_tab && m_tab->is_recording();
     i64 elapsed_sec = recording ? max<i64>(0, m_tab->recording_elapsed().to_seconds()) : 0;
-    m_record_button->set_recording_state(recording, elapsed_sec);
+    u32 batch_idx = recording ? m_tab->recording_batch_index() : 0;
+    m_record_button->set_recording_state(recording, elapsed_sec, batch_idx);
 
     if (recording && !m_recording_timer->isActive())
         m_recording_timer->start();

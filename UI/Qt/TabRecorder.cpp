@@ -10,6 +10,9 @@
 
 #include <AK/ByteString.h>
 #include <AK/Debug.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
 #include <AK/Math.h>
 #include <AK/ScopeGuard.h>
 #include <LibCore/File.h>
@@ -470,10 +473,85 @@ TabRecorder::TabRecorder(WebContentView& view, QObject* parent)
     QObject::connect(&m_frame_timer, &QTimer::timeout, this, [this] { capture_video_tick(); });
 }
 
-TabRecorderSettings& TabRecorder::settings()
+namespace {
+
+TabRecorderSettings& raw_settings_storage()
 {
     static TabRecorderSettings s_settings;
     return s_settings;
+}
+
+}
+
+TabRecorderSettings& TabRecorder::settings()
+{
+    static bool s_loaded = [] {
+        load_settings();
+        return true;
+    }();
+    (void)s_loaded;
+    return raw_settings_storage();
+}
+
+String TabRecorder::settings_file_path()
+{
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    if (dir.isEmpty())
+        dir = qstring_from_ak_string(recordings_directory());
+    QDir().mkpath(dir);
+    return ak_string_from_qstring(QDir::toNativeSeparators(QDir(dir).filePath("tab_recorder_settings.json")));
+}
+
+void TabRecorder::load_settings()
+{
+    auto path = settings_file_path();
+    auto file_or_err = Core::File::open(path, Core::File::OpenMode::Read);
+    if (file_or_err.is_error())
+        return;
+    auto bytes_or_err = file_or_err.value()->read_until_eof();
+    if (bytes_or_err.is_error())
+        return;
+    auto const& bytes = bytes_or_err.value();
+    auto parsed_or_err = JsonValue::from_string(StringView { bytes });
+    if (parsed_or_err.is_error() || !parsed_or_err.value().is_object())
+        return;
+
+    auto const& obj = parsed_or_err.value().as_object();
+    auto& target = raw_settings_storage();
+    if (auto v = obj.get_bool("record_microphone"sv); v.has_value())
+        target.record_microphone = *v;
+    if (auto v = obj.get_bool("record_system_audio"sv); v.has_value())
+        target.record_system_audio = *v;
+    if (auto v = obj.get_string("microphone_device_id"sv); v.has_value())
+        target.microphone_device_id = *v;
+    if (auto v = obj.get_bool("show_cursor"sv); v.has_value())
+        target.show_cursor = *v;
+    if (auto v = obj.get_bool("export_speaker_timeline"sv); v.has_value())
+        target.export_speaker_timeline = *v;
+    if (auto v = obj.get_u32("batch_duration_seconds"sv); v.has_value())
+        target.batch_duration_seconds = *v;
+    if (auto v = obj.get_u32("fps"sv); v.has_value())
+        target.fps = clamp<u32>(*v, 10, 60);
+}
+
+void TabRecorder::save_settings()
+{
+    auto const& s = raw_settings_storage();
+    JsonObject obj;
+    obj.set("record_microphone"sv, s.record_microphone);
+    obj.set("record_system_audio"sv, s.record_system_audio);
+    obj.set("microphone_device_id"sv, s.microphone_device_id);
+    obj.set("show_cursor"sv, s.show_cursor);
+    obj.set("export_speaker_timeline"sv, s.export_speaker_timeline);
+    obj.set("batch_duration_seconds"sv, s.batch_duration_seconds);
+    obj.set("fps"sv, s.fps);
+
+    auto json = obj.serialized();
+    auto path = settings_file_path();
+    auto file_or_err = Core::File::open(path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate);
+    if (file_or_err.is_error())
+        return;
+    (void)file_or_err.value()->write_until_depleted(json.bytes());
 }
 
 Vector<MicrophoneDeviceInfo> TabRecorder::enumerate_microphones()
@@ -578,13 +656,27 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
     else
         base_name = MUST(String::formatted("Ladybird_{}_{}", ak_string_from_qstring(timestamp_qstr), sanitized));
 
-    auto qdir = QDir(qstring_from_ak_string(dir));
-    m_recording_filename = MUST(String::formatted("{}.mp4", base_name));
-    m_mp4_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath(qstring_from_ak_string(m_recording_filename))));
-    if (m_active_settings.export_speaker_timeline)
-        m_speakers_json_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath(qstring_from_ak_string(MUST(String::formatted("{}.speakers.json", base_name))))));
-    else
-        m_speakers_json_path = {};
+    auto qbase_dir = QDir(qstring_from_ak_string(dir));
+    m_session_id = base_name;
+    m_completed_batches.clear();
+    if (m_active_settings.batch_duration_seconds > 0) {
+        QString session_folder = qbase_dir.filePath(qstring_from_ak_string(m_session_id));
+        QDir().mkpath(session_folder);
+        m_session_dir = ak_string_from_qstring(QDir::toNativeSeparators(session_folder));
+        m_current_batch_index.store(1, AK::MemoryOrder::memory_order_release);
+        m_recording_filename = batch_mp4_filename(1);
+        m_mp4_path = batch_mp4_path(1);
+        m_speakers_json_path = m_active_settings.export_speaker_timeline ? batch_speakers_json_path(1) : String {};
+    } else {
+        m_session_dir = {};
+        m_current_batch_index.store(0, AK::MemoryOrder::memory_order_release);
+        m_recording_filename = MUST(String::formatted("{}.mp4", base_name));
+        m_mp4_path = ak_string_from_qstring(QDir::toNativeSeparators(qbase_dir.filePath(qstring_from_ak_string(m_recording_filename))));
+        if (m_active_settings.export_speaker_timeline)
+            m_speakers_json_path = ak_string_from_qstring(QDir::toNativeSeparators(qbase_dir.filePath(qstring_from_ak_string(MUST(String::formatted("{}.speakers.json", base_name))))));
+        else
+            m_speakers_json_path = {};
+    }
 
     // Switch view to CPU backing stores so visible_snapshot reads frames cleanly without occlusion.
     m_view.set_recording_active(true);
@@ -608,10 +700,18 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
 
     bool want_audio = m_active_settings.record_microphone || m_active_settings.record_system_audio;
 
-    if (m_active_settings.export_speaker_timeline)
-        m_timeline = make<Media::SpeakerTimeline>();
-    else
-        m_timeline.clear();
+    {
+        AK::MutexLocker tl_locker(m_timeline_mutex);
+        if (m_active_settings.export_speaker_timeline)
+            m_timeline = make<Media::SpeakerTimeline>();
+        else
+            m_timeline.clear();
+        m_timeline_batch_start_offset = AK::Duration::zero();
+    }
+    {
+        AK::MutexLocker rec_locker(m_recorder_mutex);
+        m_recorder_batch_start_offset = AK::Duration::zero();
+    }
     m_stop_requested = false;
     m_snapshot_in_flight = false;
     m_recorder_init_error.clear();
@@ -639,7 +739,11 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
             CloseHandle(static_cast<HANDLE>(m_recorder_init_event));
             m_recorder_init_event = nullptr;
         }
-        m_timeline.clear();
+        {
+            AK::MutexLocker tl_locker(m_timeline_mutex);
+            m_timeline.clear();
+        }
+        m_current_batch_index.store(0, AK::MemoryOrder::memory_order_release);
         m_view.set_recording_active(false);
         return Error::from_windows_error();
     }
@@ -665,10 +769,17 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
         m_stop_event = nullptr;
         CloseHandle(static_cast<HANDLE>(m_video_event));
         m_video_event = nullptr;
-        m_timeline.clear();
+        {
+            AK::MutexLocker tl_locker(m_timeline_mutex);
+            m_timeline.clear();
+        }
+        m_current_batch_index.store(0, AK::MemoryOrder::memory_order_release);
         m_view.set_recording_active(false);
         return m_recorder_init_error.release_value();
     }
+
+    if (is_batched())
+        (void)write_session_manifest(false, AK::Duration::zero());
 
     if (m_recorder_has_audio) {
         m_audio_thread = Threading::Thread::construct("TabRecorder Audio"sv, [this]() -> intptr_t {
@@ -729,10 +840,41 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
         m_video_event = nullptr;
     }
 
-    if (m_timeline)
-        m_timeline->finalize(total_duration);
-    auto json_result = write_speakers_json(total_duration);
-    m_timeline.clear();
+    u32 final_part = m_current_batch_index.load(AK::MemoryOrder::memory_order_acquire);
+    m_current_batch_index.store(0, AK::MemoryOrder::memory_order_release);
+
+    OwnPtr<Media::SpeakerTimeline> final_timeline;
+    AK::Duration final_session_start = AK::Duration::zero();
+    {
+        AK::MutexLocker tl_locker(m_timeline_mutex);
+        final_timeline = move(m_timeline);
+        final_session_start = m_timeline_batch_start_offset;
+    }
+
+    auto final_batch_duration = max(AK::Duration::from_milliseconds(1), total_duration - final_session_start);
+    ErrorOr<void> json_result = {};
+    String final_mp4_path = is_batched() && final_part > 0 ? batch_mp4_path(final_part) : m_mp4_path;
+    String final_mp4_filename = is_batched() && final_part > 0 ? batch_mp4_filename(final_part) : m_recording_filename;
+    String final_json_path = is_batched() && final_part > 0
+        ? (m_active_settings.export_speaker_timeline ? batch_speakers_json_path(final_part) : String {})
+        : m_speakers_json_path;
+
+    if (final_timeline) {
+        final_timeline->finalize(final_batch_duration);
+        json_result = write_speakers_json_file(*final_timeline, final_mp4_filename, final_json_path, final_batch_duration);
+        final_timeline.clear();
+    }
+
+    if (is_batched() && final_part > 0 && !m_recorder_finalize_error.has_value()) {
+        m_completed_batches.append(CompletedBatch {
+            .part_index = final_part,
+            .mp4_filename = final_mp4_filename,
+            .speakers_json_filename = !json_result.is_error() && !final_json_path.is_empty() ? batch_speakers_json_filename(final_part) : String {},
+            .session_start = final_session_start,
+            .duration = final_batch_duration,
+        });
+        (void)write_session_manifest(true, total_duration);
+    }
 
     if (m_recorder_finalize_error.has_value()) {
         auto err = m_recorder_finalize_error.release_value();
@@ -747,8 +889,8 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
     }
 
     RecordingResult result {
-        .mp4_path = m_mp4_path,
-        .speakers_json_path = m_speakers_json_path,
+        .mp4_path = final_mp4_path,
+        .speakers_json_path = final_json_path,
         .duration = total_duration,
     };
     emit recording_stopped(qstring_from_ak_string(result.mp4_path), qstring_from_ak_string(result.speakers_json_path));
@@ -758,10 +900,14 @@ ErrorOr<TabRecorder::RecordingResult> TabRecorder::stop()
 
 void TabRecorder::notify_webrtc_speaker_activity(u64 speaker_key, bool is_local, bool is_speaking, float level)
 {
-    if (!m_is_recording || !m_timeline)
+    if (!m_is_recording)
         return;
-    auto timestamp = max(AK::Duration::zero(), MonotonicTime::now_coarse() - m_start_time);
-    m_timeline->record_webrtc_activity(speaker_key, is_local, is_speaking, level, timestamp);
+    AK::MutexLocker tl_locker(m_timeline_mutex);
+    if (!m_timeline)
+        return;
+    auto session_ts = max(AK::Duration::zero(), MonotonicTime::now_coarse() - m_start_time);
+    auto batch_ts = max(AK::Duration::zero(), session_ts - m_timeline_batch_start_offset);
+    m_timeline->record_webrtc_activity(speaker_key, is_local, is_speaking, level, batch_ts);
 }
 
 void TabRecorder::capture_video_tick()
@@ -887,6 +1033,9 @@ void TabRecorder::run_video_worker(u32 width, u32 height, u32 fps, bool record_a
     AK::Duration last_written_ts = AK::Duration::from_milliseconds(-1);
     u32 safe_fps = clamp<u32>(fps, 10, 60);
     auto frame_duration = AK::Duration::from_milliseconds(max<i64>(16, 1000 / safe_fps));
+    u32 active_part = m_active_settings.batch_duration_seconds > 0 ? 1 : 0;
+    AK::Duration batch_start_offset = AK::Duration::zero();
+    auto batch_limit = AK::Duration::from_seconds(static_cast<i64>(m_active_settings.batch_duration_seconds));
 
     for (;;) {
         Optional<QueuedVideoFrame> next_frame;
@@ -908,7 +1057,75 @@ void TabRecorder::run_video_worker(u32 width, u32 height, u32 fps, bool record_a
             continue;
         }
 
-        auto ts = next_frame->timestamp;
+        auto frame_session_ts = next_frame->timestamp;
+        if (active_part > 0 && batch_limit > AK::Duration::zero() && (frame_session_ts - batch_start_offset) >= batch_limit) {
+            auto split_offset = frame_session_ts;
+
+            OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder> outgoing_recorder;
+            {
+                AK::MutexLocker rec_locker(m_recorder_mutex);
+                outgoing_recorder = move(m_recorder);
+            }
+            if (outgoing_recorder) {
+                if (auto rc = outgoing_recorder->finalize(); rc.is_error()) {
+                    m_recorder_finalize_error = rc.release_error();
+                    outgoing_recorder.clear();
+                    break;
+                }
+                outgoing_recorder.clear();
+            }
+
+            OwnPtr<Media::SpeakerTimeline> outgoing_timeline;
+            {
+                AK::MutexLocker tl_locker(m_timeline_mutex);
+                if (m_timeline) {
+                    outgoing_timeline = move(m_timeline);
+                    m_timeline = outgoing_timeline->create_continuation();
+                }
+                m_timeline_batch_start_offset = split_offset;
+            }
+
+            auto batch_duration = max(AK::Duration::from_milliseconds(1), split_offset - batch_start_offset);
+            String completed_json_name;
+            if (outgoing_timeline) {
+                outgoing_timeline->finalize(batch_duration);
+                auto json_filename = batch_speakers_json_filename(active_part);
+                auto json_path = batch_speakers_json_path(active_part);
+                if (auto rc = write_speakers_json_file(*outgoing_timeline, batch_mp4_filename(active_part), json_path, batch_duration); rc.is_error())
+                    dbgln("TabRecorder: write batch speakers json failed: {}", rc.error());
+                else
+                    completed_json_name = move(json_filename);
+            }
+
+            m_completed_batches.append(CompletedBatch {
+                .part_index = active_part,
+                .mp4_filename = batch_mp4_filename(active_part),
+                .speakers_json_filename = move(completed_json_name),
+                .session_start = batch_start_offset,
+                .duration = batch_duration,
+            });
+            if (auto rc = write_session_manifest(false, split_offset); rc.is_error())
+                dbgln("TabRecorder: write_session_manifest failed: {}", rc.error());
+
+            ++active_part;
+            batch_start_offset = split_offset;
+            last_written_ts = AK::Duration::from_milliseconds(-1);
+            m_current_batch_index.store(active_part, AK::MemoryOrder::memory_order_release);
+
+            auto next_recorder_or_err = Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder::create(batch_mp4_path(active_part), config);
+            if (next_recorder_or_err.is_error()) {
+                m_recorder_finalize_error = next_recorder_or_err.release_error();
+                break;
+            }
+
+            {
+                AK::MutexLocker rec_locker(m_recorder_mutex);
+                m_recorder = next_recorder_or_err.release_value();
+                m_recorder_batch_start_offset = split_offset;
+            }
+        }
+
+        auto ts = max(AK::Duration::zero(), frame_session_ts - batch_start_offset);
         if (last_written_ts >= AK::Duration::zero() && ts <= last_written_ts)
             ts = last_written_ts + AK::Duration::from_milliseconds(1);
         last_written_ts = ts;
@@ -993,9 +1210,13 @@ void TabRecorder::run_audio_worker()
                 loopback_last_speech = vad_now;
             bool next_loopback_speaking = loopback_rms >= FALLBACK_VAD_RMS_THRESHOLD
                 || (loopback_last_speech.has_value() && (vad_now - *loopback_last_speech) <= FALLBACK_VAD_HOLDOVER);
-            if (next_loopback_speaking != loopback_speaking && m_timeline) {
+            if (next_loopback_speaking != loopback_speaking) {
                 loopback_speaking = next_loopback_speaking;
-                m_timeline->record_fallback_audio_activity(false, loopback_speaking, loopback_rms, chunk_ts);
+                AK::MutexLocker tl_locker(m_timeline_mutex);
+                if (m_timeline) {
+                    auto batch_ts = max(AK::Duration::zero(), chunk_ts - m_timeline_batch_start_offset);
+                    m_timeline->record_fallback_audio_activity(false, loopback_speaking, loopback_rms, batch_ts);
+                }
             }
         }
 
@@ -1004,9 +1225,13 @@ void TabRecorder::run_audio_worker()
                 mic_last_speech = vad_now;
             bool next_mic_speaking = mic_rms >= FALLBACK_VAD_RMS_THRESHOLD
                 || (mic_last_speech.has_value() && (vad_now - *mic_last_speech) <= FALLBACK_VAD_HOLDOVER);
-            if (next_mic_speaking != mic_speaking && m_timeline) {
+            if (next_mic_speaking != mic_speaking) {
                 mic_speaking = next_mic_speaking;
-                m_timeline->record_fallback_audio_activity(true, mic_speaking, mic_rms, chunk_ts);
+                AK::MutexLocker tl_locker(m_timeline_mutex);
+                if (m_timeline) {
+                    auto batch_ts = max(AK::Duration::zero(), chunk_ts - m_timeline_batch_start_offset);
+                    m_timeline->record_fallback_audio_activity(true, mic_speaking, mic_rms, batch_ts);
+                }
             }
         }
 
@@ -1019,7 +1244,8 @@ void TabRecorder::run_audio_worker()
         {
             AK::MutexLocker rec_locker(m_recorder_mutex);
             if (m_recorder) {
-                if (auto rc = m_recorder->write_audio_pcm_s16le(pcm_bytes, chunk_ts, chunk_duration); rc.is_error()) {
+                auto audio_batch_ts = max(AK::Duration::zero(), chunk_ts - m_recorder_batch_start_offset);
+                if (auto rc = m_recorder->write_audio_pcm_s16le(pcm_bytes, audio_batch_ts, chunk_duration); rc.is_error()) {
                     dbgln("TabRecorder: write_audio_pcm_s16le failed: {}", rc.error());
                 }
             }
@@ -1030,14 +1256,77 @@ void TabRecorder::run_audio_worker()
 #endif
 }
 
-ErrorOr<void> TabRecorder::write_speakers_json(AK::Duration total_duration)
+String TabRecorder::batch_mp4_filename(u32 part_index) const
 {
-    if (!m_timeline)
+    return MUST(String::formatted("part_{:03}.mp4", part_index));
+}
+
+String TabRecorder::batch_mp4_path(u32 part_index) const
+{
+    auto filename = batch_mp4_filename(part_index);
+    return ak_string_from_qstring(QDir::toNativeSeparators(QDir(qstring_from_ak_string(m_session_dir)).filePath(qstring_from_ak_string(filename))));
+}
+
+String TabRecorder::batch_speakers_json_filename(u32 part_index) const
+{
+    return MUST(String::formatted("part_{:03}.speakers.json", part_index));
+}
+
+String TabRecorder::batch_speakers_json_path(u32 part_index) const
+{
+    auto filename = batch_speakers_json_filename(part_index);
+    return ak_string_from_qstring(QDir::toNativeSeparators(QDir(qstring_from_ak_string(m_session_dir)).filePath(qstring_from_ak_string(filename))));
+}
+
+ErrorOr<void> TabRecorder::write_speakers_json_file(Media::SpeakerTimeline& timeline, StringView mp4_filename, StringView json_path, AK::Duration batch_duration)
+{
+    if (json_path.is_empty())
         return {};
 
-    auto json = m_timeline->to_json(m_recording_filename, total_duration);
-    auto file = TRY(Core::File::open(m_speakers_json_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+    auto json = timeline.to_json(mp4_filename, batch_duration);
+    auto file = TRY(Core::File::open(json_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
     TRY(file->write_until_depleted(json.bytes()));
+    return {};
+}
+
+ErrorOr<void> TabRecorder::write_session_manifest(bool completed, AK::Duration total_duration)
+{
+    if (m_session_dir.is_empty())
+        return {};
+
+    JsonObject root;
+    root.set("session_id"sv, m_session_id);
+    root.set("completed"sv, completed);
+    root.set("batch_duration_seconds"sv, m_active_settings.batch_duration_seconds);
+    root.set("total_duration_sec"sv, static_cast<double>(max<i64>(0, total_duration.to_milliseconds())) / 1000.0);
+
+    JsonArray batches_array;
+    StringBuilder concat_builder;
+    for (auto const& batch : m_completed_batches) {
+        JsonObject entry;
+        entry.set("part_index"sv, batch.part_index);
+        entry.set("mp4_file"sv, batch.mp4_filename);
+        if (!batch.speakers_json_filename.is_empty())
+            entry.set("speakers_json_file"sv, batch.speakers_json_filename);
+        entry.set("start_sec"sv, static_cast<double>(max<i64>(0, batch.session_start.to_milliseconds())) / 1000.0);
+        entry.set("start_time"sv, Media::SpeakerTimeline::format_timestamp_hms(batch.session_start));
+        entry.set("duration_sec"sv, static_cast<double>(max<i64>(0, batch.duration.to_milliseconds())) / 1000.0);
+        batches_array.must_append(move(entry));
+
+        concat_builder.appendff("file '{}'\n", batch.mp4_filename);
+    }
+    root.set("batches"sv, move(batches_array));
+
+    auto manifest_json = root.serialized();
+    auto qdir = QDir(qstring_from_ak_string(m_session_dir));
+    auto manifest_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath("session.json")));
+    auto manifest_file = TRY(Core::File::open(manifest_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+    TRY(manifest_file->write_until_depleted(manifest_json.bytes()));
+
+    auto concat_path = ak_string_from_qstring(QDir::toNativeSeparators(qdir.filePath("concat.txt")));
+    auto concat_file = TRY(Core::File::open(concat_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+    TRY(concat_file->write_until_depleted(concat_builder.string_view().bytes()));
+
     return {};
 }
 

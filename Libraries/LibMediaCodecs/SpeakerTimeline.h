@@ -8,6 +8,7 @@
 
 #include <AK/HashMap.h>
 #include <AK/Mutex.h>
+#include <AK/NonnullOwnPtr.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Time.h>
@@ -38,6 +39,7 @@ public:
     void record_webrtc_activity(u64 speaker_key, bool is_local, bool is_speaking, float level, AK::Duration timestamp);
     void record_fallback_audio_activity(bool is_local, bool is_speaking, float level, AK::Duration timestamp);
     void finalize(AK::Duration total_duration);
+    NonnullOwnPtr<SpeakerTimeline> create_continuation() const;
 
     Vector<SpeakerSegment> const& segments() const { return m_segments; }
     Vector<SpeakerSummary> const& speakers() const { return m_speakers; }

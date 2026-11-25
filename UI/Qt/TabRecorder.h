@@ -54,6 +54,7 @@ struct TabRecorderSettings {
     String microphone_device_id;
     bool show_cursor { true };
     bool export_speaker_timeline { true };
+    u32 batch_duration_seconds { 300 };
     u32 fps { 30 };
 };
 
@@ -73,9 +74,14 @@ public:
     virtual ~TabRecorder() override;
 
     static TabRecorderSettings& settings();
+    static void load_settings();
+    static void save_settings();
+    static String settings_file_path();
     static Vector<MicrophoneDeviceInfo> enumerate_microphones();
 
     bool is_recording() const { return m_is_recording; }
+    bool is_batched() const { return !m_session_dir.is_empty(); }
+    u32 current_batch_index() const { return m_current_batch_index.load(AK::MemoryOrder::memory_order_acquire); }
     AK::Duration elapsed() const;
     static String recordings_directory();
 
@@ -90,16 +96,30 @@ signals:
     void recording_failed(QString error_message);
 
 private:
-    void capture_video_tick();
-    void enqueue_video_frame(QImage);
-    void run_video_worker(u32 width, u32 height, u32 fps, bool record_audio);
-    void run_audio_worker();
-    ErrorOr<void> write_speakers_json(AK::Duration total_duration);
-
     struct QueuedVideoFrame {
         QImage image;
         AK::Duration timestamp;
     };
+
+    struct CompletedBatch {
+        u32 part_index { 0 };
+        String mp4_filename;
+        String speakers_json_filename;
+        AK::Duration session_start;
+        AK::Duration duration;
+    };
+
+    void capture_video_tick();
+    void enqueue_video_frame(QImage);
+    void run_video_worker(u32 width, u32 height, u32 fps, bool record_audio);
+    void run_audio_worker();
+
+    String batch_mp4_filename(u32 part_index) const;
+    String batch_mp4_path(u32 part_index) const;
+    String batch_speakers_json_filename(u32 part_index) const;
+    String batch_speakers_json_path(u32 part_index) const;
+    ErrorOr<void> write_speakers_json_file(Media::SpeakerTimeline&, StringView mp4_filename, StringView json_path, AK::Duration batch_duration);
+    ErrorOr<void> write_session_manifest(bool completed, AK::Duration total_duration);
 
     WebContentView& m_view;
     QTimer m_frame_timer;
@@ -108,13 +128,19 @@ private:
     bool m_snapshot_in_flight { false };
     TabRecorderSettings m_active_settings;
     MonotonicTime m_start_time { MonotonicTime::now_coarse() };
+    String m_session_dir;
+    String m_session_id;
     String m_mp4_path;
     String m_speakers_json_path;
     String m_recording_filename;
 
+    AK::Mutex m_timeline_mutex;
     OwnPtr<Media::SpeakerTimeline> m_timeline;
+    AK::Duration m_timeline_batch_start_offset { AK::Duration::zero() };
+
 #ifdef Q_OS_WIN
     OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder> m_recorder;
+    AK::Duration m_recorder_batch_start_offset { AK::Duration::zero() };
     Optional<Error> m_recorder_init_error;
     Optional<Error> m_recorder_finalize_error;
     void* m_stop_event { nullptr };
@@ -128,6 +154,8 @@ private:
     Vector<QueuedVideoFrame> m_video_queue;
     bool m_stop_requested { false };
     Atomic<bool> m_audio_worker_stop { false };
+    Atomic<u32> m_current_batch_index { 0 };
+    Vector<CompletedBatch> m_completed_batches;
 
     RefPtr<Threading::Thread> m_video_thread;
     RefPtr<Threading::Thread> m_audio_thread;
