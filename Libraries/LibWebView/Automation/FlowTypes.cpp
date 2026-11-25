@@ -773,7 +773,7 @@ FlowDefinition make_example_flow()
     flow.default_timeout_ms = 10000;
     flow.created_at_ms = now_ms;
     flow.updated_at_ms = now_ms;
-    flow.variables.set("target_url"_string, "https://example.com"_string);
+    flow.variables.set("target_url"_string, "http://example.com"_string);
     flow.variables.set("expected_heading"_string, "Example Domain"_string);
 
     FlowStep open_step;

@@ -57,7 +57,7 @@ TEST_CASE(parse_and_serialize_flow_roundtrip)
     EXPECT_EQ(reparsed.id, example.id);
     EXPECT_EQ(reparsed.name, example.name);
     EXPECT_EQ(reparsed.steps.size(), example.steps.size());
-    EXPECT_EQ(reparsed.variables.get("target_url"sv).value_or(String {}), "https://example.com"sv);
+    EXPECT_EQ(reparsed.variables.get("target_url"sv).value_or(String {}), "http://example.com"sv);
     EXPECT(reparsed.steps[1].locator.has_value());
     EXPECT_EQ(reparsed.steps[1].locator->kind, WebView::FlowLocator::Kind::Role);
     EXPECT_EQ(reparsed.steps[1].locator->role, "heading"sv);

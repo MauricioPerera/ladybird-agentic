@@ -300,7 +300,7 @@ class LadybirdBridgeSession {
 
   constructor() {
     this.#mcp = new McpClient(
-      process.env.LADYBIRD_MCP_URL || 'http://127.0.0.1:9223/mcp',
+      process.env.LADYBIRD_MCP_URL || 'http://127.0.0.1:7331/mcp',
       process.env.LADYBIRD_MCP_TOKEN || '',
     );
   }

@@ -559,7 +559,7 @@
                     default_timeout_ms: 10000,
                     variables: {},
                     steps: [
-                        { action: "open", label: "Open target page", url: "https://example.com", wait_for_load: true },
+                        { action: "open", label: "Open target page", url: "http://example.com", wait_for_load: true },
                         { action: "wait_for", label: "Wait for heading", locator: { kind: "role", role: "heading", name: "Example Domain" } },
                         { action: "assert_text", label: "Check heading text", locator: { kind: "css", value: "h1" }, contains: "Example Domain" }
                     ]
@@ -714,7 +714,7 @@
                         const newStep = { action: nextAction };
                         if (prevLabel) newStep.label = prevLabel;
                         if (nextAction === "open") {
-                            newStep.url = step.url || "https://example.com";
+                            newStep.url = step.url || "http://example.com";
                             newStep.wait_for_load = true;
                         } else if (NEEDS_LOCATOR.has(nextAction)) {
                             newStep.locator = step.locator || { kind: "css", value: "body" };
@@ -785,7 +785,7 @@
                     body.className = "step-body";
 
                     if (step.action === "open") {
-                        addInputField(body, "URL", step.url, v => { step.url = v; }, "https://example.com");
+                        addInputField(body, "URL", step.url, v => { step.url = v; }, "http://example.com");
                     }
 
                     if (NEEDS_LOCATOR.has(step.action) || (step.action === "press" && step.locator)) {

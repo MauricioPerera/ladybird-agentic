@@ -36,7 +36,7 @@ export const LADYBIRD_MANIFEST = Object.freeze({
 
 export function ladybirdEngineOptions({
   spawnTransport,
-  mcpUrl = process.env.LADYBIRD_MCP_URL || 'http://127.0.0.1:9223/mcp',
+  mcpUrl = process.env.LADYBIRD_MCP_URL || 'http://127.0.0.1:7331/mcp',
   mcpToken = process.env.LADYBIRD_MCP_TOKEN || '',
   nodePath = process.execPath,
 } = {}) {
