@@ -60,7 +60,7 @@ jobs:
           toolchain: 'Clang'
           build_preset: 'Distribution'
           version: ${{ inputs.version }}
-          use_caches: true
+          use_caches: false
 
       - name: Smoke test headless multi-tab MCP server
         working-directory: ${{ github.workspace }}
@@ -159,6 +159,7 @@ jobs:
                       proc.kill()
                       proc.wait()
           PY
+          rm -rf Install
 
       - name: Package AppImage
         if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'appimage-only' }}
