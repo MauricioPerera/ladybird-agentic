@@ -5749,20 +5749,49 @@ void Application::record_mcp_network_request_finished(u64 view_id, u64 request_i
 }
 
 static constexpr auto mcp_target_resolver_js = R"JS(
-const findDeep = (root, sel) => {
-  if (!root || !sel) return null;
+const getOwnerWindow = (el) => (el && el.ownerDocument && el.ownerDocument.defaultView) || window;
+const findDeep = (root, sel, visited = new Set()) => {
+  if (!root || !sel || visited.has(root)) return null;
+  visited.add(root);
   try {
     const direct = root.querySelector(sel);
     if (direct) return direct;
   } catch (e) { return null; }
   const all = root.querySelectorAll('*');
   for (let i = 0; i < all.length; i++) {
-    if (all[i].shadowRoot) {
-      const hit = findDeep(all[i].shadowRoot, sel);
+    const el = all[i];
+    if (el.shadowRoot) {
+      const hit = findDeep(el.shadowRoot, sel, visited);
       if (hit) return hit;
     }
+    try {
+      const tag = el.tagName;
+      if ((tag === 'IFRAME' || tag === 'FRAME') && el.contentDocument) {
+        const hit = findDeep(el.contentDocument, sel, visited);
+        if (hit) return hit;
+      }
+    } catch (e) {}
   }
   return null;
+};
+const collectDeep = (root, predicate, out = [], visited = new Set()) => {
+  if (!root || visited.has(root)) return out;
+  visited.add(root);
+  const all = root.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (!visited.has(el)) {
+      visited.add(el);
+      if (predicate(el)) out.push(el);
+    }
+    if (el.shadowRoot) collectDeep(el.shadowRoot, predicate, out, visited);
+    try {
+      const tag = el.tagName;
+      if ((tag === 'IFRAME' || tag === 'FRAME') && el.contentDocument)
+        collectDeep(el.contentDocument, predicate, out, visited);
+    } catch (e) {}
+  }
+  return out;
 };
 const resolveTarget = (cfg) => {
   if (cfg.ref) {
@@ -6203,8 +6232,9 @@ if (res.error) return { error: res.error };
 const el = res.el;
 if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'nearest' });
 if (typeof el.focus === 'function') el.focus();
+const win = getOwnerWindow(el);
 for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup'])
-  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: win }));
 el.click();
 return { clicked: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref)), tag: (el.tagName || '').toLowerCase() };
 )JS"sv);
@@ -6274,17 +6304,18 @@ if (typeof el.focus === 'function') el.focus();
 if (el.isContentEditable) {
   const prev = cfg.clear ? '' : (el.textContent || '');
   el.textContent = prev + String(cfg.text || '');
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 } else {
+  const win = getOwnerWindow(el);
   const prev = cfg.clear ? '' : (el.value !== undefined ? String(el.value) : '');
   const next = prev + String(cfg.text || '');
-  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement?.prototype : window.HTMLInputElement?.prototype;
+  const proto = el.tagName === 'TEXTAREA' ? win.HTMLTextAreaElement?.prototype : win.HTMLInputElement?.prototype;
   const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
   if (desc && typeof desc.set === 'function') desc.set.call(el, next);
   else el.value = next;
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 }
 return { typed: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref)) };
 )JS"sv);
@@ -6365,7 +6396,8 @@ const cfg = arguments[0] || {};
 const maxElements = Math.max(1, Math.min(500, Number(cfg.max_elements || 150)));
 const isVisible = (el) => {
   if (!el || el.nodeType !== 1) return false;
-  const style = window.getComputedStyle(el);
+  const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+  const style = win.getComputedStyle(el);
   if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const r = el.getBoundingClientRect();
   return r.width > 0 && r.height > 0;
@@ -6399,7 +6431,10 @@ const getLabelText = (el) => {
   if (aria) return aria;
   if (el.id) {
     try {
-      const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+      const rootNode = typeof el.getRootNode === 'function' ? el.getRootNode() : null;
+      const scope = (rootNode && typeof rootNode.querySelector === 'function') ? rootNode : (el.ownerDocument || document);
+      const lbl = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]')
+        || ((el.ownerDocument && scope !== el.ownerDocument) ? el.ownerDocument.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
       if (lbl && lbl.textContent) return lbl.textContent.trim().slice(0, 120);
     } catch (e) {}
   }
@@ -6411,7 +6446,7 @@ const getLabelText = (el) => {
 const elements = [];
 const refs = Object.create(null);
 const visited = new Set();
-const walk = (root, inShadow) => {
+const walk = (root, inShadow, inIframe, offsetX, offsetY) => {
   if (!root || elements.length >= maxElements) return;
   const nodes = root.querySelectorAll('*');
   for (let i = 0; i < nodes.length && elements.length < maxElements; i++) {
@@ -6427,7 +6462,7 @@ const walk = (root, inShadow) => {
           tag: (el.tagName || '').toLowerCase(),
           role: inferRole(el),
           text: getLabelText(el),
-          bounds: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+          bounds: { x: Math.round(r.x + offsetX), y: Math.round(r.y + offsetY), width: Math.round(r.width), height: Math.round(r.height) },
           disabled: !!el.disabled
         };
         if (el.id) item.id = el.id;
@@ -6438,14 +6473,22 @@ const walk = (root, inShadow) => {
         const href = el.getAttribute('href');
         if (href) item.href = href.slice(0, 180);
         if (inShadow) item.shadow_dom = true;
+        if (inIframe) item.iframe = true;
         elements.push(item);
       }
     }
     if (el.shadowRoot && elements.length < maxElements)
-      walk(el.shadowRoot, true);
+      walk(el.shadowRoot, true, inIframe, offsetX, offsetY);
+    try {
+      const tag = el.tagName;
+      if ((tag === 'IFRAME' || tag === 'FRAME') && el.contentDocument && elements.length < maxElements) {
+        const fr = el.getBoundingClientRect();
+        walk(el.contentDocument, inShadow, true, offsetX + fr.left, offsetY + fr.top);
+      }
+    } catch (e) {}
   }
 };
-walk(document, false);
+walk(document, false, false, 0, 0);
 window.__ladybirdMcpRefs = refs;
 const out = {
   url: window.location.href,
@@ -6513,7 +6556,7 @@ if (cfg.ref || cfg.selector) {
   if (typeof el.focus === 'function') el.focus();
 }
 if (!el) return { error: 'No active element' };
-const init = { key: cfg.key, bubbles: true, cancelable: true };
+const init = { key: cfg.key, bubbles: true, cancelable: true, composed: true, view: getOwnerWindow(el) };
 const ok = el.dispatchEvent(new KeyboardEvent('keydown', init));
 if (cfg.key === 'Enter' || cfg.key.length === 1)
   el.dispatchEvent(new KeyboardEvent('keypress', init));
@@ -6585,8 +6628,9 @@ if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center'
 const r = el.getBoundingClientRect();
 const cx = Math.round(r.left + r.width / 2);
 const cy = Math.round(r.top + r.height / 2);
+const win = getOwnerWindow(el);
 for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove'])
-  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window }));
+  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, view: win }));
 return { hovered: true, tag: (el.tagName || '').toLowerCase() };
 )JS"sv);
 
@@ -7057,8 +7101,8 @@ if (cfg.value !== undefined) {
 }
 if (matchedIdx < 0) return { error: 'No matching <option> found in <select>' };
 el.selectedIndex = matchedIdx;
-el.dispatchEvent(new Event('input', { bubbles: true }));
-el.dispatchEvent(new Event('change', { bubbles: true }));
+el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 const chosen = opts[matchedIdx];
 return { selected: true, selected_index: matchedIdx, selected_value: chosen.value, selected_label: (chosen.label || chosen.textContent || '').trim() };
 )JS"sv);
@@ -8004,20 +8048,34 @@ const isVisibleInput = (el) => {
   if (!el || el.nodeType !== 1 || el.disabled || el.readOnly) return false;
   const tag = (el.tagName || '').toLowerCase();
   if (tag !== 'input' && tag !== 'textarea') return false;
-  const style = window.getComputedStyle(el);
+  const style = getOwnerWindow(el).getComputedStyle(el);
   if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const r = el.getBoundingClientRect();
   return r.width > 0 && r.height > 0;
 };
-const resolveFieldTarget = (kind, ref, selector) => {
+const isSameOriginElement = (el, expectedOrigin) => {
+  if (!expectedOrigin) return true;
+  try {
+    const loc = el && el.ownerDocument && el.ownerDocument.location;
+    return !loc || loc.origin === expectedOrigin;
+  } catch (e) {
+    return false;
+  }
+};
+const resolveFieldTarget = (kind, ref, selector, expectedOrigin = window.location.origin) => {
   if (ref || selector) {
     const res = resolveTarget({ ref, selector });
     if (res.error) return res;
     if (!res.el || (res.el.tagName || '').toLowerCase() !== 'input')
       return { error: 'Vault target must be an <input> element' };
+    if (!isSameOriginElement(res.el, expectedOrigin))
+      return { error: 'Target element origin does not match expected credential origin' };
     return { el: res.el };
   }
-  const inputs = Array.from(document.querySelectorAll('input')).filter(isVisibleInput);
+  const inputs = collectDeep(document, (el) =>
+    (el.tagName || '').toLowerCase() === 'input'
+    && isVisibleInput(el)
+    && isSameOriginElement(el, expectedOrigin));
   if (kind === 'password') {
     const pw = inputs.find(el => (el.type || '').toLowerCase() === 'password');
     return pw ? { el: pw } : { error: 'No visible <input type="password"> found' };
@@ -8042,7 +8100,8 @@ const validateFormAction = (el, allowedOrigins) => {
   const rawAction = form.getAttribute('action');
   if (!rawAction || !rawAction.trim()) return { ok: true };
   try {
-    const actionUrl = new URL(rawAction, window.location.href);
+    const baseHref = (el.ownerDocument && el.ownerDocument.location && el.ownerDocument.location.href) || window.location.href;
+    const actionUrl = new URL(rawAction, baseHref);
     if (!allowedOrigins.includes(actionUrl.origin))
       return { error: 'Form action origin "' + actionUrl.origin + '" is not in credential allowed_origins' };
     return { ok: true };
@@ -8052,11 +8111,13 @@ const validateFormAction = (el, allowedOrigins) => {
 };
 const setNativeInputValue = (el, value) => {
   if (typeof el.focus === 'function') el.focus();
-  const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  const win = getOwnerWindow(el);
+  const proto = el.tagName === 'TEXTAREA' ? win.HTMLTextAreaElement?.prototype : win.HTMLInputElement?.prototype;
+  const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
   if (desc && typeof desc.set === 'function') desc.set.call(el, value);
   else el.value = value;
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 };
 )JS"sv;
 
@@ -8290,7 +8351,7 @@ if (cfg.submit_ref || cfg.submit_selector) {
   else
     submitAnchor.form.submit();
 } else if (submitAnchor) {
-  const enterInit = { key: 'Enter', bubbles: true, cancelable: true };
+  const enterInit = { key: 'Enter', bubbles: true, cancelable: true, composed: true, view: getOwnerWindow(submitAnchor) };
   submitAnchor.dispatchEvent(new KeyboardEvent('keydown', enterInit));
   submitAnchor.dispatchEvent(new KeyboardEvent('keyup', enterInit));
 }

@@ -146,10 +146,26 @@ CORSSettingAttribute cors_setting_from_preload_scanner(RustFfiPreloadScannerCors
     VERIFY_NOT_REACHED();
 }
 
-void issue_speculative_fetch(JS::Realm& realm, DOM::Document& document, URL::URL url, Optional<Fetch::Infrastructure::Request::Destination> destination, CORSSettingAttribute cors_setting)
+Utf16String utf16_string_from_preload_scanner(RustFfiHtmlUtf16View view)
 {
-    auto request = create_potential_CORS_request(url, destination, cors_setting);
+    return Utf16String::from_utf16(utf16_view_from_ffi(view));
+}
+
+void issue_speculative_fetch(JS::Realm& realm, DOM::Document& document, URL::URL url, RustFfiPreloadScannerEntry const& entry)
+{
+    auto destination = destination_from_preload_scanner(entry.destination);
+    auto request = create_potential_CORS_request(url, destination, cors_setting_from_preload_scanner(entry.cors_setting));
     request->set_client(document.relevant_settings_object().address());
+    if (auto nonce = utf16_string_from_preload_scanner(entry.nonce); !nonce.is_empty())
+        request->set_cryptographic_nonce_metadata(move(nonce));
+    if (entry.integrity_present)
+        request->set_integrity_metadata(utf16_string_from_preload_scanner(entry.integrity));
+    if (auto referrer_policy = ReferrerPolicy::from_string(utf16_string_from_preload_scanner(entry.referrer_policy)); referrer_policy.has_value())
+        request->set_referrer_policy(*referrer_policy);
+    if (auto priority = Fetch::Infrastructure::request_priority_from_string(utf16_string_from_preload_scanner(entry.fetch_priority)); priority.has_value())
+        request->set_priority(*priority);
+    if (destination == Fetch::Infrastructure::Request::Destination::Script)
+        request->set_parser_metadata(Fetch::Infrastructure::Request::ParserMetadata::ParserInserted);
 
     // AD-HOC: The spec expects caching rules, which are not yet fully specified, to stop the normal parser from fetching
     //         the same resource again. A response the HTTP cache can't store would be fetched twice, so once the
@@ -196,11 +212,6 @@ void issue_speculative_fetch(JS::Realm& realm, DOM::Document& document, URL::URL
     // The fetch stays alive via ResourceLoader's GC::Root callbacks for the duration of the
     // network request, so we don't need to retain the FetchController.
     (void)Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
-}
-
-Utf16String utf16_string_from_preload_scanner(RustFfiHtmlUtf16View view)
-{
-    return Utf16String::from_utf16(utf16_view_from_ffi(view));
 }
 
 bool media_attribute_matches_environment(DOM::Document const& document, RustFfiPreloadScannerEntry const& entry)
@@ -323,7 +334,7 @@ void SpeculativeHTMLParser::process_preload_scanner_entry(RustFfiPreloadScannerE
     else if (entry.action == RustFfiPreloadScannerAction::ModuleScript)
         issue_speculative_module_script_fetch(*m_document, *url, entry);
     else
-        issue_speculative_fetch(m_document->relevant_settings_object().realm(), *m_document, *url, destination_from_preload_scanner(entry.destination), cors_setting_from_preload_scanner(entry.cors_setting));
+        issue_speculative_fetch(m_document->relevant_settings_object().realm(), *m_document, *url, entry);
 }
 
 }

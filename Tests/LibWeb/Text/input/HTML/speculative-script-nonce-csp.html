@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-ladybird-test-nonce' 'strict-dynamic'">
+<script src="../include.js" nonce="ladybird-test-nonce"></script>
+<script nonce="ladybird-test-nonce">
+    window.__cspViolations = 0;
+    document.addEventListener("securitypolicyviolation", () => {
+        window.__cspViolations++;
+    });
+</script>
+<script nonce="ladybird-test-nonce" src="data:text/javascript,window.__ran=true"></script>
+<script nonce="ladybird-test-nonce">
+    test(() => {
+        println("script ran: " + (window.__ran === true));
+        println("csp violations: " + window.__cspViolations);
+    });
+</script>
