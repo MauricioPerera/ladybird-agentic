@@ -9,6 +9,19 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": [
+        "https://mail.google.com/*",
+        "https://calendar.google.com/*",
+        "https://docs.google.com/*",
+        "https://drive.google.com/*",
+        "https://studio.youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*",
+        "https://mail.yahoo.com/*",
+        "https://web.whatsapp.com/*"
+      ],
       "css": ["content.css"],
       "js": ["content.js"],
       "run_at": "document_idle"

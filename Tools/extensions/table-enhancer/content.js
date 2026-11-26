@@ -1,4 +1,34 @@
 (function () {
+  var DEFAULT_EXCLUDED_HOSTS = new Set([
+    "mail.google.com",
+    "calendar.google.com",
+    "docs.google.com",
+    "drive.google.com",
+    "studio.youtube.com",
+    "www.youtube.com",
+    "outlook.live.com",
+    "outlook.office.com",
+    "outlook.office365.com",
+    "mail.yahoo.com",
+    "web.whatsapp.com",
+  ]);
+
+  if (typeof window !== "undefined" && window.location && DEFAULT_EXCLUDED_HOSTS.has(String(window.location.hostname || "").toLowerCase())) {
+    return;
+  }
+
+  var NON_DATA_ROLES = new Set([
+    "presentation",
+    "none",
+    "grid",
+    "treegrid",
+    "listbox",
+    "menu",
+    "menubar",
+    "tablist",
+    "application",
+  ]);
+
   function parseComparable(raw) {
     var s = (raw || "").trim();
     var lower = s.toLowerCase();
@@ -46,16 +76,55 @@
     return false;
   }
 
+  function resolveSemanticHeaderRow(table) {
+    if (table.tHead && table.tHead.rows && table.tHead.rows.length > 0) {
+      var headRow = table.tHead.rows[0];
+      if (!headRow || !headRow.cells || headRow.cells.length < 2) return null;
+      var nonEmptyHead = Array.from(headRow.cells).filter(function (c) {
+        return getHeaderText(c).length > 0;
+      });
+      return nonEmptyHead.length >= 2 ? headRow : null;
+    }
+
+    var firstRow = (table.rows && table.rows[0]) || table.querySelector("tr");
+    if (!firstRow || !firstRow.cells || firstRow.cells.length < 2) return null;
+
+    var cells = Array.from(firstRow.cells);
+    var thCells = cells.filter(function (c) {
+      return c.tagName === "TH";
+    });
+    if (thCells.length < 2 || thCells.length * 2 < cells.length) return null;
+
+    var nonEmptyTh = thCells.filter(function (c) {
+      return getHeaderText(c).length > 0;
+    });
+    return nonEmptyTh.length >= 2 ? firstRow : null;
+  }
+
   function enhanceTable(table, minRows) {
     if (!table || table.dataset.ladybirdEnhanced === "1") return;
     if (table.closest(".ladybird-tbl-toolbar")) return;
 
-    var tbody = table.tBodies && table.tBodies[0] ? table.tBodies[0] : null;
-    var rows = tbody ? Array.from(tbody.rows) : Array.from(table.querySelectorAll("tr")).slice(1);
-    if (rows.length < minRows) return;
+    var role = String(table.getAttribute("role") || "").trim().toLowerCase();
+    if (role && NON_DATA_ROLES.has(role)) return;
+    if (table.closest('[contenteditable="true"], [role="textbox"], [role="dialog"], [role="menu"]')) return;
 
-    var headerRow = (table.tHead && table.tHead.rows[0]) ? table.tHead.rows[0] : table.querySelector("tr");
-    if (!headerRow || headerRow.cells.length < 2) return;
+    var headerRow = resolveSemanticHeaderRow(table);
+    if (!headerRow) return;
+
+    var tbody = table.tBodies && table.tBodies[0] ? table.tBodies[0] : null;
+    var getBodyRows = function () {
+      var raw = tbody
+        ? Array.from(tbody.rows)
+        : Array.from(table.rows || table.querySelectorAll("tr")).filter(function (r) {
+            return !table.tHead || !table.tHead.contains(r);
+          });
+      return raw.filter(function (r) {
+        return r !== headerRow;
+      });
+    };
+    var rows = getBodyRows();
+    if (rows.length < minRows) return;
 
     table.dataset.ladybirdEnhanced = "1";
     rows.forEach(function (r, idx) {
@@ -120,10 +189,6 @@
       ? table.parentElement
       : table;
     anchor.parentNode.insertBefore(toolbar, anchor);
-
-    var getBodyRows = function () {
-      return tbody ? Array.from(tbody.rows) : Array.from(table.querySelectorAll("tr")).slice(1);
-    };
 
     var applyFilter = function () {
       var rawQuery = filterInput.value.trim();
@@ -240,12 +305,14 @@
         out.push(cols.join(","));
       });
       var blob = new Blob([out.join("\n")], { type: "text/csv;charset=utf-8;" });
+      var url = URL.createObjectURL(blob);
       var a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
+      a.href = url;
       a.download = "table-export.csv";
       document.body.appendChild(a);
       a.click();
       a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     });
   }
 
