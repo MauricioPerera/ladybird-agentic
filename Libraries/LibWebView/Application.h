@@ -191,6 +191,7 @@ public:
     void appearance_changed(Badge<ApplicationSettingsObserver>);
     void tab_settings_changed(Badge<ApplicationSettingsObserver>);
     void languages_changed(Badge<ApplicationSettingsObserver>);
+    void user_agent_preset_changed(Badge<ApplicationSettingsObserver>);
 
     // The spoofing choices in effect: what every page and worker reports from its navigator.
     String user_agent_string() const;
@@ -584,6 +585,7 @@ private:
     void schedule_permission_expiry();
 
     void initialize_page_options();
+    void apply_user_agent_string(String);
 
     WebDriverBrowserConnection* webdriver_browser_connection();
 

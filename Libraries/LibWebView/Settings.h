@@ -205,6 +205,7 @@ public:
     virtual void autoplay_settings_changed() { }
     virtual void permission_settings_changed(Web::Permissions::PermissionName) { }
     virtual void global_privacy_control_changed() { }
+    virtual void user_agent_preset_changed() { }
     virtual void crash_report_sending_changed() { }
     virtual void dns_settings_changed() { }
     virtual void config_variable_changed(ConfigVariableID) { }
@@ -238,6 +239,7 @@ struct WEBVIEW_API SettingsData {
     HashMap<Web::Permissions::PermissionName, PermissionPolicy> m_permission_policies;
 
     GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
+    Optional<String> m_user_agent_preset;
     CrashReportSending m_crash_report_sending { CrashReportSending::AskMe };
 
     bool m_background_networking_enabled { true };
@@ -350,6 +352,9 @@ public:
 
     GlobalPrivacyControl global_privacy_control() const { return m_global_privacy_control; }
     void set_global_privacy_control(GlobalPrivacyControl);
+
+    Optional<String> const& user_agent_preset() const { return m_user_agent_preset; }
+    void set_user_agent_preset(Optional<String>);
 
     CrashReportSending crash_report_sending() const { return m_crash_report_sending; }
     void set_crash_report_sending(CrashReportSending);

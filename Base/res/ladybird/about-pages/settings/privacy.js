@@ -23,10 +23,25 @@ const clearBrowsingDataSiteDataSize = document.querySelector("#clear-browsing-da
 const clearBrowsingDataTimeRange = document.querySelector("#clear-browsing-data-time-range");
 
 const globalPrivacyControlToggle = document.querySelector("#global-privacy-control-toggle");
+const userAgentPresetSelect = document.querySelector("#user-agent-preset");
 
 function loadSettings(settings) {
     if (Object.hasOwn(settings, "globalPrivacyControl")) {
         globalPrivacyControlToggle.checked = settings.globalPrivacyControl;
+    }
+    if (userAgentPresetSelect && Array.isArray(settings.availableUserAgentPresets)) {
+        userAgentPresetSelect.innerHTML = "";
+        const defaultOption = document.createElement("option");
+        defaultOption.value = "";
+        defaultOption.textContent = "Default (Ladybird)";
+        userAgentPresetSelect.appendChild(defaultOption);
+        for (const preset of settings.availableUserAgentPresets) {
+            const opt = document.createElement("option");
+            opt.value = preset;
+            opt.textContent = preset;
+            userAgentPresetSelect.appendChild(opt);
+        }
+        userAgentPresetSelect.value = settings.userAgentPreset || "";
     }
 }
 
@@ -114,6 +129,12 @@ clearBrowsingDataRemoveData.addEventListener("click", () => {
 globalPrivacyControlToggle.addEventListener("change", () => {
     ladybird.sendMessage("setGlobalPrivacyControl", globalPrivacyControlToggle.checked);
 });
+
+if (userAgentPresetSelect) {
+    userAgentPresetSelect.addEventListener("change", () => {
+        ladybird.sendMessage("setUserAgentPreset", userAgentPresetSelect.value);
+    });
+}
 
 document.addEventListener("WebUILoaded", estimateBrowsingDataSizes);
 

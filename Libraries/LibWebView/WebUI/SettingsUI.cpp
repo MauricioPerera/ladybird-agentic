@@ -20,6 +20,7 @@
 #include <LibWebView/DefaultBrowser.h>
 #include <LibWebView/PermissionManager.h>
 #include <LibWebView/SearchEngine.h>
+#include <LibWebView/UserAgent.h>
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebUI/SettingsUI.h>
 
@@ -198,6 +199,9 @@ void SettingsUI::register_interfaces()
     register_interface("setGlobalPrivacyControl"sv, [this](auto const& data) {
         set_global_privacy_control(data);
     });
+    register_interface("setUserAgentPreset"sv, [this](auto const& data) {
+        set_user_agent_preset(data);
+    });
     register_interface("setCrashReportSending"sv, [this](auto const& data) {
         set_crash_report_sending(data);
     });
@@ -245,6 +249,11 @@ JsonObject SettingsUI::serialize_settings() const
     auto settings = move(settings_json.as_object());
 
     settings.set("defaultNewTabPageURL"sv, Settings::default_new_tab_page_url().serialize());
+
+    JsonArray available_ua_presets;
+    for (auto const& entry : WebView::user_agents)
+        available_ua_presets.must_append(entry.key);
+    settings.set("availableUserAgentPresets"sv, move(available_ua_presets));
 
     switch (Application::the().default_browser().status()) {
     case DefaultBrowserStatus::Unknown:
@@ -732,6 +741,18 @@ void SettingsUI::set_global_privacy_control(JsonValue const& global_privacy_cont
         return;
 
     Application::settings().set_global_privacy_control(global_privacy_control.as_bool() ? GlobalPrivacyControl::Yes : GlobalPrivacyControl::No);
+}
+
+void SettingsUI::set_user_agent_preset(JsonValue const& preset)
+{
+    if (!preset.is_string())
+        return;
+
+    auto value = preset.as_string();
+    if (value.is_empty())
+        Application::settings().set_user_agent_preset({});
+    else
+        Application::settings().set_user_agent_preset(move(value));
 }
 
 void SettingsUI::crash_reports_changed()

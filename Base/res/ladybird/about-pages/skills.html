@@ -536,7 +536,18 @@
                         <div class="filter-row" style="margin-top: 4px;">
                             <button type="button" class="chip-btn" data-quick-pattern="https://www.youtube.com/*">+ youtube.com</button>
                             <button type="button" class="chip-btn" data-quick-pattern="https://studio.youtube.com/*">+ studio.youtube.com</button>
+                            <button type="button" class="chip-btn" data-quick-pattern="https://www.google.com/maps*">+ google.com/maps</button>
+                            <button type="button" class="chip-btn" data-quick-pattern="https://www.google.com/*">+ google.com</button>
+                            <button type="button" class="chip-btn" data-quick-pattern="https://www.linkedin.com/*">+ linkedin.com</button>
                             <button type="button" class="chip-btn" data-quick-pattern="*">+ * (All pages)</button>
+                        </div>
+                        <div class="filter-row" style="margin-top: 6px;">
+                            <span class="muted" style="font-size: 11px; align-self: center; margin-right: 4px;">Starter templates:</span>
+                            <button type="button" class="chip-btn" data-starter-template="youtube">YouTube</button>
+                            <button type="button" class="chip-btn" data-starter-template="youtube-studio">YouTube Studio</button>
+                            <button type="button" class="chip-btn" data-starter-template="google-maps">Google Maps</button>
+                            <button type="button" class="chip-btn" data-starter-template="google-search">Google Search</button>
+                            <button type="button" class="chip-btn" data-starter-template="linkedin">LinkedIn</button>
                         </div>
                     </div>
 
@@ -1054,9 +1065,67 @@
                 });
             });
 
+            const STARTER_TEMPLATES = {
+                "youtube": {
+                    name: "youtube-navigation",
+                    description: "Navigate YouTube feeds, Polymer Shadow DOM controls, search, and video playback.",
+                    matches: ["https://www.youtube.com/*"],
+                    body: "# YouTube Agent Guide\n\n1. Wait briefly for Polymer hydration if skeleton cards appear, then call `get_page_snapshot` (which traverses Shadow DOM).\n2. Search via the Search input `@eN` ref or navigate directly to `https://www.youtube.com/results?search_query=<encoded_query>`.\n3. Use `scroll_page` down to hydrate lazy thumbnails below the fold.\n4. Playback shortcuts via `press_key` on the watch page: `k` or `Space` (play/pause), `m` (mute), `f` (fullscreen), `l`/`j` (±10s)."
+                },
+                "youtube-studio": {
+                    name: "youtube-studio",
+                    description: "Manage YouTube Studio (`ytcp-*` Shadow DOM components) and authenticate blindly via about:vault.",
+                    matches: ["https://studio.youtube.com/*"],
+                    body: "# YouTube Studio Agent Guide\n\n1. Use `get_page_snapshot` to inspect `ytcp-*` custom elements inside Shadow DOM.\n2. Authenticate via `matching_credentials` + `login_with_credential` when prompted (never ask for raw passwords).\n3. Confirm with the user before publishing, deleting, or changing video visibility/monetization."
+                },
+                "google-maps": {
+                    name: "google-maps-navigation",
+                    description: "Operate Google Maps reliably via search/directions URLs and the DOM side panel (map canvas has no DOM pins).",
+                    matches: ["https://www.google.com/maps*"],
+                    body: "# Google Maps Agent Guide\n\n1. The interactive map is rendered inside `<canvas>`, so map pins do not appear as `@eN` DOM refs.\n2. Jump directly with `navigate`: `https://www.google.com/maps/search/<encoded_query>` or `https://www.google.com/maps/dir/<origin>/<destination>`.\n3. Read place names, ratings, addresses, hours, and reviews from the left DOM sidebar using `get_page_snapshot` (with `include_text: true`).\n4. Extract coordinates from `window.location.href` using the `@lat,lng,zoom` segment."
+                },
+                "google-search": {
+                    name: "google-search",
+                    description: "Search Google cleanly, dismiss Chrome promo dialogs, and read organic results.",
+                    matches: ["https://www.google.com/*"],
+                    body: "# Google Search Agent Guide\n\n1. If a 'Choose Chrome' / promo dialog blocks controls, dismiss it ('No usar Chrome' / 'No thanks') via `get_page_snapshot` + `click`.\n2. Run direct queries with `navigate` (`https://www.google.com/search?q=<encoded_query>`) or type into the search box `@eN` and press Enter.\n3. Parse titles, URLs, and snippets via `get_page_snapshot` (`include_text: true`)."
+                },
+                "linkedin": {
+                    name: "linkedin-navigation",
+                    description: "Authenticate blindly with Vault, browse LinkedIn feed/jobs/messaging, and escalate checkpoints.",
+                    matches: ["https://www.linkedin.com/*"],
+                    body: "# LinkedIn Agent Guide\n\n1. If redirected to login, inspect `matching_credentials` and call `login_with_credential` (or `fill_credential`).\n2. Once quarantined after password/TOTP injection, wait for navigation to `/feed/` before calling read tools.\n3. Use `get_page_snapshot` for feed, search, jobs, and messaging interactions.\n4. If a verification checkpoint or CAPTCHA appears, stop and ask the user to solve it directly."
+                }
+            };
+
+            function loadStarterTemplate(key) {
+                const tpl = STARTER_TEMPLATES[key];
+                if (!tpl) return;
+                selectedSkillName = null;
+                draft = {
+                    name: tpl.name,
+                    description: tpl.description,
+                    enabled: true,
+                    matches: [...tpl.matches],
+                    body: tpl.body,
+                    supportingFiles: []
+                };
+                isDirty = true;
+                renderSkillList();
+                renderEditor();
+                setEditorTab("editor");
+                showBanner(`Loaded '${tpl.name}' template. Review and click Save Skill.`, false);
+            }
+
             document.querySelectorAll("[data-quick-pattern]").forEach(btn => {
                 btn.addEventListener("click", () => {
                     appendPatternToEditor(btn.getAttribute("data-quick-pattern"));
+                });
+            });
+
+            document.querySelectorAll("[data-starter-template]").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    loadStarterTemplate(btn.getAttribute("data-starter-template"));
                 });
             });
 

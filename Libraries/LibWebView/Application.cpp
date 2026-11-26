@@ -164,6 +164,11 @@ struct ApplicationSettingsObserver final : public SettingsObserver {
         Application::the().languages_changed({});
     }
 
+    virtual void user_agent_preset_changed() override
+    {
+        Application::the().user_agent_preset_changed({});
+    }
+
     virtual void dns_settings_changed() override
     {
         Application::request_server_manager().dns_settings_changed();
@@ -3146,9 +3151,15 @@ NonnullRefPtr<Core::Promise<Empty>> Application::clear_browsing_data(ClearBrowsi
 
 void Application::initialize_page_options()
 {
-    m_user_agent_string = MUST(String::from_utf8(m_web_content_options.user_agent_preset.has_value()
-            ? *WebView::user_agents.get(*m_web_content_options.user_agent_preset)
-            : Web::default_user_agent));
+    StringView resolved_ua = Web::default_user_agent;
+    if (m_web_content_options.user_agent_preset.has_value()) {
+        if (auto preset_ua = WebView::user_agents.get(*m_web_content_options.user_agent_preset); preset_ua.has_value())
+            resolved_ua = *preset_ua;
+    } else if (auto const& saved_preset = settings().user_agent_preset(); saved_preset.has_value()) {
+        if (auto preset_ua = WebView::user_agents.get(*saved_preset); preset_ua.has_value())
+            resolved_ua = *preset_ua;
+    }
+    m_user_agent_string = MUST(String::from_utf8(resolved_ua));
     m_scripting_enabled = m_browser_options.disable_scripting == DisableScripting::No;
     m_blocks_pop_ups = m_browser_options.allow_popups == AllowPopups::No;
     update_website_color_scheme();
@@ -3196,7 +3207,7 @@ void Application::platform_motion_preference_changed()
     });
 }
 
-void Application::set_user_agent_string(String user_agent)
+void Application::apply_user_agent_string(String user_agent)
 {
     m_user_agent_string = move(user_agent);
 
@@ -3208,6 +3219,35 @@ void Application::set_user_agent_string(String user_agent)
         view.debug_request("clear-cache"sv); // Clear the cache to ensure requests are re-done with the new value.
         return IterationDecision::Continue;
     });
+}
+
+void Application::set_user_agent_string(String user_agent)
+{
+    apply_user_agent_string(move(user_agent));
+
+    if (m_user_agent_string == Web::default_user_agent) {
+        settings().set_user_agent_preset({});
+        return;
+    }
+    for (auto const& entry : WebView::user_agents) {
+        if (m_user_agent_string == entry.value) {
+            settings().set_user_agent_preset(String::from_utf8_without_validation(entry.key.bytes()));
+            return;
+        }
+    }
+}
+
+void Application::user_agent_preset_changed(Badge<ApplicationSettingsObserver>)
+{
+    if (m_web_content_options.user_agent_preset.has_value())
+        return;
+
+    StringView resolved_ua = Web::default_user_agent;
+    if (auto const& saved_preset = settings().user_agent_preset(); saved_preset.has_value()) {
+        if (auto preset_ua = WebView::user_agents.get(*saved_preset); preset_ua.has_value())
+            resolved_ua = *preset_ua;
+    }
+    apply_user_agent_string(MUST(String::from_utf8(resolved_ua)));
 }
 
 void Application::set_navigator_compatibility_mode(Web::NavigatorCompatibilityMode mode)

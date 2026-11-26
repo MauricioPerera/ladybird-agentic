@@ -21,6 +21,7 @@
 #include <LibWebCommon/Loader/UserAgent.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Settings.h>
+#include <LibWebView/UserAgent.h>
 #include <LibWebView/Utilities.h>
 
 namespace WebView {
@@ -84,6 +85,7 @@ static constexpr auto SITE_SETTING_SITE_FILTERS_KEY = "siteFilters"sv;
 static constexpr auto AUTOPLAY_KEY = "autoplay"sv;
 
 static constexpr auto GLOBAL_PRIVACY_CONTROL_KEY = "globalPrivacyControl"sv;
+static constexpr auto USER_AGENT_PRESET_KEY = "userAgentPreset"sv;
 static constexpr auto CRASH_REPORT_SENDING_KEY = "crashReportSending"sv;
 
 static constexpr auto BACKGROUND_NETWORKING_KEY = "backgroundNetworking"sv;
@@ -540,6 +542,12 @@ void Settings::load_from_json(JsonValue const& json_value)
     if (auto global_privacy_control = json.get_bool(GLOBAL_PRIVACY_CONTROL_KEY); global_privacy_control.has_value())
         m_global_privacy_control = *global_privacy_control ? GlobalPrivacyControl::Yes : GlobalPrivacyControl::No;
 
+    m_user_agent_preset.clear();
+    if (auto preset = json.get_string(USER_AGENT_PRESET_KEY); preset.has_value() && !preset->is_empty()) {
+        if (auto normalized = normalize_user_agent_name(*preset); normalized.has_value())
+            m_user_agent_preset = String::from_utf8_without_validation(normalized->bytes());
+    }
+
     if (auto crash_report_sending = json.get_string(CRASH_REPORT_SENDING_KEY); crash_report_sending.has_value())
         m_crash_report_sending = crash_report_sending_from_string(*crash_report_sending);
 
@@ -652,6 +660,7 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
     auto search_engine_settings_changed = changed(SEARCH_ENGINE_KEY);
     auto autoplay_settings_changed = changed(AUTOPLAY_KEY);
     auto global_privacy_control_changed = changed(GLOBAL_PRIVACY_CONTROL_KEY);
+    auto user_agent_preset_changed = changed(USER_AGENT_PRESET_KEY);
     auto crash_report_sending_changed = changed(CRASH_REPORT_SENDING_KEY);
     auto dns_settings_changed = changed(DNS_SETTINGS_KEY);
     auto background_networking_settings_changed = changed(BACKGROUND_NETWORKING_KEY);
@@ -686,6 +695,8 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
             observer.permission_settings_changed(name);
         if (global_privacy_control_changed)
             observer.global_privacy_control_changed();
+        if (user_agent_preset_changed)
+            observer.user_agent_preset_changed();
         if (crash_report_sending_changed)
             observer.crash_report_sending_changed();
         if (dns_settings_changed)
@@ -941,6 +952,7 @@ JsonValue Settings::serialize_json() const
     }
 
     settings.set(GLOBAL_PRIVACY_CONTROL_KEY, m_global_privacy_control == GlobalPrivacyControl::Yes);
+    settings.set(USER_AGENT_PRESET_KEY, m_user_agent_preset.has_value() ? JsonValue { *m_user_agent_preset } : JsonValue { String {} });
     settings.set(CRASH_REPORT_SENDING_KEY, crash_report_sending_to_string(m_crash_report_sending));
 
     JsonObject background_network_features;
@@ -1522,6 +1534,26 @@ void Settings::set_global_privacy_control(GlobalPrivacyControl global_privacy_co
 
     for (auto& observer : m_observers)
         observer.global_privacy_control_changed();
+}
+
+void Settings::set_user_agent_preset(Optional<String> preset)
+{
+    Optional<String> normalized_value;
+    if (preset.has_value() && !preset->is_empty()) {
+        auto normalized = normalize_user_agent_name(*preset);
+        if (!normalized.has_value())
+            return;
+        normalized_value = String::from_utf8_without_validation(normalized->bytes());
+    }
+
+    if (m_user_agent_preset == normalized_value)
+        return;
+
+    m_user_agent_preset = move(normalized_value);
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.user_agent_preset_changed();
 }
 
 void Settings::set_crash_report_sending(CrashReportSending crash_report_sending)

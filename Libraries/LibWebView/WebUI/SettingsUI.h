@@ -55,6 +55,7 @@ private:
     virtual void search_engine_settings_changed() override { broadcast_settings_change(); }
     virtual void autoplay_settings_changed() override { broadcast_settings_change(); }
     virtual void global_privacy_control_changed() override { broadcast_settings_change(); }
+    virtual void user_agent_preset_changed() override { broadcast_settings_change(); }
     virtual void crash_report_sending_changed() override { broadcast_settings_change(); }
     virtual void crash_reports_changed() override;
     virtual void dns_settings_changed() override { broadcast_settings_change(); }
@@ -98,6 +99,7 @@ private:
     void estimate_browsing_data_sizes(JsonValue const&);
     void clear_browsing_data(JsonValue const&);
     void set_global_privacy_control(JsonValue const&);
+    void set_user_agent_preset(JsonValue const&);
     void set_crash_report_sending(JsonValue const&);
 
     void set_services_network_access_enabled(JsonValue const&);

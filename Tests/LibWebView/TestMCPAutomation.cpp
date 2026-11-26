@@ -26,6 +26,7 @@
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
+#include <LibWebView/Settings.h>
 #include <LibWebView/Skills/SkillStore.h>
 #include <LibWebView/Skills/SkillTypes.h>
 #include <LibWebView/Utilities.h>
@@ -2223,4 +2224,35 @@ TEST_CASE(mcp_security_policy_guards)
     EXPECT(WebView::mcp_resolve_container_against_policy("personal"_string, policy).is_error());
     EXPECT(WebView::mcp_container_is_allowed_by_policy("agent"sv, policy));
     EXPECT(!WebView::mcp_container_is_allowed_by_policy(""sv, policy));
+}
+
+TEST_CASE(settings_user_agent_preset_roundtrip)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+    auto settings_path = LexicalPath::join(temp_dir, "settings.json"sv).string();
+
+    {
+        auto settings = WebView::Settings::create(settings_path);
+        EXPECT(!settings.user_agent_preset().has_value());
+
+        settings.set_user_agent_preset("chrome windows desktop"_string);
+        EXPECT_EQ(settings.user_agent_preset().value_or(String {}), "Chrome Windows Desktop"sv);
+
+        settings.set_user_agent_preset("NonExistent Browser 99"_string);
+        EXPECT_EQ(settings.user_agent_preset().value_or(String {}), "Chrome Windows Desktop"sv);
+    }
+
+    {
+        auto reloaded = WebView::Settings::create(settings_path);
+        EXPECT_EQ(reloaded.user_agent_preset().value_or(String {}), "Chrome Windows Desktop"sv);
+
+        reloaded.set_user_agent_preset({});
+        EXPECT(!reloaded.user_agent_preset().has_value());
+    }
+
+    auto reset_reloaded = WebView::Settings::create(settings_path);
+    EXPECT(!reset_reloaded.user_agent_preset().has_value());
 }
