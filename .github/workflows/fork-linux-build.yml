@@ -1,0 +1,186 @@
+name: Fork Linux Build (Ubuntu 24.04)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string for packaged AppImage and DEB'
+        required: true
+        default: '0.1.0-agentic'
+        type: string
+      package_format:
+        description: 'Package outputs to build'
+        required: true
+        default: 'appimage-and-deb'
+        type: choice
+        options:
+          - appimage-and-deb
+          - appimage-only
+          - deb-only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ubuntu-2404-x86_64:
+    name: Ubuntu 24.04, x86_64, Distribution, Clang
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/.ghcup
+          docker image prune -af || true
+          df -h /
+
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Ubuntu 24.04 build dependencies
+        shell: bash
+        run: |
+          sudo --preserve-env=GITHUB_ENV,GITHUB_PATH ./Meta/Docker/ci/install-build-dependencies.sh
+          sudo chown -R "$(id -u):$(id -g)" /opt/cargo /opt/rustup
+
+      - name: Build Ladybird Distribution
+        uses: ./.github/actions/build
+        with:
+          os: 'Linux'
+          arch: 'x86_64'
+          toolchain: 'Clang'
+          build_preset: 'Distribution'
+          version: ${{ inputs.version }}
+          use_caches: true
+
+      - name: Smoke test headless multi-tab MCP server
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import time
+          import urllib.request
+
+          url = "http://127.0.0.1:17331/mcp"
+          token = "ci-smoke-token"
+          proc = subprocess.Popen(
+              ["./Install/bin/Ladybird", "--headless=manual", "--temporary-profile", "--mcp=17331", f"--mcp-token={token}"],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+          )
+          session_id = None
+
+          def rpc(method, params, req_id):
+              global session_id
+              headers = {
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {token}",
+              }
+              if session_id:
+                  headers["Mcp-Session-Id"] = session_id
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}).encode(),
+                  headers=headers,
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  if "Mcp-Session-Id" in resp.headers:
+                      session_id = resp.headers["Mcp-Session-Id"]
+                  return json.loads(resp.read().decode())
+
+          try:
+              for _ in range(60):
+                  if proc.poll() is not None:
+                      raise RuntimeError(f"Hub exited early with {proc.returncode}")
+                  try:
+                      init = rpc("initialize", {"protocolVersion": "2026-07-28", "capabilities": {}, "clientInfo": {"name": "ci", "version": "1"}}, 1)
+                      if "result" in init:
+                          break
+                  except Exception:
+                      time.sleep(0.5)
+              else:
+                  raise RuntimeError("Timed out waiting for headless MCP server")
+
+              tabs1 = json.loads(rpc("tools/call", {"name": "list_tabs", "arguments": {}}, 2)["result"]["content"][0]["text"])
+              assert len(tabs1["tabs"]) == 1, f"Expected 1 initial tab, got {tabs1}"
+              tab1_id = tabs1["tabs"][0]["id"]
+
+              active1 = json.loads(rpc("tools/call", {"name": "get_active_tab", "arguments": {}}, 3)["result"]["content"][0]["text"])
+              assert active1.get("tab") and active1["tab"]["id"] == tab1_id, f"Expected active tab {tab1_id}, got {active1}"
+
+              opened = json.loads(rpc("tools/call", {"name": "open_tab", "arguments": {"url": "about:blank", "container_id": "work", "activate": True}}, 4)["result"]["content"][0]["text"])
+              tab2_id = opened["tab_id"]
+              assert opened.get("container_id") == "work", f"Unexpected open_tab payload: {opened}"
+
+              tabs2 = json.loads(rpc("tools/call", {"name": "list_tabs", "arguments": {}}, 5)["result"]["content"][0]["text"])
+              assert len(tabs2["tabs"]) == 2, f"Expected 2 tabs, got {tabs2}"
+
+              rpc("tools/call", {"name": "switch_tab", "arguments": {"tab_id": tab1_id}}, 6)
+              active2 = json.loads(rpc("tools/call", {"name": "get_active_tab", "arguments": {}}, 7)["result"]["content"][0]["text"])
+              assert active2.get("tab") and active2["tab"]["id"] == tab1_id, f"Expected switched active tab {tab1_id}, got {active2}"
+
+              rpc("tools/call", {"name": "close_tab", "arguments": {"tab_id": tab2_id}}, 8)
+              tabs3 = None
+              deadline = time.time() + 5.0
+              while time.time() < deadline:
+                  tabs3 = json.loads(rpc("tools/call", {"name": "list_tabs", "arguments": {}}, 9)["result"]["content"][0]["text"])
+                  if len(tabs3["tabs"]) == 1:
+                      break
+                  time.sleep(0.1)
+              assert tabs3 and len(tabs3["tabs"]) == 1, f"Expected 1 tab after close, got {tabs3}"
+              print("Linux headless multi-tab MCP smoke test PASSED:", {"initial": len(tabs1["tabs"]), "after_open": len(tabs2["tabs"]), "after_close": len(tabs3["tabs"])})
+          except Exception:
+              proc.terminate()
+              try:
+                  out, _ = proc.communicate(timeout=5)
+                  print("Ladybird process output:\n", out)
+              except Exception:
+                  pass
+              raise
+          finally:
+              if proc.poll() is None:
+                  proc.terminate()
+                  try:
+                      proc.wait(timeout=10)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      proc.wait()
+          PY
+
+      - name: Package AppImage
+        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'appimage-only' }}
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: ./Meta/package-appimage.sh Build "${{ inputs.version }}" x86_64 Build/packages
+
+      - name: Package DEB
+        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'deb-only' }}
+        working-directory: ${{ github.workspace }}/Build
+        shell: bash
+        run: |
+          cpack -G DEB -B packages \
+            -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_SystemIntegration"
+
+      - name: Upload AppImage artifact
+        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'appimage-only' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-linux-x86_64-appimage
+          path: Build/packages/*.AppImage
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload DEB artifact
+        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'deb-only' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-linux-x86_64-deb
+          path: Build/packages/*.deb
+          retention-days: 14
+          if-no-files-found: error

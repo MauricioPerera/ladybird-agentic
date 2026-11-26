@@ -25,7 +25,12 @@ Full architecture manual: [Documentation/ForkArchitectureAndCapabilities.md](Doc
 .\Build\release\bin\Ladybird.exe --mcp --mcp-token "dev-token"
 # Linux / macOS
 ./Build/release/bin/Ladybird --mcp --mcp-token "dev-token"
+# Headless Linux VPS (multi-tab MCP without X11/Xvfb) + SSH tunnel from client
+./Ladybird.AppImage --headless=manual --mcp --mcp-token "dev-token"
+ssh -N -L 7331:127.0.0.1:7331 <vps-host>
 ```
+
+Linux Ubuntu 24.04 x86_64 AppImage/DEB builds can be triggered in GitHub Actions via [fork-linux-build.yml](.github/workflows/fork-linux-build.yml) (`workflow_dispatch`).
 
 | Flag | Default | Purpose |
 | :--- | :--- | :--- |
