@@ -209,6 +209,7 @@ public:
     bool has_content_blocking_rules() const;
     void apply_content_blocking_policy(WebContentPage&);
     void content_blocker_settings_changed(Badge<ApplicationSettingsObserver>);
+    void refresh_content_blockers_for_extensions() { apply_content_blocker_settings(); }
 
     bool content_blocker_list_update_in_progress() const;
     void update_content_blocker_lists(Badge<SettingsUI>);
@@ -424,6 +425,7 @@ public:
     FlowRunner& flow_runner();
     ExtensionStore& extension_store();
     ExtensionManager& extension_manager();
+    void did_start_load_for_extensions(ViewImplementation&, URL::URL const&);
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
     Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab) const;

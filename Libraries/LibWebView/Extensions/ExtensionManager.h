@@ -32,12 +32,20 @@ public:
     virtual ~ExtensionManager() override;
 
     void sync_bundled_flows();
+    String collect_combined_filter_rules() const;
+    void did_start_load(ViewImplementation&, URL::URL const&);
     void did_finish_load(ViewImplementation&, URL::URL const&);
     ErrorOr<size_t> inject_extension_into_active_tab(StringView extension_id);
 
 private:
+    enum class InjectionPhase {
+        All,
+        DocumentStart,
+        DocumentEndOrIdle,
+    };
+
     virtual void extensions_changed() override;
-    size_t inject_extension_into_view(InstalledExtension const&, ViewImplementation&, URL::URL const&, bool match_url);
+    size_t inject_extension_into_view(InstalledExtension const&, ViewImplementation&, URL::URL const&, bool match_url, InjectionPhase);
 
     Application& m_application;
     ExtensionStore& m_store;

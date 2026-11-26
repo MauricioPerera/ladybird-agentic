@@ -173,3 +173,105 @@ TEST_CASE(extension_injection_script_generation)
     EXPECT(script.contains("\"demo-ext\""sv));
     EXPECT(script.contains("console.log(ladybirdExt.id);"sv));
 }
+
+TEST_CASE(extension_dnr_translation_and_filter_lists)
+{
+    auto valid_manifest_json = MUST(JsonValue::from_string(R"JSON({
+        "manifest_version": 3,
+        "id": "adblock-demo",
+        "name": "Adblock Demo",
+        "version": "1.0.0",
+        "permissions": ["declarativeNetRequest", "storage"],
+        "declarative_net_request": {
+            "rule_resources": [
+                { "id": "ads", "enabled": true, "path": "rules.json" }
+            ]
+        },
+        "ladybird": {
+            "filter_lists": ["filters.txt"]
+        }
+    })JSON"sv));
+
+    auto manifest = MUST(WebView::parse_extension_manifest(valid_manifest_json));
+    EXPECT_EQ(manifest.declarative_net_request_rulesets.size(), 1u);
+    EXPECT_EQ(manifest.declarative_net_request_rulesets[0].id, "ads"_string);
+    EXPECT_EQ(manifest.declarative_net_request_rulesets[0].path, "rules.json"_string);
+    EXPECT_EQ(manifest.ladybird_filter_lists.size(), 1u);
+    EXPECT_EQ(manifest.ladybird_filter_lists[0], "filters.txt"_string);
+
+    auto bad_dnr = MUST(JsonValue::from_string(R"JSON({
+        "manifest_version": 3,
+        "name": "Bad DNR",
+        "version": "1.0",
+        "declarative_net_request": {
+            "rule_resources": [{ "id": "bad", "path": "../outside.json" }]
+        }
+    })JSON"sv));
+    EXPECT(WebView::parse_extension_manifest(bad_dnr).is_error());
+
+    auto ruleset_json = MUST(JsonValue::from_string(R"JSON([
+        {
+            "id": 1,
+            "action": { "type": "block" },
+            "condition": {
+                "requestDomains": ["doubleclick.net"],
+                "initiatorDomains": ["youtube.com"],
+                "excludedInitiatorDomains": ["ads.youtube.com"],
+                "resourceTypes": ["script", "sub_frame"]
+            }
+        },
+        {
+            "id": 2,
+            "action": { "type": "allow" },
+            "condition": {
+                "urlFilter": "||youtube.com/api/stats/allow*",
+                "resourceTypes": ["xmlhttprequest"]
+            }
+        }
+    ])JSON"sv));
+
+    auto adblock_rules = MUST(WebView::translate_dnr_ruleset_to_adblock_rules(ruleset_json));
+    EXPECT(adblock_rules.contains("||doubleclick.net^$script,subdocument,domain=youtube.com|~ads.youtube.com"sv));
+    EXPECT(adblock_rules.contains("@@||youtube.com/api/stats/allow*$xmlhttprequest"sv));
+}
+
+TEST_CASE(extension_store_validates_dnr_and_filter_files)
+{
+    auto store_dir = make_temp_extensions_dir();
+    auto unpacked_dir = make_temp_extensions_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(store_dir, FileSystem::RecursionMode::Allowed);
+        (void)FileSystem::remove(unpacked_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    write_text_file(LexicalPath::join(unpacked_dir, "manifest.json"sv).string(), R"JSON({
+        "manifest_version": 3,
+        "id": "yt-clean-test",
+        "name": "YT Clean Test",
+        "version": "1.0.0",
+        "permissions": ["declarativeNetRequest"],
+        "declarative_net_request": {
+            "rule_resources": [{ "id": "ads", "enabled": true, "path": "rules.json" }]
+        },
+        "ladybird": {
+            "filter_lists": ["filters.txt"]
+        }
+    })JSON"sv);
+
+    WebView::ExtensionStore store(store_dir);
+    // Should fail if rules.json / filters.txt don't exist yet.
+    EXPECT(store.install_unpacked(unpacked_dir).is_error());
+
+    write_text_file(LexicalPath::join(unpacked_dir, "rules.json"sv).string(), R"JSON([
+        { "id": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||ads.example.com^" } }
+    ])JSON"sv);
+    write_text_file(LexicalPath::join(unpacked_dir, "filters.txt"sv).string(), "youtube.com##ytd-reel-shelf-renderer\n"sv);
+
+    auto installed = MUST(store.install_unpacked(unpacked_dir));
+    EXPECT_EQ(installed.manifest.declarative_net_request_rulesets.size(), 1u);
+    EXPECT_EQ(installed.manifest.ladybird_filter_lists.size(), 1u);
+
+    auto serialized = WebView::serialize_extension(installed);
+    EXPECT_EQ(serialized.get_array("declarative_net_request_rulesets"sv)->size(), 1u);
+    EXPECT_EQ(serialized.get_array("filter_lists"sv)->size(), 1u);
+}

@@ -128,6 +128,66 @@ void ExtensionManager::sync_bundled_flows()
     }
 
     m_syncing_flows = false;
+    m_application.refresh_content_blockers_for_extensions();
+}
+
+String ExtensionManager::collect_combined_filter_rules() const
+{
+    StringBuilder combined;
+    for (auto const& ext : m_store.list_extensions()) {
+        if (!ext.enabled)
+            continue;
+
+        for (auto const& filter_rel : ext.manifest.ladybird_filter_lists) {
+            auto text = read_extension_text_file(ext.root_path, filter_rel);
+            if (text.is_error()) {
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading filter list '{}': {}", filter_rel, text.error())));
+                continue;
+            }
+            combined.append(text.value());
+            if (!text.value().bytes_as_string_view().ends_with('\n'))
+                combined.append('\n');
+        }
+
+        for (auto const& ruleset : ext.manifest.declarative_net_request_rulesets) {
+            if (!ruleset.enabled)
+                continue;
+            auto raw = read_extension_text_file(ext.root_path, ruleset.path);
+            if (raw.is_error()) {
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading DNR ruleset '{}': {}", ruleset.path, raw.error())));
+                continue;
+            }
+            auto json = JsonValue::from_string(raw.value());
+            if (json.is_error()) {
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid JSON in DNR ruleset '{}': {}", ruleset.path, json.error())));
+                continue;
+            }
+            auto translated = translate_dnr_ruleset_to_adblock_rules(json.value());
+            if (translated.is_error()) {
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid DNR ruleset '{}': {}", ruleset.path, translated.error())));
+                continue;
+            }
+            combined.append(translated.value());
+        }
+    }
+    return MUST(combined.to_string());
+}
+
+void ExtensionManager::did_start_load(ViewImplementation& view, URL::URL const& url)
+{
+    if (view.owner_view_id().has_value())
+        return;
+    if (url.scheme() != "http"sv && url.scheme() != "https"sv)
+        return;
+
+    bool is_private = view.is_private() == IsPrivate::Yes;
+    for (auto const& ext : m_store.list_extensions()) {
+        if (!ext.enabled)
+            continue;
+        if (is_private && !ext.allow_in_private)
+            continue;
+        inject_extension_into_view(ext, view, url, true, InjectionPhase::DocumentStart);
+    }
 }
 
 void ExtensionManager::did_finish_load(ViewImplementation& view, URL::URL const& url)
@@ -143,7 +203,7 @@ void ExtensionManager::did_finish_load(ViewImplementation& view, URL::URL const&
             continue;
         if (is_private && !ext.allow_in_private)
             continue;
-        inject_extension_into_view(ext, view, url, true);
+        inject_extension_into_view(ext, view, url, true, InjectionPhase::DocumentEndOrIdle);
     }
 }
 
@@ -163,15 +223,19 @@ ErrorOr<size_t> ExtensionManager::inject_extension_into_active_tab(StringView ex
     if (view->is_private() == IsPrivate::Yes && !ext->allow_in_private)
         return Error::from_string_literal("Extension is not allowed in private tabs");
 
-    return inject_extension_into_view(*ext, *view, view->url(), false);
+    return inject_extension_into_view(*ext, *view, view->url(), false, InjectionPhase::All);
 }
 
-size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ext, ViewImplementation& view, URL::URL const& url, bool match_url)
+size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ext, ViewImplementation& view, URL::URL const& url, bool match_url, InjectionPhase phase)
 {
     size_t injected_groups = 0;
     auto storage_snapshot = m_store.get_storage(ext.manifest.id);
 
     for (auto const& cs : ext.manifest.content_scripts) {
+        if (phase == InjectionPhase::DocumentStart && cs.run_at != "document_start"sv)
+            continue;
+        if (phase == InjectionPhase::DocumentEndOrIdle && cs.run_at == "document_start"sv)
+            continue;
         if (match_url && !content_script_matches_url(cs, url))
             continue;
 

@@ -1,0 +1,15 @@
+ytd-reel-shelf-renderer,
+ytd-rich-shelf-renderer[is-shorts],
+ytd-shorts,
+ytd-ad-slot-renderer,
+ytd-banner-promo-renderer,
+ytd-display-ad-renderer,
+ytd-promoted-sparkles-web-renderer,
+ytd-guide-entry-renderer a[title="Shorts"],
+ytd-mini-guide-entry-renderer[aria-label="Shorts"],
+#player-ads,
+#masthead-ad,
+.ytp-ad-module,
+.ytp-ad-overlay-container {
+  display: none !important;
+}

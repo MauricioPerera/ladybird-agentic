@@ -371,6 +371,20 @@
                         c.textContent = `flow: ${fid}`;
                         chips.appendChild(c);
                     }
+                    const dnrCount = (ext.declarative_net_request_rulesets || []).filter(r => r.enabled).length;
+                    if (dnrCount > 0) {
+                        const c = document.createElement("span");
+                        c.className = "chip";
+                        c.textContent = `${dnrCount} DNR ruleset(s)`;
+                        chips.appendChild(c);
+                    }
+                    const filterCount = (ext.filter_lists || []).length;
+                    if (filterCount > 0) {
+                        const c = document.createElement("span");
+                        c.className = "chip";
+                        c.textContent = `${filterCount} filter list(s)`;
+                        chips.appendChild(c);
+                    }
                     card.appendChild(chips);
 
                     if (ext.last_error) {

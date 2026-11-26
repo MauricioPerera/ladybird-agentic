@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "id": "ladybird-table-enhancer",
+  "name": "Table Filter & Sort Enhancer",
+  "version": "1.0.0",
+  "description": "Adds live search filtering, clickable multi-type column sorting, row counters, and 1-click CSV export to HTML data tables.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "css": ["content.css"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

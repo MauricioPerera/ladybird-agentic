@@ -33,6 +33,12 @@ struct WEBVIEW_API ExtensionAction {
     Optional<String> default_flow_id;
 };
 
+struct WEBVIEW_API ExtensionDeclarativeNetRequestRuleset {
+    String id;
+    bool enabled { true };
+    String path;
+};
+
 struct WEBVIEW_API ExtensionManifest {
     u32 manifest_version { 3 };
     String id;
@@ -43,7 +49,9 @@ struct WEBVIEW_API ExtensionManifest {
     Vector<String> host_permissions;
     Vector<ExtensionContentScript> content_scripts;
     Optional<ExtensionAction> action;
+    Vector<ExtensionDeclarativeNetRequestRuleset> declarative_net_request_rulesets;
     Vector<String> ladybird_flow_files;
+    Vector<String> ladybird_filter_lists;
 };
 
 struct WEBVIEW_API InstalledExtension {
@@ -62,6 +70,7 @@ WEBVIEW_API String sanitize_extension_id_from_name(StringView raw);
 WEBVIEW_API bool is_safe_relative_extension_path(StringView rel_path);
 WEBVIEW_API bool url_matches_extension_pattern(URL::URL const& url, StringView pattern);
 WEBVIEW_API ErrorOr<ExtensionManifest> parse_extension_manifest(JsonValue const& value, StringView fallback_id = {});
+WEBVIEW_API ErrorOr<String> translate_dnr_ruleset_to_adblock_rules(JsonValue const& ruleset_json);
 WEBVIEW_API JsonObject serialize_extension(InstalledExtension const&);
 WEBVIEW_API String build_extension_injection_script(StringView extension_id, StringView extension_name, Vector<String> const& css_contents, Vector<String> const& js_contents, JsonObject const& storage_snapshot);
 

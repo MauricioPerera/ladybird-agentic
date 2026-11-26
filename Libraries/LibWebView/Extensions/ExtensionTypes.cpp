@@ -19,7 +19,8 @@ static bool is_supported_permission(StringView permission)
         "flows"sv,
         "mcp"sv,
         "activeTab"sv,
-        "contextMenus"sv);
+        "contextMenus"sv,
+        "declarativeNetRequest"sv);
 }
 
 static bool is_valid_run_at(StringView run_at)
@@ -296,11 +297,130 @@ ErrorOr<ExtensionManifest> parse_extension_manifest(JsonValue const& value, Stri
         manifest.action = move(action);
     }
 
+    if (auto dnr_obj = obj.get_object("declarative_net_request"sv); dnr_obj.has_value()) {
+        if (auto rulesets = dnr_obj->get_array("rule_resources"sv); rulesets.has_value()) {
+            for (auto const& item : rulesets->values()) {
+                if (!item.is_object())
+                    return Error::from_string_literal("Each declarative_net_request.rule_resources entry must be an object");
+                auto const& rs = item.as_object();
+                auto rs_id = rs.get_string("id"sv);
+                auto rs_path = rs.get_string("path"sv);
+                if (!rs_id.has_value() || rs_id->is_empty() || !rs_path.has_value() || !is_safe_relative_extension_path(*rs_path))
+                    return Error::from_string_literal("declarative_net_request ruleset requires valid 'id' and safe relative 'path'");
+
+                ExtensionDeclarativeNetRequestRuleset ruleset;
+                ruleset.id = *rs_id;
+                ruleset.enabled = rs.get_bool("enabled"sv).value_or(true);
+                ruleset.path = *rs_path;
+                manifest.declarative_net_request_rulesets.append(move(ruleset));
+            }
+        }
+    }
+
     if (auto ladybird_obj = obj.get_object("ladybird"sv); ladybird_obj.has_value()) {
         manifest.ladybird_flow_files = TRY(parse_safe_path_list(*ladybird_obj, "flows"sv));
+        manifest.ladybird_filter_lists = TRY(parse_safe_path_list(*ladybird_obj, "filter_lists"sv));
     }
 
     return manifest;
+}
+
+static Optional<StringView> map_dnr_resource_type(StringView type)
+{
+    if (type == "script"sv || type == "stylesheet"sv || type == "image"sv
+        || type == "xmlhttprequest"sv || type == "font"sv || type == "media"sv
+        || type == "websocket"sv || type == "other"sv)
+        return type;
+    if (type == "sub_frame"sv)
+        return "subdocument"sv;
+    return {};
+}
+
+ErrorOr<String> translate_dnr_ruleset_to_adblock_rules(JsonValue const& ruleset_json)
+{
+    if (!ruleset_json.is_array())
+        return Error::from_string_literal("declarativeNetRequest ruleset JSON must be an array");
+
+    StringBuilder out;
+    for (auto const& item : ruleset_json.as_array().values()) {
+        if (!item.is_object())
+            continue;
+        auto const& rule = item.as_object();
+        auto action = rule.get_object("action"sv);
+        auto condition = rule.get_object("condition"sv);
+        if (!action.has_value() || !condition.has_value())
+            continue;
+
+        auto action_type = action->get_string("type"sv);
+        if (!action_type.has_value() || (!action_type->equals_ignoring_ascii_case("block"sv) && !action_type->equals_ignoring_ascii_case("allow"sv)))
+            continue;
+
+        StringView prefix = action_type->equals_ignoring_ascii_case("allow"sv) ? "@@"sv : ""sv;
+
+        Vector<String> options;
+        if (auto resource_types = condition->get_array("resourceTypes"sv); resource_types.has_value()) {
+            for (auto const& rt : resource_types->values()) {
+                if (!rt.is_string())
+                    continue;
+                if (auto mapped = map_dnr_resource_type(rt.as_string()); mapped.has_value())
+                    options.append(String::from_utf8_without_validation(mapped->bytes()));
+            }
+        }
+
+        Vector<String> domain_parts;
+        if (auto initiators = condition->get_array("initiatorDomains"sv); initiators.has_value()) {
+            for (auto const& d : initiators->values()) {
+                if (d.is_string() && !d.as_string().is_empty())
+                    domain_parts.append(d.as_string());
+            }
+        }
+        if (auto excluded = condition->get_array("excludedInitiatorDomains"sv); excluded.has_value()) {
+            for (auto const& d : excluded->values()) {
+                if (d.is_string() && !d.as_string().is_empty())
+                    domain_parts.append(MUST(String::formatted("~{}", d.as_string())));
+            }
+        }
+        if (!domain_parts.is_empty()) {
+            StringBuilder dom_opt;
+            dom_opt.append("domain="sv);
+            for (size_t i = 0; i < domain_parts.size(); ++i) {
+                if (i > 0)
+                    dom_opt.append('|');
+                dom_opt.append(domain_parts[i]);
+            }
+            options.append(MUST(dom_opt.to_string()));
+        }
+
+        StringBuilder opts_suffix;
+        if (!options.is_empty()) {
+            opts_suffix.append('$');
+            for (size_t i = 0; i < options.size(); ++i) {
+                if (i > 0)
+                    opts_suffix.append(',');
+                opts_suffix.append(options[i]);
+            }
+        }
+
+        if (auto url_filter = condition->get_string("urlFilter"sv); url_filter.has_value() && !url_filter->is_empty()) {
+            out.append(prefix);
+            out.append(*url_filter);
+            out.append(opts_suffix.string_view());
+            out.append('\n');
+        } else if (auto req_domains = condition->get_array("requestDomains"sv); req_domains.has_value()) {
+            for (auto const& dom : req_domains->values()) {
+                if (!dom.is_string() || dom.as_string().is_empty())
+                    continue;
+                out.append(prefix);
+                out.append("||"sv);
+                out.append(dom.as_string());
+                out.append('^');
+                out.append(opts_suffix.string_view());
+                out.append('\n');
+            }
+        }
+    }
+
+    return MUST(out.to_string());
 }
 
 JsonObject serialize_extension(InstalledExtension const& ext)
@@ -371,6 +491,21 @@ JsonObject serialize_extension(InstalledExtension const& ext)
     for (auto const& fid : ext.registered_flow_ids)
         flow_ids.must_append(fid);
     obj.set("registered_flow_ids"sv, move(flow_ids));
+
+    JsonArray filter_lists;
+    for (auto const& fl : ext.manifest.ladybird_filter_lists)
+        filter_lists.must_append(fl);
+    obj.set("filter_lists"sv, move(filter_lists));
+
+    JsonArray dnr_rulesets;
+    for (auto const& rs : ext.manifest.declarative_net_request_rulesets) {
+        JsonObject rs_obj;
+        rs_obj.set("id"sv, rs.id);
+        rs_obj.set("enabled"sv, rs.enabled);
+        rs_obj.set("path"sv, rs.path);
+        dnr_rulesets.must_append(move(rs_obj));
+    }
+    obj.set("declarative_net_request_rulesets"sv, move(dnr_rulesets));
 
     return obj;
 }

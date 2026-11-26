@@ -783,6 +783,13 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         warnln("    Configured lists: {}", m_browser_options.content_blocker_list_paths);
     }
 
+    {
+        auto ext_base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
+        auto ext_registry = LexicalPath::join(ext_base_dir, "extensions"sv, "registry.json"sv).string();
+        if (FileSystem::exists(ext_registry))
+            (void)extension_manager();
+    }
+
     if (!m_event_loop)
         m_event_loop = &create_platform_event_loop();
     if (captures_browser_crashes())
@@ -933,7 +940,8 @@ void Application::rebuild_content_blocker_list_paths()
 ErrorOr<bool> Application::load_content_blocker_lists()
 {
     auto custom_filters = m_settings->custom_content_blocker_filters();
-    if (m_browser_options.content_blocker_list_paths.is_empty() && custom_filters.is_empty()) {
+    auto extension_filters = m_extension_manager ? m_extension_manager->collect_combined_filter_rules() : String {};
+    if (m_browser_options.content_blocker_list_paths.is_empty() && custom_filters.is_empty() && extension_filters.is_empty()) {
         if (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() == 0)
             return false;
         m_content_blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(0));
@@ -947,6 +955,8 @@ ErrorOr<bool> Application::load_content_blocker_lists()
         total_size += 1;
     }
     total_size += custom_filters.bytes().size();
+    total_size += 1;
+    total_size += extension_filters.bytes().size();
     total_size += 1;
 
     if (total_size.has_overflow() || total_size.value() > maximum_combined_content_blocker_list_size)
@@ -965,6 +975,9 @@ ErrorOr<bool> Application::load_content_blocker_lists()
     }
     custom_filters.bytes().copy_to(bytes.slice(offset));
     offset += custom_filters.bytes().size();
+    bytes[offset++] = '\n';
+    extension_filters.bytes().copy_to(bytes.slice(offset));
+    offset += extension_filters.bytes().size();
     bytes[offset++] = '\n';
     VERIFY(offset == bytes.size());
 
@@ -3315,6 +3328,8 @@ void Application::content_blocker_settings_changed(Badge<ApplicationSettingsObse
 
 void Application::apply_content_blocker_settings()
 {
+    if (!m_settings)
+        return;
     rebuild_content_blocker_list_paths();
     bool rules_changed = false;
 
@@ -4822,6 +4837,15 @@ ExtensionManager& Application::extension_manager()
     if (!m_extension_manager)
         m_extension_manager = make<ExtensionManager>(*this, extension_store(), flow_store());
     return *m_extension_manager;
+}
+
+void Application::did_start_load_for_extensions(ViewImplementation& view, URL::URL const& url)
+{
+    if (view.owner_view_id().has_value())
+        return;
+    if (url.scheme() != "http"sv && url.scheme() != "https"sv)
+        return;
+    extension_manager().did_start_load(view, url);
 }
 
 void Application::did_finish_load_for_extensions(ViewImplementation& view, URL::URL const& url)

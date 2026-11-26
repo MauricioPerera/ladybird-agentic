@@ -1,0 +1,15 @@
+! Native Ladybird ContentBlocker cosmetic + network rules (loaded into Web::ContentBlocker)
+youtube.com##ytd-reel-shelf-renderer
+youtube.com##ytd-rich-shelf-renderer[is-shorts]
+youtube.com##ytd-shorts
+youtube.com##ytd-ad-slot-renderer
+youtube.com##ytd-banner-promo-renderer
+youtube.com##ytd-display-ad-renderer
+youtube.com##ytd-promoted-sparkles-web-renderer
+youtube.com###player-ads
+youtube.com###masthead-ad
+youtube.com##.ytp-ad-module
+youtube.com##.ytp-ad-overlay-container
+youtube.com##a[title="Shorts"]
+youtube.com##a[href^="/shorts"]
+||youtube.com/youtubei/v1/player/ad_break^$xmlhttprequest

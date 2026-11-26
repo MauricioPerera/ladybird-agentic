@@ -47,6 +47,10 @@ static ErrorOr<void> verify_manifest_files_exist(ByteString const& root_path, Ex
         TRY(check_path(*manifest.action->default_popup));
     for (auto const& flow_file : manifest.ladybird_flow_files)
         TRY(check_path(flow_file));
+    for (auto const& filter_file : manifest.ladybird_filter_lists)
+        TRY(check_path(filter_file));
+    for (auto const& ruleset : manifest.declarative_net_request_rulesets)
+        TRY(check_path(ruleset.path));
 
     return {};
 }

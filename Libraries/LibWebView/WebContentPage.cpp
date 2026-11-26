@@ -482,6 +482,9 @@ void WebContentPage::begin_top_level_load(URL::URL const& url)
         if (listener.on_load_start)
             listener.on_load_start(url);
     }
+
+    if (Application::is_initialized() && url.scheme().is_one_of("http"sv, "https"sv))
+        Application::the().did_start_load_for_extensions(view, url);
 }
 
 void WebContentPage::request_close()
