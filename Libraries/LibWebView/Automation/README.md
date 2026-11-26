@@ -72,7 +72,7 @@ flowchart LR
 
 ## 4. Security Boundaries and Known Caveats
 
-- **Tab Permissions (`MCP` vs `about:flows`)**: MCP `run_flow` sets `require_mcp_permission = true`. `FlowsUI` (`about:flows`) sets `require_mcp_permission = false`, allowing flows to inspect and automate **any non-`about:` tab (except `about:blank`), including private browsing tabs** and non-MCP tabs, because `find_automation_view(..., false)` does not exclude `IsPrivate::Yes`.
+- **Tab Permissions (`MCP` vs `about:flows`)**: MCP `run_flow` sets `require_mcp_permission = true`. `FlowsUI` (`about:flows`) sets `require_mcp_permission = false`, allowing flows to automate non-private `http:`/`https:`/`about:blank` tabs in the same browser session; private tabs (`IsPrivate::Yes`) are filtered out of `FlowsUI::send_state` and rejected by `Application::find_automation_view`.
 - **Variable Interpolation Surface**: `extract` and `eval` results stored via `save_as` flow directly from untrusted webpage DOM content into `{{var}}` substitutions (`open.url`, `fill.text`, `locator.value` / `xpath` / `css`), allowing page-controlled data to alter subsequent navigation targets or selectors.
 - **Unbounded Run Artifacts & Idempotent Delete**: Flows persist under `<data_dir>/automation/flows/` (or instance storage directory). Completed/cancelled run JSON files and step PNGs written under `runs/` are never pruned from disk (`max_in_memory_runs = 50` caps RAM only). `FlowStore::delete_flow` is an idempotent no-op returning success when called on an unknown `flow_id`.
 

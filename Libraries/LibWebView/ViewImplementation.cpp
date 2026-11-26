@@ -867,6 +867,9 @@ void ViewImplementation::set_pinned(bool pinned)
 
 void ViewImplementation::set_mcp_access_allowed(bool allowed)
 {
+    if (m_is_private == IsPrivate::Yes)
+        allowed = false;
+
     if (m_mcp_access_allowed == allowed)
         return;
 
@@ -4037,10 +4040,40 @@ void ViewImplementation::run_webdriver_content_command(u64 command_id, Optional<
     dispatch_webdriver_content_command(command_id, navigable_id, name, move(payload), move(arguments), protocol);
 }
 
+void ViewImplementation::cancel_webdriver_content_command(u64 command_id)
+{
+    m_pending_webdriver_commands.remove(command_id);
+    m_pending_webdriver_crash_commands.remove(command_id);
+    m_webdriver_commands_waiting_for_a_document.remove(command_id);
+
+    if (!m_webdriver_input_commands.is_empty() && m_webdriver_input_commands.first().command_id == command_id) {
+        m_webdriver_input_commands.take_first();
+        m_webdriver_input_command_running = false;
+        m_running_webdriver_input_command_id.clear();
+        Core::deferred_invoke([weak_this = make_weak_ptr()] {
+            if (weak_this)
+                weak_this->dispatch_next_webdriver_input_command();
+        });
+    } else {
+        m_webdriver_input_commands.remove_all_matching([command_id](auto const& entry) {
+            return entry.command_id == command_id;
+        });
+        if (m_running_webdriver_input_command_id == command_id) {
+            m_webdriver_input_command_running = false;
+            m_running_webdriver_input_command_id.clear();
+            Core::deferred_invoke([weak_this = make_weak_ptr()] {
+                if (weak_this)
+                    weak_this->dispatch_next_webdriver_input_command();
+            });
+        }
+    }
+}
+
 void ViewImplementation::discard_webdriver_input_commands(bool process_crashed)
 {
     auto queued = move(m_webdriver_input_commands);
     m_webdriver_input_command_running = false;
+    m_running_webdriver_input_command_id.clear();
     m_webdriver_input_state = JsonValue {};
     for (auto const& command : queued) {
         m_pending_webdriver_commands.remove(command.command_id);
@@ -4053,9 +4086,10 @@ void ViewImplementation::dispatch_next_webdriver_input_command()
 {
     if (m_webdriver_input_commands.is_empty() || m_webdriver_input_command_running)
         return;
-    m_webdriver_input_command_running = true;
-    m_webdriver_input_state_was_lost = false;
     auto const& queued = m_webdriver_input_commands.first();
+    m_webdriver_input_command_running = true;
+    m_running_webdriver_input_command_id = queued.command_id;
+    m_webdriver_input_state_was_lost = false;
     auto const& command = queued.command;
     JsonObject envelope;
     envelope.set("__webdriver_input_state"sv, m_webdriver_input_state);
@@ -4079,6 +4113,7 @@ void ViewImplementation::complete_webdriver_input_command(u64 command_id, Web::W
             response = Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "Input state was lost while executing the command"sv);
         m_webdriver_input_commands.take_first();
         m_webdriver_input_command_running = false;
+        m_running_webdriver_input_command_id.clear();
         // The content executor may complete before removing its local action-queue token.
         Core::deferred_invoke([weak_this = make_weak_ptr()] {
             if (weak_this)

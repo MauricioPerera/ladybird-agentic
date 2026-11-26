@@ -12,9 +12,12 @@
 #include <AK/AnyOf.h>
 #include <AK/ByteString.h>
 #include <AK/HashMap.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
+#include <LibURL/Parser.h>
 
 #if defined(AK_OS_WINDOWS)
 // Included before the OpenSSL headers so the winsock2 struct timeval is renamed and can't collide with AK's.
@@ -62,8 +65,74 @@ static constexpr auto failed_url_retry_interval = AK::Duration::from_seconds(300
 // without limit.
 static constexpr size_t max_failed_urls = 1024;
 
-// Collect the caIssuers URLs from a cert's AIA extension. Only http URLs are returned; fetching an intermediate over
-// https would itself require cert verification — risking infinite recursion.
+static bool is_restricted_aia_ipv4(IPv4Address const& addr)
+{
+    auto const b0 = addr[0];
+    auto const b1 = addr[1];
+    // Reject unspecified (0.0.0.0/8), loopback (127.0.0.0/8), RFC1918 (10.0.0.0/8, 172.16.0.0/12,
+    // 192.168.0.0/16), CGNAT (100.64.0.0/10), link-local/metadata (169.254.0.0/16), and multicast/reserved.
+    if (b0 == 0 || b0 == 10 || b0 == 127 || b0 >= 224)
+        return true;
+    if (b0 == 100 && (b1 & 0xC0) == 64)
+        return true;
+    if (b0 == 169 && b1 == 254)
+        return true;
+    if (b0 == 172 && b1 >= 16 && b1 <= 31)
+        return true;
+    if (b0 == 192 && b1 == 168)
+        return true;
+    return false;
+}
+
+static bool is_safe_public_aia_url(StringView raw_url)
+{
+    if (!raw_url.starts_with("http://"sv, CaseSensitivity::CaseInsensitive))
+        return false;
+
+    auto parsed = URL::Parser::basic_parse(raw_url);
+    if (!parsed.has_value() || parsed->scheme() != "http"sv)
+        return false;
+    if (!parsed->username().is_empty() || !parsed->password().is_empty())
+        return false;
+    if (parsed->port().has_value() && *parsed->port() != 80)
+        return false;
+
+    auto const& host = parsed->host();
+    if (!host.has_value() || host->is_empty_host() || host->has<URL::OpaqueHost>() || host->is_loopback_or_localhost())
+        return false;
+
+    if (host->has<IPv4Address>())
+        return !is_restricted_aia_ipv4(host->get<IPv4Address>());
+
+    if (host->has<IPv6Address>()) {
+        auto const& v6 = host->get<IPv6Address>();
+        if (v6.is_zero() || v6 == IPv6Address::loopback())
+            return false;
+        if (auto mapped = v6.ipv4_mapped_address(); mapped.has_value())
+            return !is_restricted_aia_ipv4(*mapped);
+        auto const first = v6[0];
+        // Reject link-local (fe80::/10), unique-local (fc00::/7), and multicast (ff00::/8).
+        if ((first & 0xFFC0) == 0xFE80 || (first & 0xFE00) == 0xFC00 || (first & 0xFF00) == 0xFF00)
+            return false;
+        return true;
+    }
+
+    auto domain = host->get<String>().bytes_as_string_view();
+    if (domain.is_empty() || !domain.contains('.'))
+        return false;
+    if (domain.equals_ignoring_ascii_case("localhost"sv)
+        || domain.ends_with(".localhost"sv, CaseSensitivity::CaseInsensitive)
+        || domain.ends_with(".local"sv, CaseSensitivity::CaseInsensitive)
+        || domain.ends_with(".internal"sv, CaseSensitivity::CaseInsensitive)
+        || domain.ends_with(".arpa"sv, CaseSensitivity::CaseInsensitive)) {
+        return false;
+    }
+    return true;
+}
+
+// Collect the caIssuers URLs from a cert's AIA extension. Only public http URLs are returned; fetching an
+// intermediate over https would itself require cert verification — risking infinite recursion — and internal URLs
+// would risk SSRF against loopback, RFC1918, or metadata endpoints.
 Vector<ByteString> ca_issuers_urls(X509* certificate)
 {
     Vector<ByteString> urls;
@@ -81,7 +150,7 @@ Vector<ByteString> ca_issuers_urls(X509* certificate)
 
         auto const* uri = access_description->location->d.uniformResourceIdentifier;
         auto url = ByteString { reinterpret_cast<char const*>(ASN1_STRING_get0_data(uri)), static_cast<size_t>(ASN1_STRING_length(uri)) };
-        if (url.starts_with("http://"sv, CaseSensitivity::CaseInsensitive) && urls.size() < max_ca_issuers_urls_per_certificate)
+        if (is_safe_public_aia_url(url) && urls.size() < max_ca_issuers_urls_per_certificate)
             urls.append(move(url));
     }
 
@@ -301,6 +370,25 @@ static bool export_x509_der(X509 const* certificate, Vector<u8>& out_der)
     return i2d_X509(certificate, &ptr) == len;
 }
 
+static bool certificate_has_subject_alt_name(X509* certificate)
+{
+    if (!certificate)
+        return false;
+    auto* names = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(certificate, NID_subject_alt_name, nullptr, nullptr));
+    if (!names)
+        return false;
+    bool has_host_name = false;
+    for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i) {
+        auto type = sk_GENERAL_NAME_value(names, i)->type;
+        if (type == GEN_DNS || type == GEN_IPADD) {
+            has_host_name = true;
+            break;
+        }
+    }
+    GENERAL_NAMES_free(names);
+    return has_host_name;
+}
+
 static bool verify_chain_with_windows_cryptoapi(X509_STORE_CTX* context, AIACollector const* collector)
 {
     if (!default_certificate_path().is_empty())
@@ -419,8 +507,13 @@ static int verify_callback(X509_STORE_CTX* context, void* collector_data)
                 || initial_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
                 || initial_error == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN)
             && verify_chain_with_windows_cryptoapi(context, collector)) {
-            X509_STORE_CTX_set_error(context, X509_V_OK);
-            result = 1;
+            auto* leaf = X509_STORE_CTX_get0_cert(context);
+            if (!certificate_has_subject_alt_name(leaf)) {
+                X509_STORE_CTX_set_error(context, X509_V_ERR_HOSTNAME_MISMATCH);
+            } else {
+                X509_STORE_CTX_set_error(context, X509_V_OK);
+                result = 1;
+            }
         }
     }
 #endif

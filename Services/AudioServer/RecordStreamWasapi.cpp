@@ -271,10 +271,12 @@ private:
     {
         // Hold a strong reference only until asynchronous initialization settles on the caller loop
         // so the capture loop itself never keeps the stream alive after the caller releases it.
+        // Keep the thread_hold local alive at the outer lambda scope across run_capture_loop so
+        // init failures when the caller loop has already exited never destroy `this` mid-stack.
         RefPtr<RecordStreamWasapi> init_hold = init_done_event ? nullptr : RefPtr<RecordStreamWasapi>(*this);
         RecordStreamWasapi* raw_self = this;
-        m_capture_thread = Threading::Thread::construct("WASAPI Capture"sv, [raw_self, promise = move(promise), init_result = move(init_result), init_done_event, init_hold = move(init_hold)]() mutable -> intptr_t {
-            raw_self->run_capture_loop(move(promise), move(init_result), init_done_event, move(init_hold));
+        m_capture_thread = Threading::Thread::construct("WASAPI Capture"sv, [raw_self, promise = move(promise), init_result = move(init_result), init_done_event, thread_hold = move(init_hold)]() mutable -> intptr_t {
+            raw_self->run_capture_loop(move(promise), move(init_result), init_done_event, thread_hold);
             return 0;
         });
         m_capture_thread->start();
@@ -284,7 +286,7 @@ private:
         NonnullRefPtr<CreatePromise> promise,
         NonnullRefPtr<InitResult> init_result,
         HANDLE init_done_event,
-        RefPtr<RecordStreamWasapi> init_hold,
+        RefPtr<RecordStreamWasapi>& init_hold,
         Error error)
     {
         if (init_done_event) {
@@ -305,7 +307,7 @@ private:
     [[nodiscard]] bool settle_init_success(
         NonnullRefPtr<CreatePromise> promise,
         HANDLE init_done_event,
-        RefPtr<RecordStreamWasapi> init_hold)
+        RefPtr<RecordStreamWasapi>& init_hold)
     {
         if (init_done_event) {
             SetEvent(init_done_event);
@@ -341,11 +343,11 @@ private:
         NonnullRefPtr<CreatePromise> promise,
         NonnullRefPtr<InitResult> init_result,
         HANDLE init_done_event,
-        RefPtr<RecordStreamWasapi> init_hold)
+        RefPtr<RecordStreamWasapi>& init_hold)
     {
         m_capture_thread_id.store(GetCurrentThreadId());
         auto fail_init = [&](Error error) {
-            settle_init_failure(move(promise), move(init_result), init_done_event, move(init_hold), move(error));
+            settle_init_failure(move(promise), move(init_result), init_done_event, init_hold, move(error));
         };
 
         ScopedComInitializer com;
@@ -520,7 +522,7 @@ private:
                 AvRevertMmThreadCharacteristics(avrt_handle);
         };
 
-        if (!settle_init_success(move(promise), init_done_event, move(init_hold)))
+        if (!settle_init_success(move(promise), init_done_event, init_hold))
             return;
 
         Vector<float> scratch_samples;

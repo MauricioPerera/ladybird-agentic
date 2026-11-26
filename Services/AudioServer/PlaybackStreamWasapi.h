@@ -8,7 +8,9 @@
 
 #include <AK/Error.h>
 #include <AK/NonnullRefPtr.h>
+#include <AK/RefPtr.h>
 #include <LibAudio/PlaybackStream.h>
+#include <LibThreading/Thread.h>
 
 namespace Audio {
 
@@ -29,10 +31,11 @@ public:
 private:
     struct AudioState;
 
-    explicit PlaybackStreamWASAPI(NonnullRefPtr<AudioState>);
+    PlaybackStreamWASAPI(NonnullRefPtr<AudioState>, NonnullRefPtr<Threading::Thread>);
     ~PlaybackStreamWASAPI();
 
     NonnullRefPtr<AudioState> m_state;
+    RefPtr<Threading::Thread> m_audio_thread;
 };
 
 }

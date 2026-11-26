@@ -726,13 +726,57 @@ fn candidate_has_unsupported_transport(candidate: &str) -> bool {
     transport.eq_ignore_ascii_case("ssltcp")
 }
 
-/// Drops the candidates in a remote description that only a DNS lookup could resolve.
+/// Whether a remote candidate targets a restricted service port (< 1024 other than DNS/HTTP/HTTPS) or
+/// a link-local/unspecified address such as cloud metadata endpoints.
+/// Loopback addresses on ephemeral ports (>= 1024) remain allowed so local loopback peers continue working.
+fn candidate_targets_restricted_endpoint(candidate: &str) -> bool {
+    let candidate = candidate.strip_prefix("a=").unwrap_or(candidate);
+    let mut parts = candidate.split_ascii_whitespace();
+    let Some(address) = parts.nth(4) else {
+        return false;
+    };
+    let Some(port_str) = parts.next() else {
+        return false;
+    };
+    if port_str
+        .parse::<u16>()
+        .is_ok_and(|port| port < 1024 && !matches!(port, 53 | 80 | 443))
+    {
+        return true;
+    }
+    if let Ok(ip) = address.parse::<IpAddr>() {
+        let mapped_v4 = match ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(v6) => {
+                if v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                    return true;
+                }
+                v6.to_ipv4_mapped()
+            }
+        };
+        if let Some(v4) = mapped_v4
+            && (v4.is_unspecified() || v4.is_link_local() || v4.is_broadcast() || v4.is_multicast())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Drops the candidates in a remote description that only a DNS lookup could resolve or that target restricted endpoints.
 fn remove_candidates_needing_name_resolution(sdp: &str) -> String {
     let mut result = String::with_capacity(sdp.len());
     for line in sdp.split_inclusive('\n') {
-        if line.starts_with("a=candidate:") && candidate_needs_name_resolution(line.trim_end()) {
-            log::debug!("ignoring a remote candidate with a host name: {}", line.trim_end());
-            continue;
+        if line.starts_with("a=candidate:") {
+            let trimmed = line.trim_end();
+            if candidate_needs_name_resolution(trimmed) {
+                log::debug!("ignoring a remote candidate with a host name: {}", trimmed);
+                continue;
+            }
+            if candidate_targets_restricted_endpoint(trimmed) {
+                log::warn!("ignoring restricted remote candidate in SDP: {}", trimmed);
+                continue;
+            }
         }
         result.push_str(line);
     }
@@ -1010,6 +1054,7 @@ async fn dispatch(state: &Arc<State>, message: Message) -> Result<()> {
             let candidate = to_string(req.candidate);
             let event = if candidate_needs_name_resolution(&candidate)
                 || candidate_has_unsupported_transport(&candidate)
+                || candidate_targets_restricted_endpoint(&candidate)
             {
                 log::debug!("ignoring unsupported remote candidate: {candidate}");
                 Client::OnAddIceCandidateResult {
@@ -1845,7 +1890,7 @@ fn extract_candidate_lines(sdp: &str) -> Vec<webrtc::ice_transport::ice_candidat
             mid = Some(value.to_owned());
         } else if let Some(candidate) = line.strip_prefix("a=candidate:") {
             let candidate = format!("candidate:{candidate}");
-            if !section.contains(&candidate) {
+            if !candidate_targets_restricted_endpoint(&candidate) && !section.contains(&candidate) {
                 section.push(candidate);
             }
         }
@@ -2261,6 +2306,45 @@ mod tests {
     fn new_state(network_access: NetworkAccess) -> (Arc<State>, Transport) {
         let (writer, renderer) = crate::ipc::create_paired_transports().unwrap();
         (Arc::new(State::new(Arc::new(writer), network_access)), renderer)
+    }
+
+    #[test]
+    fn restricted_remote_candidates_are_filtered() {
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 169.254.169.254 80 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "a=candidate:1 1 UDP 2130706431 169.254.169.254 50000 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 127.0.0.1 22 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 0.0.0.0 50000 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 :: 50000 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 fe80::1 50000 typ host"
+        ));
+        assert!(candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 ::ffff:169.254.169.254 50000 typ host"
+        ));
+
+        // Loopback ephemeral ports and standard DNS/HTTP/HTTPS ports on public endpoints remain allowed.
+        assert!(!candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 127.0.0.1 54321 typ host"
+        ));
+        assert!(!candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 ::1 54321 typ host"
+        ));
+        assert!(!candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 203.0.113.10 443 typ srflx"
+        ));
+        assert!(!candidate_targets_restricted_endpoint(
+            "candidate:1 1 UDP 2130706431 203.0.113.10 50000 typ srflx"
+        ));
     }
 
     #[test]

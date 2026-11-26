@@ -92,8 +92,8 @@ public:
     void set_window_size(Gfx::IntSize size) { HubConnection::the().async_view_set_window_size(view_id(), size); }
     void set_system_visibility_state(Web::HTML::VisibilityState visibility_state) { HubConnection::the().async_view_set_system_visibility_state(view_id(), move(visibility_state)); }
     void set_pinned(bool pinned) { HubConnection::the().async_view_set_pinned(view_id(), pinned); }
-    bool is_mcp_access_allowed() const { return m_state.mcp_access_allowed; }
-    void set_mcp_access_allowed(bool allowed) { HubConnection::the().async_view_set_mcp_access_allowed(view_id(), allowed); }
+    bool is_mcp_access_allowed() const { return m_is_private == WebView::IsPrivate::No && m_state.mcp_access_allowed; }
+    void set_mcp_access_allowed(bool allowed) { HubConnection::the().async_view_set_mcp_access_allowed(view_id(), m_is_private == WebView::IsPrivate::No && allowed); }
     void set_current_tab_of_window(bool current_tab_of_window) { HubConnection::the().async_view_set_current_tab_of_window(view_id(), current_tab_of_window); }
     void set_presents_from_cpu_memory(bool presents_from_cpu_memory) { HubConnection::the().async_view_set_presents_from_cpu_memory(view_id(), presents_from_cpu_memory); }
     void set_hosts_remote_layer(bool hosts_remote_layer) { HubConnection::the().async_view_set_hosts_remote_layer(view_id(), hosts_remote_layer); }

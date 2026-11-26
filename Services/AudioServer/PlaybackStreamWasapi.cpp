@@ -97,8 +97,9 @@ struct PlaybackStreamWASAPI::AudioState : public AtomicRefCounted<PlaybackStream
     ComPtr<IAudioRenderClient> render_client;
     ComPtr<IAudioStreamVolume> audio_stream_volume;
 
-    WAVEFORMATEXTENSIBLE wave_format;
-    UINT32 buffer_frame_count;
+    WAVEFORMATEXTENSIBLE wave_format {};
+    ChannelMap channel_map { ChannelMap::invalid() };
+    UINT32 buffer_frame_count { 0 };
     REFERENCE_TIME stream_latency = 0;
     HANDLE buffer_event = 0;
 
@@ -131,7 +132,6 @@ struct PlaybackStreamWASAPI::AudioState : public AtomicRefCounted<PlaybackStream
 PlaybackStreamWASAPI::AudioState::AudioState()
 {
     task_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    VERIFY(task_event);
 }
 
 PlaybackStreamWASAPI::AudioState::~AudioState()
@@ -142,17 +142,22 @@ PlaybackStreamWASAPI::AudioState::~AudioState()
         CloseHandle(task_event);
 }
 
-PlaybackStreamWASAPI::PlaybackStreamWASAPI(NonnullRefPtr<AudioState> state)
+PlaybackStreamWASAPI::PlaybackStreamWASAPI(NonnullRefPtr<AudioState> state, NonnullRefPtr<Threading::Thread> audio_thread)
     : m_state(move(state))
+    , m_audio_thread(move(audio_thread))
 {
 }
 
 PlaybackStreamWASAPI::~PlaybackStreamWASAPI()
 {
     m_state->exit_requested.store(true, MemoryOrder::memory_order_release);
-    // Poke the event to wake the thread up from wait
-    VERIFY(m_state->buffer_event != NULL);
-    SetEvent(m_state->buffer_event);
+    // Poke the event to wake the thread up from wait.
+    if (m_state->buffer_event)
+        SetEvent(m_state->buffer_event);
+    if (m_state->task_event)
+        SetEvent(m_state->task_event);
+    if (m_audio_thread && m_audio_thread->needs_to_be_joined())
+        (void)m_audio_thread->join();
 }
 
 NonnullRefPtr<PlaybackStream::CreatePromise> create_platform_playback_stream(OutputState initial_output_state, u32 target_latency_ms, PlaybackStream::AudioDataRequestCallback data_callback)
@@ -162,7 +167,8 @@ NonnullRefPtr<PlaybackStream::CreatePromise> create_platform_playback_stream(Out
 
 static void print_audio_format(WAVEFORMATEXTENSIBLE& format)
 {
-    VERIFY(format.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE);
+    if (format.Format.wFormatTag != WAVE_FORMAT_EXTENSIBLE)
+        return;
     dbgln("wFormatTag: {:x}\n"
           "nChannels: {}\n"
           "nSamplesPerSec: {}\n"
@@ -205,6 +211,10 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
     }
 
     auto state = make_ref_counted<PlaybackStreamWASAPI::AudioState>();
+    if (!state->task_event) {
+        promise->reject(Error::from_windows_error(GetLastError()));
+        return promise;
+    }
 
     TRY_HR(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, IID_PPV_ARGS(&state->enumerator)));
     TRY_HR(state->enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &state->device));
@@ -212,17 +222,39 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
 
     state->data_request_callback = move(data_request_callback);
 
-    WAVEFORMATEXTENSIBLE* device_format;
-    state->audio_client->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&device_format));
-    ScopeGuard free_mix_format = [&device_format] { CoTaskMemFree(device_format); };
+    WAVEFORMATEXTENSIBLE* device_format = nullptr;
+    TRY_HR(state->audio_client->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&device_format)));
+    ScopeGuard free_mix_format = [&device_format] {
+        if (device_format)
+            CoTaskMemFree(device_format);
+    };
+
+    if (!device_format) {
+        promise->reject(Error::from_string_literal("WASAPI GetMixFormat returned a null format"));
+        return promise;
+    }
 
     dbgln_if(AUDIO_DEBUG, "PlaybackStreamWASAPI: Mixing engine audio format:\n");
     if (AUDIO_DEBUG)
         print_audio_format(*device_format);
 
-    VERIFY(device_format->Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE);
-    VERIFY(device_format->Format.nChannels <= ChannelMap::capacity());
-    VERIFY(popcount(device_format->dwChannelMask) == device_format->Format.nChannels);
+    if (device_format->Format.wFormatTag != WAVE_FORMAT_EXTENSIBLE
+        || device_format->Format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        promise->reject(Error::from_string_literal("Unsupported WASAPI mix format"));
+        return promise;
+    }
+    if (device_format->Format.nChannels == 0
+        || device_format->Format.nChannels > ChannelMap::capacity()
+        || popcount(device_format->dwChannelMask) != device_format->Format.nChannels) {
+        promise->reject(Error::from_string_literal("Unsupported WASAPI channel layout"));
+        return promise;
+    }
+    auto channel_map_or_error = windows_channel_mask_to_channel_map(device_format->dwChannelMask);
+    if (channel_map_or_error.is_error()) {
+        promise->reject(channel_map_or_error.release_error());
+        return promise;
+    }
+    state->channel_map = channel_map_or_error.release_value();
     auto channels = device_format->Format.nChannels;
 
     // Set up a 32bit float pcm stream with whatever sample rate and channels we were given.
@@ -241,8 +273,12 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
 
     state->channel_volumes.resize(channels);
 
-    WAVEFORMATEXTENSIBLE* closest_match;
+    WAVEFORMATEXTENSIBLE* closest_match = nullptr;
     hr = state->audio_client->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, &state->wave_format.Format, reinterpret_cast<WAVEFORMATEX**>(&closest_match));
+    ScopeGuard free_closest_match = [&closest_match] {
+        if (closest_match)
+            CoTaskMemFree(closest_match);
+    };
     if (FAILED(hr)) {
         promise->reject(Error::from_windows_error(hr));
         return promise;
@@ -250,10 +286,12 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
     if (hr == S_FALSE) {
         dbgln("Audio format not supported. Current format:\n");
         print_audio_format(state->wave_format);
-        dbgln("Closest supported audio format:\n");
-        print_audio_format(*closest_match);
-        CoTaskMemFree(closest_match);
-        VERIFY_NOT_REACHED();
+        if (closest_match) {
+            dbgln("Closest supported audio format:\n");
+            print_audio_format(*closest_match);
+        }
+        promise->reject(Error::from_string_literal("WASAPI audio format not supported"));
+        return promise;
     }
     // TODO: check the actual format of the engine and use it if possible to reduce overhead
     DWORD stream_flags
@@ -267,7 +305,7 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
 
     state->buffer_event = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (!state->buffer_event) {
-        promise->reject(Error::from_windows_error(hr));
+        promise->reject(Error::from_windows_error(GetLastError()));
         return promise;
     }
 
@@ -284,9 +322,8 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
         TRY_HR(state->audio_client->Start());
 
     audio_thread->start();
-    audio_thread->detach();
 
-    auto stream = adopt_ref(*new PlaybackStreamWASAPI(move(state)));
+    auto stream = adopt_ref(*new PlaybackStreamWASAPI(move(state), move(audio_thread)));
     promise->resolve(stream);
     return promise;
 
@@ -295,8 +332,7 @@ NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamWASAPI::create(Output
 
 SampleSpecification PlaybackStreamWASAPI::sample_specification() const
 {
-    auto channel_map = MUST(windows_channel_mask_to_channel_map(m_state->wave_format.dwChannelMask));
-    return SampleSpecification { m_state->wave_format.Format.nSamplesPerSec, channel_map };
+    return SampleSpecification { m_state->wave_format.Format.nSamplesPerSec, m_state->channel_map };
 }
 
 bool PlaybackStreamWASAPI::AudioState::reopen_default_render_device(PlaybackStreamWASAPI::AudioState& state)
@@ -367,8 +403,13 @@ bool PlaybackStreamWASAPI::AudioState::reopen_default_render_device(PlaybackStre
 
     ComPtr<IAudioStreamVolume> new_stream_volume;
     if (SUCCEEDED(new_client->GetService(IID_PPV_ARGS(&new_stream_volume))) && new_stream_volume) {
-        if (!state.channel_volumes.is_empty())
-            (void)new_stream_volume->SetAllVolumes(state.channel_volumes.size(), state.channel_volumes.data());
+        Vector<float, ChannelMap::capacity()> volumes_copy;
+        {
+            MutexLocker volume_locker(state.stream_volume_mutex);
+            volumes_copy = state.channel_volumes;
+        }
+        if (!volumes_copy.is_empty())
+            (void)new_stream_volume->SetAllVolumes(volumes_copy.size(), volumes_copy.data());
     }
 
     ResetEvent(state.buffer_event);
@@ -443,10 +484,17 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
 
     ScopeGuard uninitialize_com = [] { CoUninitialize(); };
 
-    VERIFY(timeBeginPeriod(1) == TIMERR_NOERROR);
+    bool timer_period_set = (timeBeginPeriod(1) == TIMERR_NOERROR);
+    ScopeGuard end_timer_period = [timer_period_set] {
+        if (timer_period_set)
+            (void)timeEndPeriod(1);
+    };
     DWORD task_index = 0;
     HANDLE task_handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
-    ScopeGuard revert_thread_priority = [&task_handle] { AvRevertMmThreadCharacteristics(task_handle); };
+    ScopeGuard revert_thread_priority = [&task_handle] {
+        if (task_handle)
+            AvRevertMmThreadCharacteristics(task_handle);
+    };
 
     while (!state.exit_requested.load(MemoryOrder::memory_order_acquire)) {
         Array handles = { state.task_event, state.buffer_event };
@@ -520,13 +568,14 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
             // The buffer event wasn't signaled, so we skip the iteration
             if (res == WAIT_TIMEOUT)
                 continue;
-            // Unless the wait errors we should never hit this
-            VERIFY_NOT_REACHED();
+            dbgln("PlaybackStreamWASAPI: WaitForMultipleObjects/WaitForSingleObject failed ({})", GetLastError());
+            break;
         }
         case WAIT_OBJECT_0 + 1:
             break;
         default:
-            VERIFY_NOT_REACHED();
+            dbgln("PlaybackStreamWASAPI: WaitForMultipleObjects failed ({})", GetLastError());
+            break;
         }
 
         // We check that after the wait we weren't asked to exit.
@@ -589,8 +638,6 @@ int PlaybackStreamWASAPI::AudioState::render_thread_loop(PlaybackStreamWASAPI::A
             }
         }
     }
-
-    VERIFY(timeEndPeriod(1) == TIMERR_NOERROR);
 
     return 0;
 }
@@ -660,11 +707,12 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamWASAPI::set_volume(doub
 
     float clamped_volume = static_cast<float>(clamp(volume, 0.0, 1.0));
 
-    m_state->channel_volumes.fill(clamped_volume);
-
     ComPtr<IAudioStreamVolume> stream_volume;
+    Vector<float, ChannelMap::capacity()> volumes_copy;
     {
         MutexLocker volume_locker(m_state->stream_volume_mutex);
+        m_state->channel_volumes.fill(clamped_volume);
+        volumes_copy = m_state->channel_volumes;
         stream_volume = m_state->audio_stream_volume;
     }
     if (!stream_volume) {
@@ -672,7 +720,7 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamWASAPI::set_volume(doub
         return promise;
     }
 
-    hr = stream_volume->SetAllVolumes(m_state->channel_volumes.size(), m_state->channel_volumes.data());
+    hr = stream_volume->SetAllVolumes(volumes_copy.size(), volumes_copy.data());
     if (FAILED(hr)) [[unlikely]] {
         if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
             promise->resolve();

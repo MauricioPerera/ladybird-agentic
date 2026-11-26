@@ -1306,6 +1306,20 @@ TEST_CASE(mcp_upload_path_security_guards)
     EXPECT(WebView::validate_mcp_upload_path(cookies_file).is_error());
     EXPECT(WebView::validate_mcp_upload_path(profile_db).is_error());
 
+    auto appdata_profile = LexicalPath::join(temp_dir, "AppData"sv, "Local"sv, "Ladybird"sv, "Cookies.sqlite"sv).string();
+    auto xdg_profile = LexicalPath::join(temp_dir, ".local"sv, "share"sv, "Ladybird"sv, "History.sqlite"sv).string();
+    write_dummy(appdata_profile);
+    write_dummy(xdg_profile);
+    EXPECT(WebView::validate_mcp_upload_path(appdata_profile).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(xdg_profile).is_error());
+
+    EXPECT(WebView::validate_mcp_upload_path("\\\\server\\share\\file.txt"sv).is_error());
+    EXPECT(WebView::validate_mcp_upload_path("//server/share/file.txt"sv).is_error());
+    auto newline_injection = ByteString::formatted("{}\n{}", photo_path, outside_path);
+    EXPECT(WebView::validate_mcp_upload_path(newline_injection).is_error());
+    auto cr_injection = ByteString::formatted("{}\r{}", photo_path, outside_path);
+    EXPECT(WebView::validate_mcp_upload_path(cr_injection).is_error());
+
     EXPECT(!WebView::validate_mcp_upload_path(photo_path).is_error());
     EXPECT(!WebView::validate_mcp_upload_path(photo_path, allowed_dir).is_error());
     EXPECT(WebView::validate_mcp_upload_path(outside_path, allowed_dir).is_error());

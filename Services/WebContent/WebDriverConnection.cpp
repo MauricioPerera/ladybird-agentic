@@ -246,7 +246,23 @@ void WebDriverConnection::driver_execution_complete(Web::WebDriver::Response res
 
 void WebDriverConnection::run_command(u64 command_id, Optional<Web::HTML::CrossProcessId> navigable_id, String const& name, JsonValue payload, Vector<String> arguments)
 {
-    VERIFY(!m_current_command_id.has_value());
+    if (m_current_command_id.has_value()) {
+        dbgln("WebDriverConnection: superseding stale command {} with {}", *m_current_command_id, command_id);
+        if (m_script_timer) {
+            m_script_timer->stop();
+            m_script_timer = nullptr;
+        }
+        m_current_script_execution_id.clear();
+        if (m_navigation_timer) {
+            m_navigation_timer->stop();
+            m_navigation_timer = nullptr;
+        }
+        m_navigation_observer = nullptr;
+        m_document_observer = nullptr;
+        m_element_locator = nullptr;
+        m_action_executor = nullptr;
+        driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "Command superseded by a newer request"sv));
+    }
     m_current_command_id = command_id;
 
     auto& page = m_page_client->page();

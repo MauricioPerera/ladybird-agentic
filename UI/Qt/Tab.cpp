@@ -932,7 +932,7 @@ void Tab::create_tab_context_menu()
 
     auto* mcp_access_action = new QAction("Allow &MCP Access", this);
     QObject::connect(mcp_access_action, &QAction::triggered, this, [this]() {
-        if (is_loaded())
+        if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
             view().set_mcp_access_allowed(!view().is_mcp_access_allowed());
     });
 
@@ -1006,8 +1006,11 @@ void Tab::create_tab_context_menu()
         // A tab that hasn't loaded has no page to mute yet.
         mute_tab_action->setEnabled(is_loaded());
         mute_tab_action->setText(is_loaded() && view().page_mute_state() == Web::HTML::MuteState::Muted ? "Un&mute Tab" : "&Mute Tab");
-        mcp_access_action->setEnabled(is_loaded());
-        mcp_access_action->setText(is_loaded() && view().is_mcp_access_allowed() ? "Revoke &MCP Access" : "Allow &MCP Access");
+        bool mcp_non_private = view().is_private() == WebView::IsPrivate::No;
+        bool mcp_available = is_loaded() && mcp_non_private;
+        mcp_access_action->setVisible(mcp_non_private);
+        mcp_access_action->setEnabled(mcp_available);
+        mcp_access_action->setText(mcp_available && view().is_mcp_access_allowed() ? "Revoke &MCP Access" : "Allow &MCP Access");
         move_to_new_window_action->setEnabled(m_window->tab_count() > 1);
     });
 }

@@ -151,11 +151,11 @@ Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::
         return {};
 
     View::InitialState initial_state;
-    if (auto active_view = active_web_view(); active_view.has_value()) {
+    if (auto active_view = active_web_view(); active_view.has_value() && active_view->is_private() == WebView::IsPrivate::No) {
         initial_state = static_cast<View&>(*active_view).initial_state_for_related_view();
     } else {
         WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation& candidate) {
-            if (!candidate.owner_view_id().has_value()) {
+            if (!candidate.owner_view_id().has_value() && candidate.is_private() == WebView::IsPrivate::No) {
                 initial_state = static_cast<View const&>(candidate).initial_state_for_related_view();
                 return IterationDecision::Break;
             }

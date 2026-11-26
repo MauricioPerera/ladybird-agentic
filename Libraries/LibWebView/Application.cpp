@@ -4489,7 +4489,7 @@ static constexpr auto mcp_webdriver_element_key = "element-6066-11e4-a52e-4f7354
 static Optional<ViewImplementation&> find_allowed_mcp_view(u64 tab_id)
 {
     auto view = ViewImplementation::find_view_by_id(tab_id);
-    if (!view.has_value() || view->owner_view_id().has_value() || !view->is_mcp_access_allowed())
+    if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes || !view->is_mcp_access_allowed())
         return {};
     return view;
 }
@@ -4602,8 +4602,11 @@ void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
             queue.in_flight_timer.clear();
         }
         if (queue.in_flight_command_id.has_value()) {
-            m_mcp_command_to_view.remove(*queue.in_flight_command_id);
+            auto cancelled_id = *queue.in_flight_command_id;
+            m_mcp_command_to_view.remove(cancelled_id);
             queue.in_flight_command_id.clear();
+            if (auto view = ViewImplementation::find_view_by_id(view_id); view.has_value())
+                view->cancel_webdriver_content_command(cancelled_id);
         }
         if (auto callback = move(queue.in_flight_callback))
             callback(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, String::from_utf8_without_validation(message.bytes())));
@@ -4699,7 +4702,7 @@ void Application::dispatch_next_mcp_content_command(u64 view_id)
         queue.in_flight_callback = move(command.on_complete);
         m_mcp_command_to_view.set(command_id, view_id);
 
-        queue.in_flight_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(15), [this, view_id, command_id] {
+        queue.in_flight_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(35), [this, view_id, command_id] {
             auto entry = m_mcp_content_queues.get(view_id);
             if (!entry.has_value())
                 return;
@@ -4709,6 +4712,8 @@ void Application::dispatch_next_mcp_content_command(u64 view_id)
             m_mcp_command_to_view.remove(command_id);
             q.in_flight_timer.clear();
             q.in_flight_command_id.clear();
+            if (auto view = ViewImplementation::find_view_by_id(view_id); view.has_value())
+                view->cancel_webdriver_content_command(command_id);
             if (auto cb = move(q.in_flight_callback))
                 cb(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "MCP command timed out"sv));
             Core::deferred_invoke([this, view_id] {
@@ -4878,7 +4883,7 @@ void Application::did_finish_load_for_extensions(ViewImplementation& view, URL::
 Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool require_mcp_permission) const
 {
     auto view = ViewImplementation::find_view_by_id(tab_id);
-    if (!view.has_value() || view->owner_view_id().has_value())
+    if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes)
         return {};
     if (require_mcp_permission && !view->is_mcp_access_allowed())
         return {};
@@ -4888,8 +4893,9 @@ Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool
 Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::ActivateTab activate_tab) const
 {
     auto view = open_mcp_new_tab(activate_tab);
-    if (view.has_value())
-        view->set_mcp_access_allowed(true);
+    if (!view.has_value() || view->is_private() == IsPrivate::Yes)
+        return {};
+    view->set_mcp_access_allowed(true);
     return view;
 }
 
@@ -4980,7 +4986,7 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 
     Vector<MCP::TabInfo> tabs;
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (!view.owner_view_id().has_value() && view.is_mcp_access_allowed())
+        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed())
             tabs.append(view_to_mcp_tab_info(view, active_id));
         return IterationDecision::Continue;
     });
@@ -4990,7 +4996,7 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 Optional<MCP::TabInfo> Application::active_allowed_tab() const
 {
     auto active_view = active_web_view();
-    if (!active_view.has_value() || active_view->owner_view_id().has_value() || !active_view->is_mcp_access_allowed())
+    if (!active_view.has_value() || active_view->owner_view_id().has_value() || active_view->is_private() == IsPrivate::Yes || !active_view->is_mcp_access_allowed())
         return {};
     return view_to_mcp_tab_info(*active_view, active_view->view_id());
 }
@@ -5008,8 +5014,8 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
     }
 
     auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
-    if (!view.has_value()) {
-        on_complete(mcp_error_result("UI unavailable to open tab"sv));
+    if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
+        on_complete(mcp_error_result("UI unavailable to open non-private tab"sv));
         return;
     }
 
@@ -5432,6 +5438,7 @@ if (!window.__ladybirdWebMCP) {
   const _Set = Set;
   const _ArrayFrom = Array.from;
   const _defineProperty = Object.defineProperty;
+  const _freeze = Object.freeze;
   const _hasOwn = Object.prototype.hasOwnProperty;
   const _jsonParse = JSON.parse;
   const _jsonStringify = JSON.stringify;
@@ -5527,19 +5534,19 @@ if (!window.__ladybirdWebMCP) {
       registerTool(tool, { replace: true });
   };
 
-  const modelContext = {
+  const modelContext = _freeze({
     registerTool,
     unregisterTool,
     provideContext,
     clearContext,
-  };
+  });
 
   if (isSecure) {
     try {
       if (!document.modelContext) {
         _defineProperty(document, 'modelContext', {
           value: modelContext,
-          configurable: true,
+          configurable: false,
           enumerable: true,
           writable: false,
         });
@@ -5549,7 +5556,7 @@ if (!window.__ladybirdWebMCP) {
       if (!navigator.modelContext) {
         _defineProperty(navigator, 'modelContext', {
           value: modelContext,
-          configurable: true,
+          configurable: false,
           enumerable: true,
           writable: false,
         });
@@ -5650,7 +5657,7 @@ if (!window.__ladybirdWebMCP) {
     };
   };
 
-  const api = {
+  const api = _freeze({
     listTools: (opts = {}) => {
       const includeDeclarative = opts.includeDeclarative !== false;
       const tools = [];
@@ -5796,7 +5803,7 @@ if (!window.__ladybirdWebMCP) {
         submitted,
       };
     },
-  };
+  });
 
   _defineProperty(window, '__ladybirdWebMCP', {
     value: api,
@@ -6400,8 +6407,11 @@ return { sx, sy, ex, ey };
 
 ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteString> const& allowed_root)
 {
-    if (raw_path.is_empty() || raw_path.contains('\0'))
-        return Error::from_string_literal("File path must not be empty or contain NUL bytes");
+    if (raw_path.is_empty() || raw_path.contains('\0') || raw_path.contains('\n') || raw_path.contains('\r'))
+        return Error::from_string_literal("File path must not be empty or contain control characters");
+
+    if (raw_path.starts_with("\\\\"sv) || raw_path.starts_with("//"sv))
+        return Error::from_string_literal("UNC or network paths are not allowed in MCP upload paths");
 
     for (auto slash_part : raw_path.split_view('/', SplitBehavior::Nothing)) {
         for (auto seg : slash_part.split_view('\\', SplitBehavior::Nothing)) {
@@ -6426,11 +6436,18 @@ ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteS
     ByteString canonical = real_or_err.is_error() ? LexicalPath::canonicalized_path(byte_path) : real_or_err.release_value();
 
     auto norm_lower = canonical.replace("\\"sv, "/"sv, ReplaceMode::All).to_lowercase();
+    if (norm_lower.starts_with("//"sv))
+        return Error::from_string_literal("UNC or network paths are not allowed in MCP upload paths");
     for (auto seg : norm_lower.split_view('/', SplitBehavior::Nothing)) {
         if (seg.is_one_of(".ssh"sv, ".gnupg"sv, ".aws"sv, ".kube"sv, ".azure"sv))
             return Error::from_string_literal("Uploading sensitive credential or browser profile files via MCP is denied");
     }
-    if (norm_lower.contains("/.config/gcloud/"sv) || norm_lower.contains("/ladybird/profiles/"sv))
+    if (norm_lower.contains("/.config/gcloud/"sv)
+        || norm_lower.contains("/ladybird/profiles/"sv)
+        || norm_lower.contains("/appdata/local/ladybird/"sv)
+        || norm_lower.contains("/appdata/roaming/ladybird/"sv)
+        || norm_lower.contains("/.local/share/ladybird/"sv)
+        || norm_lower.contains("/library/application support/ladybird/"sv))
         return Error::from_string_literal("Uploading sensitive credential or browser profile files via MCP is denied");
 
     auto basename_lower = LexicalPath::basename(canonical).to_lowercase();
@@ -6530,7 +6547,30 @@ void Application::upload_file(u64 tab_id, Optional<String> ref, Optional<String>
     };
 
     if (element_id.has_value() && !element_id->is_empty()) {
-        send_files(*element_id, move(on_complete));
+        auto eid = *element_id;
+        enqueue_mcp_webdriver_command(tab_id, "get_element_tag_name"_string, JsonValue {}, { eid }, [this, tab_id, eid, send_files = move(send_files), on_complete = move(on_complete)](Web::WebDriver::Response tag_resp) mutable {
+            if (tag_resp.is_error()) {
+                on_complete(format_mcp_webdriver_error(tag_resp.error()));
+                return;
+            }
+            auto tag_name = tag_resp.value().is_string() ? tag_resp.value().as_string() : String {};
+            if (!tag_name.equals_ignoring_ascii_case("input"sv)) {
+                on_complete(mcp_error_result("Target element is not an <input type=\"file\">"sv));
+                return;
+            }
+            enqueue_mcp_webdriver_command(tab_id, "get_element_attribute"_string, JsonValue {}, { eid, "type"_string }, [eid, send_files = move(send_files), on_complete = move(on_complete)](Web::WebDriver::Response type_resp) mutable {
+                if (type_resp.is_error()) {
+                    on_complete(format_mcp_webdriver_error(type_resp.error()));
+                    return;
+                }
+                auto type_attr = type_resp.value().is_string() ? type_resp.value().as_string() : String {};
+                if (!type_attr.equals_ignoring_ascii_case("file"sv)) {
+                    on_complete(mcp_error_result("Target element is not an <input type=\"file\">"sv));
+                    return;
+                }
+                send_files(move(eid), move(on_complete));
+            });
+        });
         return;
     }
 
@@ -6551,7 +6591,10 @@ void Application::upload_file(u64 tab_id, Optional<String> ref, Optional<String>
     js.append(R"JS(
 const res = resolveTarget(cfg);
 if (res.error) throw new Error(res.error);
-return res.el;
+const el = res.el;
+if (!el || String(el.tagName || '').toLowerCase() !== 'input' || String(el.getAttribute('type') || el.type || '').toLowerCase() !== 'file')
+  throw new Error('Target element is not an <input type="file">');
+return el;
 )JS"sv);
 
     JsonArray args;

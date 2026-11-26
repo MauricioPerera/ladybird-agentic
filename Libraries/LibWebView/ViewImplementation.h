@@ -244,7 +244,7 @@ public:
     // Whether discarding the view would let a process exit, which is how its memory comes back.
     bool discarding_ends_a_process() const;
     void set_pinned(bool pinned);
-    bool is_mcp_access_allowed() const { return m_mcp_access_allowed; }
+    bool is_mcp_access_allowed() const { return m_is_private == IsPrivate::No && m_mcp_access_allowed; }
     void set_mcp_access_allowed(bool);
     void set_current_tab_of_window(bool current_tab_of_window);
     // When the user last stopped seeing the view, if they don't see it now.
@@ -616,6 +616,7 @@ public:
     JsonValue webdriver_session_history() const;
     void wait_for_webdriver_navigation_completion(Optional<u64> page_load_timeout, Function<void(Web::WebDriver::Response)>);
     void run_webdriver_content_command(u64 command_id, Web::WebDriver::SessionBrowsingContext, String const& name, JsonValue payload, Vector<String> arguments);
+    void cancel_webdriver_content_command(u64 command_id);
     // https://w3c.github.io/webdriver-bidi/#commands
     void run_webdriver_bidi_content_command(u64 command_id, Web::HTML::CrossProcessId navigable_id, String const& method, JsonValue params);
     void run_webdriver_bidi_content_command(WebContentPage&, u64 command_id, Web::HTML::CrossProcessId navigable_id, String const& method, JsonValue params);
@@ -1226,6 +1227,7 @@ protected:
     Vector<QueuedWebDriverInputCommand> m_webdriver_input_commands;
     JsonValue m_webdriver_input_state;
     bool m_webdriver_input_command_running { false };
+    Optional<u64> m_running_webdriver_input_command_id;
     bool m_webdriver_input_state_was_lost { false };
     void discard_webdriver_input_commands(bool process_crashed = false);
     void dispatch_webdriver_content_command(u64, Optional<Web::HTML::CrossProcessId>, String const&, JsonValue, Vector<String>, WebDriverProtocol);

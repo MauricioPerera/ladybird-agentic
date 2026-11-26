@@ -75,7 +75,7 @@ void FlowsUI::send_state()
     auto active = app.active_web_view();
     Optional<u64> active_id = active.has_value() ? Optional<u64> { active->view_id() } : OptionalNone {};
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (view.owner_view_id().has_value())
+        if (view.owner_view_id().has_value() || view.is_private() == IsPrivate::Yes)
             return IterationDecision::Continue;
         if (view.url().scheme() == "about"sv && view.url() != URL::about_blank())
             return IterationDecision::Continue;
