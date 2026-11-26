@@ -4,38 +4,63 @@
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 8px 0 6px 0;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  background: rgba(15, 23, 42, 0.06);
+  margin: 8px 0 8px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(248, 250, 252, 0.92);
+  color: #0f172a;
   font: 13px/1.3 system-ui, -apple-system, sans-serif;
 }
 
+.ladybird-tbl-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ladybird-tbl-select {
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+}
+
 .ladybird-tbl-filter {
-  flex: 1;
-  min-width: 180px;
-  max-width: 340px;
+  min-width: 210px;
+  max-width: 320px;
   padding: 5px 9px;
   border-radius: 6px;
-  border: 1px solid rgba(148, 163, 184, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: #ffffff;
+  color: #0f172a;
   font: inherit;
 }
 
 .ladybird-tbl-meta {
   font-size: 12px;
-  opacity: 0.8;
+  color: #475569;
+  font-weight: 500;
 }
 
 .ladybird-tbl-btn {
   padding: 5px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(148, 163, 184, 0.5);
-  background: rgba(37, 99, 235, 0.9);
+  border: 1px solid rgba(37, 99, 235, 0.9);
+  background: #2563eb;
   color: #ffffff;
   font: 12px/1.2 system-ui, -apple-system, sans-serif;
   font-weight: 500;
   cursor: pointer;
+}
+
+.ladybird-tbl-btn-secondary {
+  border-color: rgba(148, 163, 184, 0.65);
+  background: #ffffff;
+  color: #1e293b;
 }
 
 .ladybird-tbl-sortable {
@@ -43,8 +68,16 @@
   user-select: none;
 }
 
+.ladybird-tbl-sortable:hover {
+  background-color: rgba(148, 163, 184, 0.14);
+}
+
+.ladybird-tbl-sorted {
+  color: #1d4ed8;
+}
+
 .ladybird-tbl-sort-ind {
-  margin-left: 4px;
-  font-size: 10px;
-  opacity: 0.75;
+  margin-left: 5px;
+  font-size: 11px;
+  opacity: 0.8;
 }
