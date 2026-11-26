@@ -77,6 +77,7 @@ public:
     virtual void set_extension_enabled(String extension_id, bool enabled, OnToolCallComplete) = 0;
     virtual void reload_extension(String extension_id, OnToolCallComplete) = 0;
     virtual void remove_extension(String extension_id, OnToolCallComplete) = 0;
+    virtual void inject_extension(String extension_id, Optional<u64> tab_id, OnToolCallComplete) = 0;
 };
 
 }

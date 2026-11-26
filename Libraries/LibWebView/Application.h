@@ -702,6 +702,7 @@ private:
     virtual void set_extension_enabled(String extension_id, bool enabled, MCP::OnToolCallComplete) override;
     virtual void reload_extension(String extension_id, MCP::OnToolCallComplete) override;
     virtual void remove_extension(String extension_id, MCP::OnToolCallComplete) override;
+    virtual void inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 

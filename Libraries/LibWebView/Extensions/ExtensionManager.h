@@ -35,6 +35,7 @@ public:
     String collect_combined_filter_rules() const;
     void did_start_load(ViewImplementation&, URL::URL const&);
     void did_finish_load(ViewImplementation&, URL::URL const&);
+    ErrorOr<size_t> inject_extension_into_view(StringView extension_id, ViewImplementation&);
     ErrorOr<size_t> inject_extension_into_active_tab(StringView extension_id);
 
 private:

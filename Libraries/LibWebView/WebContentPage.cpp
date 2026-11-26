@@ -3174,6 +3174,9 @@ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, 
             if (listener.on_load_finish)
                 listener.on_load_finish(committed_url);
         }
+
+        if (Application::is_initialized() && !shows_error_page(view()) && committed_url.scheme().is_one_of("http"sv, "https"sv))
+            Application::the().did_finish_load_for_extensions(view(), committed_url);
     }
 }
 

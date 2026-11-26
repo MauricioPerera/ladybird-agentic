@@ -417,6 +417,25 @@ public:
         cb(ok_json_result(JsonValue { move(out) }));
     }
 
+    virtual void inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete cb) override
+    {
+        auto ext = m_ext_store.get_extension(extension_id);
+        if (!ext.has_value()) {
+            cb(error_result("Extension not found"sv));
+            return;
+        }
+        if (!ext->enabled) {
+            cb(error_result("Extension is disabled"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("injected"sv, true);
+        out.set("extension_id"sv, extension_id);
+        out.set("tab_id"sv, tab_id.value_or(1u));
+        out.set("injected_groups"sv, static_cast<u64>(ext->manifest.content_scripts.size()));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
 private:
     WebView::FlowStore m_store;
     WebView::ExtensionStore m_ext_store;
@@ -607,7 +626,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 38u);
+    EXPECT_EQ(tools->size(), 39u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -615,6 +634,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     Optional<JsonObject> type_text_tool;
     bool found_cancel_flow_run = false;
     bool found_install_extension = false;
+    bool found_inject_extension = false;
     bool found_snapshot = false;
     bool found_console = false;
     bool found_network = false;
@@ -634,6 +654,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             found_cancel_flow_run = true;
         else if (name == "install_unpacked_extension"sv)
             found_install_extension = true;
+        else if (name == "inject_extension"sv)
+            found_inject_extension = true;
         else if (name == "get_page_snapshot"sv)
             found_snapshot = true;
         else if (name == "get_console_logs"sv)
@@ -650,6 +672,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(type_text_tool.has_value());
     EXPECT(found_cancel_flow_run);
     EXPECT(found_install_extension);
+    EXPECT(found_inject_extension);
     EXPECT(found_snapshot);
     EXPECT(found_console);
     EXPECT(found_network);
@@ -862,8 +885,20 @@ TEST_CASE(mcp_extensions_lifecycle)
     {
         JsonObject args;
         args.set("extension_id"sv, "mcp-ext-demo"sv);
+        args.set("tab_id"sv, 42);
+        auto res = call_mcp_tool(port, token, 3, "inject_extension"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("injected"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<u64>("tab_id"sv).value_or(0), 42u);
+        EXPECT_EQ(payload.get_integer<u64>("injected_groups"sv).value_or(0), 1u);
+    }
+
+    {
+        JsonObject args;
+        args.set("extension_id"sv, "mcp-ext-demo"sv);
         args.set("enabled"sv, false);
-        auto res = call_mcp_tool(port, token, 3, "set_extension_enabled"sv, move(args));
+        auto res = call_mcp_tool(port, token, 4, "set_extension_enabled"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT(!payload.get_object("extension"sv)->get_bool("enabled"sv).value_or(true));
     }
@@ -871,7 +906,15 @@ TEST_CASE(mcp_extensions_lifecycle)
     {
         JsonObject args;
         args.set("extension_id"sv, "mcp-ext-demo"sv);
-        auto res = call_mcp_tool(port, token, 4, "reload_extension"sv, move(args));
+        args.set("tab_id"sv, 42);
+        auto res = call_mcp_tool(port, token, 5, "inject_extension"sv, move(args));
+        EXPECT(res.get_bool("isError"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("extension_id"sv, "mcp-ext-demo"sv);
+        auto res = call_mcp_tool(port, token, 6, "reload_extension"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT(payload.get_bool("reloaded"sv).value_or(false));
     }
@@ -879,7 +922,7 @@ TEST_CASE(mcp_extensions_lifecycle)
     {
         JsonObject args;
         args.set("extension_id"sv, "mcp-ext-demo"sv);
-        auto res = call_mcp_tool(port, token, 5, "remove_extension"sv, move(args));
+        auto res = call_mcp_tool(port, token, 7, "remove_extension"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT(payload.get_bool("removed"sv).value_or(false));
     }

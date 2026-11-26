@@ -6323,4 +6323,32 @@ void Application::remove_extension(String extension_id, MCP::OnToolCallComplete 
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
+void Application::inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    Optional<ViewImplementation&> view;
+    if (tab_id.has_value()) {
+        view = find_automation_view(*tab_id, true);
+    } else if (auto active = active_web_view(); active.has_value()) {
+        view = find_automation_view(active->view_id(), true);
+    }
+    if (!view.has_value()) {
+        on_complete(mcp_error_result("Tab not found or MCP access not allowed for this tab"sv));
+        return;
+    }
+
+    auto res = extension_manager().inject_extension_into_view(extension_id, *view);
+    if (res.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed injecting extension: {}", res.error()))));
+        return;
+    }
+
+    JsonObject result;
+    result.set("injected"sv, true);
+    result.set("extension_id"sv, extension_id);
+    result.set("tab_id"sv, view->view_id());
+    result.set("injected_groups"sv, static_cast<u64>(res.value()));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
 }

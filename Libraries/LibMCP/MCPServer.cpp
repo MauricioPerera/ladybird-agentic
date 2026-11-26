@@ -630,6 +630,17 @@ static JsonArray build_tool_definitions()
             Array { "extension_id"sv }));
     }
 
+    {
+        JsonObject props;
+        props.set("extension_id"sv, make_prop("string"sv, "ID of the installed extension to inject."sv));
+        props.set("tab_id"sv, make_prop("integer"sv, "Optional allowed tab ID; defaults to the active allowed tab."sv));
+        tools.must_append(make_tool_schema(
+            "inject_extension"sv,
+            "Inject an enabled extension's CSS and JS content scripts into a currently open allowed tab."sv,
+            move(props),
+            Array { "extension_id"sv }));
+    }
+
     return tools;
 }
 
@@ -862,7 +873,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, and remove_extension to manage unpacked browser extensions."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -1292,6 +1303,17 @@ private:
             if (!ext_id.has_value() || ext_id->is_empty())
                 return fail_invalid_params("Missing string parameter 'extension_id'"sv);
             delegate.remove_extension(*ext_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "inject_extension"sv) {
+            auto ext_id = arguments.get_string("extension_id"sv);
+            if (!ext_id.has_value() || ext_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'extension_id'"sv);
+            auto tab_id = arguments.get_u64("tab_id"sv);
+            if (arguments.has("tab_id"sv) && (!tab_id.has_value() || *tab_id == 0))
+                return fail_invalid_params("Parameter 'tab_id' must be a positive integer"sv);
+            delegate.inject_extension(*ext_id, tab_id, move(complete));
             return;
         }
 

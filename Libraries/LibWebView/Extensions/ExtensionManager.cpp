@@ -207,23 +207,30 @@ void ExtensionManager::did_finish_load(ViewImplementation& view, URL::URL const&
     }
 }
 
-ErrorOr<size_t> ExtensionManager::inject_extension_into_active_tab(StringView extension_id)
+ErrorOr<size_t> ExtensionManager::inject_extension_into_view(StringView extension_id, ViewImplementation& view)
 {
     auto ext = m_store.get_extension(extension_id);
     if (!ext.has_value())
         return Error::from_string_literal("Extension not found");
     if (!ext->enabled)
         return Error::from_string_literal("Extension is disabled");
+    if (view.owner_view_id().has_value())
+        return Error::from_string_literal("Target view is not a top-level tab");
+    if (view.url().scheme() == "about"sv)
+        return Error::from_string_literal("Cannot inject extension into internal about: page");
+    if (view.is_private() == IsPrivate::Yes && !ext->allow_in_private)
+        return Error::from_string_literal("Extension is not allowed in private tabs");
 
+    return inject_extension_into_view(*ext, view, view.url(), false, InjectionPhase::All);
+}
+
+ErrorOr<size_t> ExtensionManager::inject_extension_into_active_tab(StringView extension_id)
+{
     auto view = m_application.active_web_view();
     if (!view.has_value())
         return Error::from_string_literal("No active browser tab");
-    if (view->url().scheme() == "about"sv)
-        return Error::from_string_literal("Cannot inject extension into internal about: page");
-    if (view->is_private() == IsPrivate::Yes && !ext->allow_in_private)
-        return Error::from_string_literal("Extension is not allowed in private tabs");
 
-    return inject_extension_into_view(*ext, *view, view->url(), false, InjectionPhase::All);
+    return inject_extension_into_view(extension_id, *view);
 }
 
 size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ext, ViewImplementation& view, URL::URL const& url, bool match_url, InjectionPhase phase)
