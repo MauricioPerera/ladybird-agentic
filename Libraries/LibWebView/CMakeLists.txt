@@ -84,6 +84,8 @@ set(SOURCES
     SessionHistoryTraversalQueue.cpp
     Settings.cpp
     SiteCompatibility.cpp
+    Skills/SkillStore.cpp
+    Skills/SkillTypes.cpp
     StorageAreaRegistry.cpp
     StorageJar.cpp
     SystemProbeClient.cpp
@@ -110,6 +112,7 @@ set(SOURCES
     WebUI/CrashReportsUI.cpp
     WebUI/ExtensionsUI.cpp
     WebUI/FlowsUI.cpp
+    WebUI/SkillsUI.cpp
     WebUI/SupportUI.cpp
     WebUI/SettingsUI.cpp
     WebWorkerClient.cpp

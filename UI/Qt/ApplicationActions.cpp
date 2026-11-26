@@ -258,6 +258,11 @@ ApplicationActions::ApplicationActions(PageOptions const& options)
     });
     m_inspect_menu->add_action(*m_open_flows_page_action);
 
+    m_open_skills_page_action = Action::create("Agent Skills"sv, ActionID::OpenSkillsPage, [] {
+        Application::the().activate_or_open_tab_with_url(URL::about_skills());
+    });
+    m_inspect_menu->add_action(*m_open_skills_page_action);
+
     m_report_website_issue_action = Action::create("Report Website Issue…"sv, ActionID::ReportWebsiteIssue, on_active_view([](RemoteView& view) {
         view.report_website_issue();
     }));

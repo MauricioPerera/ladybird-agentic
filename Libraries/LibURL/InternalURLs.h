@@ -20,6 +20,7 @@ namespace URL {
     __URL_ENUMERATE(history)    \
     __URL_ENUMERATE(newtab)     \
     __URL_ENUMERATE(settings)   \
+    __URL_ENUMERATE(skills)     \
     __URL_ENUMERATE(version)    \
     __URL_ENUMERATE(welcome)
 
@@ -34,8 +35,8 @@ ENUMERATE_INTERNAL_URLS
 
 inline bool is_webui_url(URL const& url)
 {
-#define __URL_ENUMERATE(internal_url)  \
-    if (url == about_##internal_url()) \
+#define __URL_ENUMERATE(internal_url)                        \
+    if (url.equals(about_##internal_url(), ExcludeFragment::Yes)) \
         return true;
     ENUMERATE_INTERNAL_URLS
 #undef __URL_ENUMERATE

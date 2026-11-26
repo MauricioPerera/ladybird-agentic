@@ -719,7 +719,98 @@ static JsonArray build_tool_definitions()
             Array { "tab_id"sv, "name"sv }));
     }
 
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "Optional MCP-allowed tab ID to filter skills matching that tab's current URL."sv));
+        props.set("url"sv, make_prop("string"sv, "Optional http: or https: URL to filter skills matching that page/site."sv));
+        props.set("include_disabled"sv, [] {
+            auto p = make_prop("boolean"sv, "Include disabled skills (default: false; ignored when filtering by URL/tab)."sv);
+            p.set("default"sv, false);
+            return p;
+        }());
+        tools.must_append(make_tool_schema(
+            "list_skills"sv,
+            "Discover Agent Skills configured in Ladybird (optionally filtered to a tab or URL). Returns skill names, URIs, descriptions, URL match patterns, and resource manifests without loading full instructions."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("name"sv, make_prop("string"sv, "Skill slug name (e.g. 'youtube-navigation'). Required unless 'uri' is provided."sv));
+        props.set("uri"sv, make_prop("string"sv, "Skill resource URI (e.g. 'skill://youtube-navigation/SKILL.md'). Required unless 'name' is provided."sv));
+        props.set("file"sv, make_prop("string"sv, "Optional relative path of a supporting file inside the skill (defaults to 'SKILL.md')."sv));
+        tools.must_append(make_tool_schema(
+            "read_skill"sv,
+            "Read a skill's SKILL.md instructions or a supporting file on demand. Also available via standard SEP-2640 resources/read."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        JsonObject skill_props;
+        skill_props.set("name"sv, make_prop("string"sv, "Skill slug name (1-64 lowercase a-z0-9 and hyphens)."sv));
+        skill_props.set("description"sv, make_prop("string"sv, "Concise description of when to use this skill."sv));
+        JsonObject matches_schema;
+        matches_schema.set("type"sv, "array"sv);
+        matches_schema.set("items"sv, make_prop("string"sv, "URL pattern such as 'https://www.youtube.com/*' or '*'."sv));
+        matches_schema.set("description"sv, "URL match patterns controlling which pages surface this skill automatically."sv);
+        skill_props.set("matches"sv, move(matches_schema));
+        skill_props.set("enabled"sv, make_prop("boolean"sv, "Whether the skill is active (default: true)."sv));
+        skill_props.set("body"sv, make_prop("string"sv, "Markdown instructions for the agent."sv));
+        JsonObject file_props;
+        file_props.set("path"sv, make_prop("string"sv, "Relative path such as 'references/selectors.md'."sv));
+        file_props.set("content"sv, make_prop("string"sv, "UTF-8 file content."sv));
+        JsonObject file_item;
+        file_item.set("type"sv, "object"sv);
+        file_item.set("properties"sv, move(file_props));
+        JsonObject files_schema;
+        files_schema.set("type"sv, "array"sv);
+        files_schema.set("items"sv, move(file_item));
+        skill_props.set("supporting_files"sv, move(files_schema));
+        JsonArray skill_req;
+        skill_req.must_append("name"sv);
+        skill_req.must_append("description"sv);
+        JsonObject skill_obj;
+        skill_obj.set("type"sv, "object"sv);
+        skill_obj.set("description"sv, "Skill definition to create or update."sv);
+        skill_obj.set("properties"sv, move(skill_props));
+        skill_obj.set("required"sv, move(skill_req));
+        props.set("skill"sv, move(skill_obj));
+        tools.must_append(make_tool_schema(
+            "save_skill"sv,
+            "Create or update an Agent Skill on disk. Disabled by default for security unless Ladybird is launched with --mcp-allow-skill-write (users manage skills in about:skills)."sv,
+            move(props),
+            Array { "skill"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("name"sv, make_prop("string"sv, "Skill slug name to delete."sv));
+        tools.must_append(make_tool_schema(
+            "delete_skill"sv,
+            "Delete an Agent Skill from disk. Disabled by default unless Ladybird is launched with --mcp-allow-skill-write."sv,
+            move(props),
+            Array { "name"sv }));
+    }
+
     return tools;
+}
+
+static JsonObject build_server_capabilities()
+{
+    JsonObject capabilities;
+    JsonObject tools_cap;
+    tools_cap.set("listChanged"sv, false);
+    capabilities.set("tools"sv, move(tools_cap));
+
+    capabilities.set("resources"sv, JsonObject {});
+
+    JsonObject skills_ext;
+    skills_ext.set("directoryRead"sv, true);
+    JsonObject extensions_cap;
+    extensions_cap.set("io.modelcontextprotocol/skills"sv, move(skills_ext));
+    capabilities.set("extensions"sv, move(extensions_cap));
+    return capabilities;
 }
 
 static JsonObject tab_info_to_json(TabInfo const& info)
@@ -731,6 +822,17 @@ static JsonObject tab_info_to_json(TabInfo const& info)
     object.set("container_id"sv, info.container_id);
     object.set("is_loading"sv, info.is_loading);
     object.set("is_active"sv, info.is_active);
+    if (!info.matching_skills.is_empty()) {
+        JsonArray skills_json;
+        for (auto const& hint : info.matching_skills) {
+            JsonObject s;
+            s.set("name"sv, hint.name);
+            s.set("uri"sv, hint.uri);
+            s.set("description"sv, hint.description);
+            skills_json.must_append(move(s));
+        }
+        object.set("matching_skills"sv, move(skills_json));
+    }
     return object;
 }
 
@@ -962,28 +1064,104 @@ private:
         }
 
         if (method == "initialize"sv) {
-            JsonObject capabilities;
-            JsonObject tools_cap;
-            tools_cap.set("listChanged"sv, false);
-            capabilities.set("tools"sv, move(tools_cap));
+            StringView negotiated_version = "2025-03-26"sv;
+            if (params.has_value()) {
+                if (auto requested_version = params->get_string("protocolVersion"sv); requested_version.has_value() && requested_version->bytes_as_string_view() >= "2026-07-28"sv)
+                    negotiated_version = "2026-07-28"sv;
+            }
 
             JsonObject server_info;
             server_info.set("name"sv, "ladybird-mcp"sv);
             server_info.set("version"sv, "0.1.0"sv);
 
             JsonObject result;
-            result.set("protocolVersion"sv, "2025-03-26"sv);
-            result.set("capabilities"sv, move(capabilities));
+            result.set("protocolVersion"sv, negotiated_version);
+            result.set("capabilities"sv, build_server_capabilities());
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions. Use list_page_tools and call_page_tool to discover and invoke page- or extension-registered WebMCP tools (document.modelContext / navigator.modelContext and declarative <form toolname> elements) before falling back to low-level DOM primitives."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. When list_tabs, get_active_tab, open_tab, navigate, or get_page_snapshot includes matching_skills, call read_skill (or SEP-2640 skills/get + resources/read) to load site-specific instructions before acting, and use list_skills to discover skills. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions. Use list_page_tools and call_page_tool to discover and invoke page- or extension-registered WebMCP tools (document.modelContext / navigator.modelContext and declarative <form toolname> elements) before falling back to low-level DOM primitives."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
             return;
         }
 
+        if (method == "server/discover"sv) {
+            JsonObject server_info;
+            server_info.set("name"sv, "ladybird-mcp"sv);
+            server_info.set("version"sv, "0.1.0"sv);
+
+            JsonObject result;
+            result.set("capabilities"sv, build_server_capabilities());
+            result.set("serverInfo"sv, move(server_info));
+            send_json_rpc_result(id, move(result));
+            return;
+        }
+
         if (method == "ping"sv) {
             send_json_rpc_result(id, JsonObject {});
+            return;
+        }
+
+        auto make_protocol_complete = [weak_self = make_weak_ptr(), id](ProtocolCallResult proto_result) {
+            if (!weak_self || weak_self->m_closed)
+                return;
+            if (proto_result.is_error) {
+                weak_self->send_json_rpc_error(id, proto_result.error_code, proto_result.error_message);
+                return;
+            }
+            weak_self->send_json_rpc_result(id, move(proto_result.result));
+        };
+
+        if (method == "skills/list"sv) {
+            Optional<String> cursor;
+            if (params.has_value() && params->has("cursor"sv)) {
+                auto cursor_str = params->get_string("cursor"sv);
+                if (!cursor_str.has_value()) {
+                    send_json_rpc_error(id, -32602, "Invalid params: 'cursor' must be a string"sv);
+                    return;
+                }
+                cursor = *cursor_str;
+            }
+            m_server->m_delegate.skills_list(move(cursor), move(make_protocol_complete));
+            return;
+        }
+
+        if (method == "skills/get"sv) {
+            auto uri = params.has_value() ? params->get_string("uri"sv) : Optional<String> {};
+            if (!uri.has_value() || uri->is_empty()) {
+                send_json_rpc_error(id, -32602, "Invalid params: Expected non-empty string 'uri'"sv);
+                return;
+            }
+            m_server->m_delegate.skills_get(*uri, move(make_protocol_complete));
+            return;
+        }
+
+        if (method == "resources/read"sv) {
+            auto uri = params.has_value() ? params->get_string("uri"sv) : Optional<String> {};
+            if (!uri.has_value() || uri->is_empty()) {
+                send_json_rpc_error(id, -32602, "Invalid params: Expected non-empty string 'uri'"sv);
+                return;
+            }
+            m_server->m_delegate.resources_read(*uri, move(make_protocol_complete));
+            return;
+        }
+
+        if (method == "resources/directory/read"sv) {
+            auto uri = params.has_value() ? params->get_string("uri"sv) : Optional<String> {};
+            if (!uri.has_value() || uri->is_empty()) {
+                send_json_rpc_error(id, -32602, "Invalid params: Expected non-empty string 'uri'"sv);
+                return;
+            }
+            Optional<String> cursor;
+            if (params->has("cursor"sv)) {
+                auto cursor_str = params->get_string("cursor"sv);
+                if (!cursor_str.has_value()) {
+                    send_json_rpc_error(id, -32602, "Invalid params: 'cursor' must be a string"sv);
+                    return;
+                }
+                cursor = *cursor_str;
+            }
+            m_server->m_delegate.resources_directory_read(*uri, move(cursor), move(make_protocol_complete));
             return;
         }
 
@@ -1514,6 +1692,66 @@ private:
 
             bool confirm_consequential = arguments.get_bool("confirm_consequential"sv).value_or(false);
             delegate.call_page_tool(*tab_id, *name, move(tool_args), confirm_consequential, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_skills"sv) {
+            auto tab_id = arguments.get_u64("tab_id"sv);
+            if (arguments.has("tab_id"sv) && (!tab_id.has_value() || *tab_id == 0))
+                return fail_invalid_params("Parameter 'tab_id' must be a positive integer"sv);
+            Optional<String> url;
+            if (arguments.has("url"sv) && !arguments.get("url"sv)->is_null()) {
+                auto raw_url = arguments.get_string("url"sv);
+                if (!raw_url.has_value())
+                    return fail_invalid_params("Parameter 'url' must be a string"sv);
+                url = *raw_url;
+            }
+            bool include_disabled = arguments.get_bool("include_disabled"sv).value_or(false);
+            delegate.list_skills_tool(tab_id, move(url), include_disabled, move(complete));
+            return;
+        }
+
+        if (tool_name == "read_skill"sv) {
+            Optional<String> name;
+            Optional<String> uri;
+            Optional<String> file;
+            if (arguments.has("name"sv) && !arguments.get("name"sv)->is_null()) {
+                auto raw_name = arguments.get_string("name"sv);
+                if (!raw_name.has_value())
+                    return fail_invalid_params("Parameter 'name' must be a string"sv);
+                name = *raw_name;
+            }
+            if (arguments.has("uri"sv) && !arguments.get("uri"sv)->is_null()) {
+                auto raw_uri = arguments.get_string("uri"sv);
+                if (!raw_uri.has_value())
+                    return fail_invalid_params("Parameter 'uri' must be a string"sv);
+                uri = *raw_uri;
+            }
+            if (arguments.has("file"sv) && !arguments.get("file"sv)->is_null()) {
+                auto raw_file = arguments.get_string("file"sv);
+                if (!raw_file.has_value())
+                    return fail_invalid_params("Parameter 'file' must be a string"sv);
+                file = *raw_file;
+            }
+            if ((!name.has_value() || name->is_empty()) && (!uri.has_value() || uri->is_empty()))
+                return fail_invalid_params("Provide at least one non-empty parameter: 'name' or 'uri'"sv);
+            delegate.read_skill_tool(move(name), move(uri), move(file), move(complete));
+            return;
+        }
+
+        if (tool_name == "save_skill"sv) {
+            auto skill_val = arguments.get("skill"sv);
+            if (!skill_val.has_value() || !skill_val->is_object())
+                return fail_invalid_params("Missing object parameter 'skill'"sv);
+            delegate.save_skill_tool(*skill_val, move(complete));
+            return;
+        }
+
+        if (tool_name == "delete_skill"sv) {
+            auto name = arguments.get_string("name"sv);
+            if (!name.has_value() || name->is_empty())
+                return fail_invalid_params("Missing string parameter 'name'"sv);
+            delegate.delete_skill_tool(*name, move(complete));
             return;
         }
 

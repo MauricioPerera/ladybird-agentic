@@ -82,6 +82,7 @@ enum class ActionID {
     ToggleMCP,
     OpenExtensionsPage,
     OpenFlowsPage,
+    OpenSkillsPage,
     ViewSource,
     InspectElement,
 

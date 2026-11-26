@@ -427,6 +427,9 @@ public:
     FlowRunner& flow_runner();
     ExtensionStore& extension_store();
     ExtensionManager& extension_manager();
+    SkillStore& skill_store();
+    Vector<MCP::SkillMatchHint> matching_skill_hints_for_url(URL::URL const&) const;
+    JsonArray matching_skills_json_for_url(URL::URL const&) const;
     void did_start_load_for_extensions(ViewImplementation&, URL::URL const&);
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
@@ -710,6 +713,14 @@ private:
     virtual void inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete) override;
     virtual void list_page_tools(u64 tab_id, bool include_declarative, MCP::OnToolCallComplete) override;
     virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, MCP::OnToolCallComplete) override;
+    virtual void skills_list(Optional<String> cursor, MCP::OnProtocolCallComplete) override;
+    virtual void skills_get(String uri, MCP::OnProtocolCallComplete) override;
+    virtual void resources_read(String uri, MCP::OnProtocolCallComplete) override;
+    virtual void resources_directory_read(String uri, Optional<String> cursor, MCP::OnProtocolCallComplete) override;
+    virtual void list_skills_tool(Optional<u64> tab_id, Optional<String> url, bool include_disabled, MCP::OnToolCallComplete) override;
+    virtual void read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, MCP::OnToolCallComplete) override;
+    virtual void save_skill_tool(JsonValue skill_json, MCP::OnToolCallComplete) override;
+    virtual void delete_skill_tool(String name, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
@@ -866,6 +877,7 @@ private:
     OwnPtr<FlowRunner> m_flow_runner;
     OwnPtr<ExtensionStore> m_extension_store;
     OwnPtr<ExtensionManager> m_extension_manager;
+    OwnPtr<SkillStore> m_skill_store;
     u64 m_next_mcp_command_id { 0x8000'0000'0000'0001ULL };
     u64 m_next_mcp_wait_id { 1 };
 

@@ -1,0 +1,1238 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Agent Skills</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
+        <style>
+            body {
+                max-width: 1160px;
+                padding: 36px 24px 64px 24px;
+            }
+
+            header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            header h1 {
+                flex: none;
+            }
+
+            .meta-bar {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                min-width: 220px;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: var(--control);
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 500;
+            }
+
+            .badge.on {
+                color: #16a34a;
+            }
+
+            .header-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            button {
+                height: 30px;
+                padding: 0 12px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--control-hover);
+            }
+
+            button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+
+            button.primary {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            button.primary:hover:not(:disabled) {
+                background: #1d4ed8;
+            }
+
+            button.danger {
+                color: #ef4444;
+            }
+
+            button.small {
+                height: 24px;
+                padding: 0 8px;
+                font-size: 12px;
+            }
+
+            input[type="text"],
+            select,
+            textarea {
+                width: 100%;
+                padding: 6px 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                box-sizing: border-box;
+            }
+
+            textarea.markdown {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.5;
+                min-height: 240px;
+                resize: vertical;
+            }
+
+            textarea.patterns {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                min-height: 68px;
+                resize: vertical;
+            }
+
+            textarea.file-content {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                min-height: 110px;
+                resize: vertical;
+            }
+
+            pre.preview {
+                margin: 0;
+                padding: 12px;
+                border-radius: 8px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                color: var(--text);
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+
+            .status-banner {
+                margin-bottom: 14px;
+                padding: 10px 14px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                font-size: 13px;
+            }
+
+            .status-banner.hidden {
+                display: none;
+            }
+
+            .status-banner.error {
+                border-color: #ef4444;
+                color: #ef4444;
+            }
+
+            .site-context-banner {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 14px;
+                padding: 12px 14px;
+                border-radius: 10px;
+                border: 1px solid #2563eb;
+                background: color-mix(in srgb, #2563eb 10%, var(--tile));
+                font-size: 13px;
+            }
+
+            .site-context-banner.hidden {
+                display: none;
+            }
+
+            .site-context-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            .layout {
+                display: grid;
+                grid-template-columns: 330px 1fr;
+                gap: 18px;
+                align-items: start;
+            }
+
+            @media (max-width: 860px) {
+                .layout {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .panel {
+                background: var(--card-background-color);
+                border: 1px solid var(--border-color);
+                border-radius: var(--card-radius);
+                padding: 16px;
+            }
+
+            .sidebar-header {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-bottom: 12px;
+            }
+
+            .filter-row {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+
+            .chip-btn {
+                height: 24px;
+                padding: 0 9px;
+                border-radius: 999px;
+                font-size: 11px;
+            }
+
+            .chip-btn.active {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            .skill-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .skill-item {
+                padding: 10px 12px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                cursor: pointer;
+            }
+
+            .skill-item.selected {
+                border-color: #2563eb;
+                box-shadow: 0 0 0 1px #2563eb;
+            }
+
+            .skill-item.disabled {
+                opacity: 0.65;
+            }
+
+            .skill-item-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+            }
+
+            .skill-item-name {
+                font-weight: 600;
+                font-size: 13px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            }
+
+            .pill {
+                display: inline-flex;
+                align-items: center;
+                padding: 1px 7px;
+                border-radius: 999px;
+                font-size: 11px;
+                background: var(--control);
+                color: var(--muted);
+            }
+
+            .pill.on {
+                color: #16a34a;
+            }
+
+            .pill.match {
+                color: #2563eb;
+            }
+
+            .skill-item-desc {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 4px;
+                line-height: 1.35;
+            }
+
+            .skill-item-patterns {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-top: 6px;
+            }
+
+            .pattern-chip {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 11px;
+                padding: 1px 6px;
+                border-radius: 5px;
+                background: var(--page);
+                border: 1px solid var(--border-color);
+                color: var(--muted);
+                max-width: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .skill-item-actions {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+                flex-wrap: wrap;
+            }
+
+            .tabs {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 14px;
+                border-bottom: 1px solid var(--border-color);
+                padding-bottom: 10px;
+            }
+
+            .tab-btn.active {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            .hidden {
+                display: none !important;
+            }
+
+            .grid-2 {
+                display: grid;
+                grid-template-columns: 1fr 140px;
+                gap: 10px;
+                align-items: end;
+            }
+
+            @media (max-width: 640px) {
+                .grid-2 {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .field {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                margin-bottom: 12px;
+            }
+
+            .field label {
+                font-size: 12px;
+                font-weight: 600;
+                color: var(--muted);
+            }
+
+            .checkbox-box {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                height: 32px;
+                padding: 0 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                font-size: 13px;
+                cursor: pointer;
+            }
+
+            .checkbox-box input {
+                width: auto;
+                margin: 0;
+            }
+
+            .target-bar {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+                padding: 10px 12px;
+                margin-bottom: 14px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+            }
+
+            .target-bar select {
+                flex: 1;
+                min-width: 220px;
+            }
+
+            .section-title {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+                margin: 14px 0 8px 0;
+                font-size: 13px;
+                font-weight: 600;
+            }
+
+            .supporting-file-card {
+                border: 1px solid var(--border-color);
+                border-radius: 8px;
+                background: var(--tile);
+                padding: 10px;
+                margin-bottom: 8px;
+            }
+
+            .supporting-file-header {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+
+            table.manifest {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-top: 8px;
+            }
+
+            table.manifest th,
+            table.manifest td {
+                text-align: left;
+                padding: 6px 8px;
+                border-bottom: 1px solid var(--border-color);
+                vertical-align: top;
+            }
+
+            table.manifest td.mono {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                word-break: break-all;
+            }
+
+            .muted {
+                color: var(--muted);
+                font-size: 12px;
+            }
+
+            .storage-footer {
+                margin-top: 12px;
+                color: var(--muted);
+                font-size: 11px;
+                word-break: break-all;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Agent Skills</h1>
+            <div class="meta-bar">
+                <span id="mcp-badge" class="badge">MCP inactive</span>
+                <span id="skill-count-badge" class="badge">0 skills</span>
+            </div>
+            <div class="header-actions">
+                <button id="btn-new" class="primary" type="button">+ New Skill</button>
+                <button id="btn-example" type="button">YouTube Example</button>
+                <button id="btn-open-flows" type="button">Automation Flows</button>
+            </div>
+        </header>
+
+        <div id="status-banner" class="status-banner hidden"></div>
+
+        <div id="site-context-banner" class="site-context-banner hidden">
+            <div id="site-context-text"></div>
+            <div class="site-context-actions">
+                <button id="btn-new-for-site" class="primary small" type="button">New Skill for This Site</button>
+                <button id="btn-example-for-site" class="small" type="button">Generate Starter Skill</button>
+            </div>
+        </div>
+
+        <div class="layout">
+            <aside class="panel">
+                <div class="sidebar-header">
+                    <input id="search-input" type="text" placeholder="Filter skills by name, description, or URL..." />
+                    <div id="filter-row" class="filter-row hidden">
+                        <button id="filter-site" class="chip-btn active" type="button">Matching site</button>
+                        <button id="filter-all" class="chip-btn" type="button">All skills</button>
+                    </div>
+                </div>
+                <div id="skill-list" class="skill-list"></div>
+                <div id="empty-skills" class="muted hidden">No skills saved yet. Create one or load the YouTube example.</div>
+                <div id="storage-dir" class="storage-footer"></div>
+            </aside>
+
+            <main class="panel">
+                <div class="target-bar">
+                    <select id="tab-pattern-select">
+                        <option value="">Add URL pattern from an open tab...</option>
+                    </select>
+                    <button id="btn-add-tab-pattern" type="button">+ Add Tab Pattern</button>
+                </div>
+
+                <div class="tabs">
+                    <button id="tab-editor" class="tab-btn active" type="button">Editor</button>
+                    <button id="tab-preview" class="tab-btn" type="button">SKILL.md &amp; SEP-2640 Manifest</button>
+                </div>
+
+                <section id="view-editor">
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="s-name">Skill Slug (directory name, a-z0-9 and hyphens)</label>
+                            <input id="s-name" type="text" placeholder="youtube-navigation" />
+                        </div>
+                        <div class="field">
+                            <label>Status</label>
+                            <label class="checkbox-box">
+                                <input id="s-enabled" type="checkbox" checked />
+                                <span>Enabled</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="s-desc">Description (shown to agents in matching_skills and skills/list)</label>
+                        <input id="s-desc" type="text" placeholder="How to search, navigate, and interact with this site." />
+                    </div>
+
+                    <div class="field">
+                        <label for="s-matches">URL Match Patterns (one per line: e.g. https://www.youtube.com/*, *.youtube.com, or *)</label>
+                        <textarea id="s-matches" class="patterns" spellcheck="false" placeholder="https://www.youtube.com/*"></textarea>
+                        <div class="filter-row" style="margin-top: 4px;">
+                            <button type="button" class="chip-btn" data-quick-pattern="https://www.youtube.com/*">+ youtube.com</button>
+                            <button type="button" class="chip-btn" data-quick-pattern="https://studio.youtube.com/*">+ studio.youtube.com</button>
+                            <button type="button" class="chip-btn" data-quick-pattern="*">+ * (All pages)</button>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="s-body">Instructions (Markdown body loaded on demand via read_skill / resources/read)</label>
+                        <textarea id="s-body" class="markdown" spellcheck="false" placeholder="# Site Guide&#10;&#10;1. Call get_page_snapshot first..."></textarea>
+                    </div>
+
+                    <div class="section-title">
+                        <span>Supporting Files (e.g. references/selectors.md)</span>
+                        <button id="btn-add-file" class="small" type="button">+ Add File</button>
+                    </div>
+                    <div id="supporting-files-list"></div>
+
+                    <div style="display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+                        <button id="btn-save" class="primary" type="button">Save Skill</button>
+                        <button id="btn-revert" type="button">Revert Changes</button>
+                        <button id="btn-delete-current" class="danger" type="button">Delete</button>
+                    </div>
+                </section>
+
+                <section id="view-preview" class="hidden">
+                    <div class="field">
+                        <label>Generated SKILL.md</label>
+                        <pre id="preview-skill-md" class="preview"></pre>
+                    </div>
+                    <div class="section-title">
+                        <span>SEP-2640 Resource Manifest (SHA-256 &amp; Byte Size)</span>
+                    </div>
+                    <table class="manifest">
+                        <thead>
+                            <tr>
+                                <th>URI</th>
+                                <th>MIME Type</th>
+                                <th>Digest</th>
+                                <th>Bytes</th>
+                            </tr>
+                        </thead>
+                        <tbody id="preview-manifest-body"></tbody>
+                    </table>
+                    <div id="preview-manifest-note" class="muted" style="margin-top: 8px;"></div>
+                </section>
+            </main>
+        </div>
+
+        <script>
+            let state = { skills: [], tabs: [], mcp: { enabled: false }, storageDirectory: "" };
+            let selectedSkillName = null;
+            let activeEditorTab = "editor";
+            let siteContextUrl = null;
+            let filterBySite = false;
+            let initialSiteAutoApplied = false;
+            let isDirty = false;
+            let draft = createBlankDraft();
+
+            const statusBanner = document.getElementById("status-banner");
+            const siteContextBanner = document.getElementById("site-context-banner");
+            const siteContextText = document.getElementById("site-context-text");
+            const filterRowEl = document.getElementById("filter-row");
+            const skillListEl = document.getElementById("skill-list");
+            const emptySkillsEl = document.getElementById("empty-skills");
+            const searchInput = document.getElementById("search-input");
+            const supportingFilesListEl = document.getElementById("supporting-files-list");
+
+            function createBlankDraft() {
+                return {
+                    name: "new-site-skill",
+                    description: "",
+                    enabled: true,
+                    matches: [],
+                    body: "# Site Navigation Guide\n\n1. Call `list_page_tools` first to see if WebMCP tools exist.\n2. Otherwise call `get_page_snapshot` to map visible controls to `@e1` refs.\n3. Document reliable selectors, shortcuts, and quirks below.\n",
+                    supportingFiles: []
+                };
+            }
+
+            function clone(obj) {
+                return JSON.parse(JSON.stringify(obj));
+            }
+
+            function showBanner(msg, isError) {
+                if (!msg) {
+                    statusBanner.classList.add("hidden");
+                    return;
+                }
+                statusBanner.textContent = msg;
+                statusBanner.classList.toggle("error", Boolean(isError));
+                statusBanner.classList.remove("hidden");
+            }
+
+            function slugifyHost(host) {
+                const cleaned = (host || "site")
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-+|-+$/g, "")
+                    .slice(0, 48);
+                return `${cleaned || "site"}-guide`;
+            }
+
+            function patternForSiteUrl(rawUrl) {
+                try {
+                    const u = new URL(rawUrl);
+                    return `${u.protocol}//${u.host}/*`;
+                } catch {
+                    return "";
+                }
+            }
+
+            function matchesSiteUrlClient(skill, rawUrl) {
+                if (!rawUrl) return false;
+                let parsed;
+                try {
+                    parsed = new URL(rawUrl);
+                } catch {
+                    return false;
+                }
+                if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+                const patterns = skill.matches || [];
+                const fullPath = `${parsed.pathname || "/"}${parsed.search || ""}`;
+                for (const raw of patterns) {
+                    const p = (raw || "").trim();
+                    if (!p) continue;
+                    if (p === "*" || p === "<all_urls>") return true;
+                    let norm = p;
+                    if (!norm.includes("://")) {
+                        norm = norm.includes("/") ? `*://${norm}` : `*://${norm}/*`;
+                    }
+                    const schemeIdx = norm.indexOf("://");
+                    if (schemeIdx < 0) continue;
+                    const schemePat = norm.slice(0, schemeIdx).toLowerCase();
+                    const proto = parsed.protocol.slice(0, -1).toLowerCase();
+                    if (schemePat !== "*" && schemePat !== proto) continue;
+                    const rest = norm.slice(schemeIdx + 3);
+                    const slashIdx = rest.indexOf("/");
+                    if (slashIdx < 0) continue;
+                    const hostPat = rest.slice(0, slashIdx).toLowerCase();
+                    const pathPat = rest.slice(slashIdx);
+                    const host = parsed.hostname.toLowerCase();
+                    if (hostPat !== "*") {
+                        if (hostPat.startsWith("*.")) {
+                            const base = hostPat.slice(2);
+                            if (host !== base && !host.endsWith(`.${base}`)) continue;
+                        } else if (host !== hostPat) {
+                            continue;
+                        }
+                    }
+                    const escaped = pathPat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+                    if (new RegExp(`^${escaped}$`).test(fullPath)) return true;
+                }
+                return false;
+            }
+
+            function parseHashSiteContext() {
+                const hash = location.hash ? location.hash.slice(1) : "";
+                if (!hash) {
+                    siteContextUrl = null;
+                    return;
+                }
+                const params = new URLSearchParams(hash);
+                const rawSite = params.get("site");
+                if (rawSite && (rawSite.startsWith("http://") || rawSite.startsWith("https://"))) {
+                    siteContextUrl = rawSite;
+                } else {
+                    siteContextUrl = null;
+                }
+            }
+
+            function prepareNewDraftForSite(rawUrl) {
+                let host = "site";
+                try {
+                    host = new URL(rawUrl).hostname || "site";
+                } catch {}
+                const pat = patternForSiteUrl(rawUrl);
+                selectedSkillName = null;
+                draft = {
+                    name: slugifyHost(host),
+                    description: `Navigation and automation instructions for ${host}.`,
+                    enabled: true,
+                    matches: pat ? [pat] : [],
+                    body: `# ${host} Navigation Guide\n\nUse this skill when working on \`${host}\`.\n\n## Workflow\n1. Call \`list_page_tools\` first if WebMCP tools are available.\n2. Otherwise call \`get_page_snapshot\` to inspect visible controls and \`@e1\` refs.\n\n## Key Selectors & Actions\n- Describe primary inputs, buttons, and multi-step flows here.\n`,
+                    supportingFiles: []
+                };
+                isDirty = false;
+                renderSkillList();
+                renderEditor();
+            }
+
+            function parsePatternsText(text) {
+                return (text || "")
+                    .split(/\r?\n/)
+                    .map(line => line.trim())
+                    .filter(Boolean);
+            }
+
+            function syncDraftFromInputs() {
+                draft.name = document.getElementById("s-name").value.trim();
+                draft.enabled = document.getElementById("s-enabled").checked;
+                draft.description = document.getElementById("s-desc").value;
+                draft.matches = parsePatternsText(document.getElementById("s-matches").value);
+                draft.body = document.getElementById("s-body").value;
+            }
+
+            function buildSkillMdPreview() {
+                const lines = [
+                    "---",
+                    `name: ${draft.name || ""}`,
+                    `description: ${JSON.stringify(draft.description || "")}`,
+                    `enabled: ${draft.enabled ? "true" : "false"}`
+                ];
+                if (draft.matches && draft.matches.length > 0) {
+                    lines.push("matches:");
+                    draft.matches.forEach(m => lines.push(`  - ${JSON.stringify(m)}`));
+                }
+                lines.push("---", "");
+                if (draft.body && draft.body.trim().length > 0) {
+                    lines.push(draft.body.replace(/^\n+|\n+$/g, ""));
+                }
+                return `${lines.join("\n")}\n`;
+            }
+
+            function renderPreview() {
+                syncDraftFromInputs();
+                document.getElementById("preview-skill-md").textContent = buildSkillMdPreview();
+                const tbody = document.getElementById("preview-manifest-body");
+                tbody.innerHTML = "";
+                const saved = state.skills.find(s => s.name === selectedSkillName);
+                const resources = saved ? (saved.resources || []) : [];
+                if (resources.length === 0) {
+                    const tr = document.createElement("tr");
+                    const td = document.createElement("td");
+                    td.colSpan = 4;
+                    td.className = "muted";
+                    td.textContent = "Save the skill to compute SHA-256 digests and exact disk sizes.";
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                    document.getElementById("preview-manifest-note").textContent = "";
+                    return;
+                }
+                resources.forEach(res => {
+                    const tr = document.createElement("tr");
+                    const tdUri = document.createElement("td");
+                    tdUri.className = "mono";
+                    tdUri.textContent = res.uri;
+                    const tdMime = document.createElement("td");
+                    tdMime.textContent = res.mimeType;
+                    const tdDigest = document.createElement("td");
+                    tdDigest.className = "mono";
+                    tdDigest.textContent = res.digest;
+                    const tdSize = document.createElement("td");
+                    tdSize.textContent = String(res.size);
+                    tr.append(tdUri, tdMime, tdDigest, tdSize);
+                    tbody.appendChild(tr);
+                });
+                document.getElementById("preview-manifest-note").textContent = isDirty
+                    ? "Unsaved edits in editor: manifest reflects the last saved files on disk until you click Save Skill."
+                    : "Digests match the files currently served via SEP-2640 skills/get and resources/read.";
+            }
+
+            function renderSupportingFiles() {
+                supportingFilesListEl.innerHTML = "";
+                const files = draft.supportingFiles || [];
+                if (files.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "muted";
+                    empty.textContent = "No supporting files. Add reference markdown, JSON schemas, or selector cheat sheets if needed.";
+                    supportingFilesListEl.appendChild(empty);
+                    return;
+                }
+                files.forEach((file, idx) => {
+                    const card = document.createElement("div");
+                    card.className = "supporting-file-card";
+
+                    const header = document.createElement("div");
+                    header.className = "supporting-file-header";
+
+                    const pathInput = document.createElement("input");
+                    pathInput.type = "text";
+                    pathInput.placeholder = "references/selectors.md";
+                    pathInput.value = file.path || "";
+                    pathInput.addEventListener("input", () => {
+                        draft.supportingFiles[idx].path = pathInput.value.trim();
+                        isDirty = true;
+                    });
+
+                    const removeBtn = document.createElement("button");
+                    removeBtn.type = "button";
+                    removeBtn.className = "danger small";
+                    removeBtn.textContent = "Remove";
+                    removeBtn.addEventListener("click", () => {
+                        draft.supportingFiles.splice(idx, 1);
+                        isDirty = true;
+                        renderSupportingFiles();
+                        if (activeEditorTab === "preview") renderPreview();
+                    });
+
+                    header.append(pathInput, removeBtn);
+
+                    const contentArea = document.createElement("textarea");
+                    contentArea.className = "file-content";
+                    contentArea.spellcheck = false;
+                    contentArea.placeholder = "# Reference notes...";
+                    contentArea.value = file.content || "";
+                    contentArea.addEventListener("input", () => {
+                        draft.supportingFiles[idx].content = contentArea.value;
+                        isDirty = true;
+                    });
+
+                    card.append(header, contentArea);
+                    supportingFilesListEl.appendChild(card);
+                });
+            }
+
+            function renderEditor() {
+                document.getElementById("s-name").value = draft.name || "";
+                document.getElementById("s-enabled").checked = draft.enabled !== false;
+                document.getElementById("s-desc").value = draft.description || "";
+                document.getElementById("s-matches").value = (draft.matches || []).join("\n");
+                document.getElementById("s-body").value = draft.body || "";
+                document.getElementById("btn-delete-current").disabled = !state.skills.some(s => s.name === selectedSkillName);
+                renderSupportingFiles();
+                if (activeEditorTab === "preview") renderPreview();
+            }
+
+            function renderSiteContextBanner() {
+                if (!siteContextUrl) {
+                    siteContextBanner.classList.add("hidden");
+                    filterRowEl.classList.add("hidden");
+                    return;
+                }
+                let host = siteContextUrl;
+                try {
+                    host = new URL(siteContextUrl).host;
+                } catch {}
+                const matchCount = state.skills.filter(s => matchesSiteUrlClient(s, siteContextUrl)).length;
+                siteContextText.innerHTML = "";
+                const strong = document.createElement("strong");
+                strong.textContent = `Site context: ${host}`;
+                const info = document.createElement("span");
+                info.textContent = ` — ${matchCount} matching skill${matchCount === 1 ? "" : "s"} (${siteContextUrl})`;
+                siteContextText.append(strong, info);
+
+                document.getElementById("btn-new-for-site").textContent = `New Skill for ${host}`;
+                siteContextBanner.classList.remove("hidden");
+                filterRowEl.classList.remove("hidden");
+                document.getElementById("filter-site").classList.toggle("active", filterBySite);
+                document.getElementById("filter-all").classList.toggle("active", !filterBySite);
+            }
+
+            function renderMcpAndMeta() {
+                const badge = document.getElementById("mcp-badge");
+                if (state.mcp && state.mcp.enabled) {
+                    const rw = state.mcp.allowSkillWrite ? "read/write" : "read-only";
+                    badge.textContent = `MCP active (${state.mcp.endpoint || ""}, ${rw})`;
+                    badge.classList.add("on");
+                } else {
+                    badge.textContent = "MCP inactive (enable in Inspect menu)";
+                    badge.classList.remove("on");
+                }
+                const enabledCount = state.skills.filter(s => s.enabled).length;
+                document.getElementById("skill-count-badge").textContent = `${state.skills.length} skill${state.skills.length === 1 ? "" : "s"} (${enabledCount} enabled)`;
+                document.getElementById("storage-dir").textContent = state.storageDirectory ? `Storage: ${state.storageDirectory}` : "";
+            }
+
+            function renderTabsDropdown() {
+                const select = document.getElementById("tab-pattern-select");
+                const prev = select.value;
+                select.innerHTML = "";
+                const placeholder = document.createElement("option");
+                placeholder.value = "";
+                placeholder.textContent = state.tabs.length > 0
+                    ? "Add URL pattern from an open tab..."
+                    : "No open http/https tabs";
+                select.appendChild(placeholder);
+                state.tabs.forEach(tab => {
+                    const opt = document.createElement("option");
+                    opt.value = tab.suggestedPattern || "";
+                    const title = (tab.title || tab.url || "Tab").slice(0, 48);
+                    const mcpTag = tab.mcpAllowed ? " [MCP]" : "";
+                    opt.textContent = `${tab.suggestedPattern} — ${title}${mcpTag}`;
+                    select.appendChild(opt);
+                });
+                if ([...select.options].some(o => o.value === prev)) {
+                    select.value = prev;
+                }
+            }
+
+            function renderSkillList() {
+                const q = searchInput.value.trim().toLowerCase();
+                const filtered = state.skills.filter(skill => {
+                    if (siteContextUrl && filterBySite && !matchesSiteUrlClient(skill, siteContextUrl))
+                        return false;
+                    if (!q) return true;
+                    const patterns = (skill.matches || []).join(" ").toLowerCase();
+                    return skill.name.toLowerCase().includes(q)
+                        || (skill.description || "").toLowerCase().includes(q)
+                        || patterns.includes(q);
+                });
+
+                skillListEl.innerHTML = "";
+                emptySkillsEl.classList.toggle("hidden", filtered.length > 0);
+                if (filtered.length === 0 && state.skills.length > 0 && filterBySite) {
+                    emptySkillsEl.textContent = "No skills match this site yet. Click 'New Skill for This Site' above or switch to 'All skills'.";
+                } else {
+                    emptySkillsEl.textContent = "No skills saved yet. Create one or load the YouTube example.";
+                }
+
+                filtered.forEach(skill => {
+                    const item = document.createElement("div");
+                    const isMatch = siteContextUrl && matchesSiteUrlClient(skill, siteContextUrl);
+                    item.className = `skill-item${skill.name === selectedSkillName ? " selected" : ""}${skill.enabled ? "" : " disabled"}`;
+
+                    const top = document.createElement("div");
+                    top.className = "skill-item-top";
+                    const nameEl = document.createElement("div");
+                    nameEl.className = "skill-item-name";
+                    nameEl.textContent = skill.name;
+
+                    const badges = document.createElement("div");
+                    badges.style.display = "flex";
+                    badges.style.gap = "4px";
+                    if (isMatch) {
+                        const matchPill = document.createElement("span");
+                        matchPill.className = "pill match";
+                        matchPill.textContent = "Match";
+                        badges.appendChild(matchPill);
+                    }
+                    const statusPill = document.createElement("span");
+                    statusPill.className = `pill${skill.enabled ? " on" : ""}`;
+                    statusPill.textContent = skill.enabled ? "Enabled" : "Disabled";
+                    badges.appendChild(statusPill);
+                    top.append(nameEl, badges);
+
+                    const descEl = document.createElement("div");
+                    descEl.className = "skill-item-desc";
+                    descEl.textContent = skill.description;
+
+                    item.append(top, descEl);
+
+                    if ((skill.matches || []).length > 0) {
+                        const patsEl = document.createElement("div");
+                        patsEl.className = "skill-item-patterns";
+                        skill.matches.slice(0, 4).forEach(pat => {
+                            const chip = document.createElement("span");
+                            chip.className = "pattern-chip";
+                            chip.textContent = pat;
+                            patsEl.appendChild(chip);
+                        });
+                        if (skill.matches.length > 4) {
+                            const more = document.createElement("span");
+                            more.className = "pattern-chip";
+                            more.textContent = `+${skill.matches.length - 4}`;
+                            patsEl.appendChild(more);
+                        }
+                        item.appendChild(patsEl);
+                    }
+
+                    const actions = document.createElement("div");
+                    actions.className = "skill-item-actions";
+
+                    const toggleBtn = document.createElement("button");
+                    toggleBtn.type = "button";
+                    toggleBtn.className = "small";
+                    toggleBtn.textContent = skill.enabled ? "Disable" : "Enable";
+                    toggleBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        ladybird.sendMessage("setSkillEnabled", { name: skill.name, enabled: !skill.enabled });
+                    });
+
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "small danger";
+                    delBtn.textContent = "Delete";
+                    delBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        if (selectedSkillName === skill.name) selectedSkillName = null;
+                        ladybird.sendMessage("deleteSkill", skill.name);
+                    });
+
+                    actions.append(toggleBtn, delBtn);
+                    item.appendChild(actions);
+
+                    item.addEventListener("click", () => {
+                        selectedSkillName = skill.name;
+                        draft = clone(skill);
+                        isDirty = false;
+                        renderSkillList();
+                        renderEditor();
+                    });
+
+                    skillListEl.appendChild(item);
+                });
+            }
+
+            function appendPatternToEditor(pattern) {
+                if (!pattern) return;
+                syncDraftFromInputs();
+                if (!draft.matches.includes(pattern)) {
+                    draft.matches.push(pattern);
+                    isDirty = true;
+                    renderEditor();
+                }
+            }
+
+            function setEditorTab(tab) {
+                activeEditorTab = tab;
+                document.getElementById("tab-editor").classList.toggle("active", tab === "editor");
+                document.getElementById("tab-preview").classList.toggle("active", tab === "preview");
+                document.getElementById("view-editor").classList.toggle("hidden", tab !== "editor");
+                document.getElementById("view-preview").classList.toggle("hidden", tab !== "preview");
+                if (tab === "preview") renderPreview();
+            }
+
+            ["s-name", "s-enabled", "s-desc", "s-matches", "s-body"].forEach(id => {
+                document.getElementById(id).addEventListener("input", () => {
+                    isDirty = true;
+                });
+            });
+
+            document.querySelectorAll("[data-quick-pattern]").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    appendPatternToEditor(btn.getAttribute("data-quick-pattern"));
+                });
+            });
+
+            document.getElementById("tab-editor").addEventListener("click", () => setEditorTab("editor"));
+            document.getElementById("tab-preview").addEventListener("click", () => setEditorTab("preview"));
+            searchInput.addEventListener("input", renderSkillList);
+
+            document.getElementById("filter-site").addEventListener("click", () => {
+                filterBySite = true;
+                renderSiteContextBanner();
+                renderSkillList();
+            });
+            document.getElementById("filter-all").addEventListener("click", () => {
+                filterBySite = false;
+                renderSiteContextBanner();
+                renderSkillList();
+            });
+
+            document.getElementById("btn-open-flows").addEventListener("click", () => {
+                window.location.href = "about:flows";
+            });
+
+            document.getElementById("btn-example").addEventListener("click", () => {
+                ladybird.sendMessage("createExampleSkill", {});
+            });
+
+            document.getElementById("btn-example-for-site").addEventListener("click", () => {
+                ladybird.sendMessage("createExampleSkill", { siteUrl: siteContextUrl || "" });
+            });
+
+            document.getElementById("btn-new").addEventListener("click", () => {
+                selectedSkillName = null;
+                draft = createBlankDraft();
+                draft.name = `skill-${Date.now().toString(36)}`;
+                if (siteContextUrl) {
+                    const pat = patternForSiteUrl(siteContextUrl);
+                    if (pat) draft.matches = [pat];
+                }
+                isDirty = false;
+                renderSkillList();
+                renderEditor();
+                setEditorTab("editor");
+                showBanner("Editing new unsaved skill.", false);
+            });
+
+            document.getElementById("btn-new-for-site").addEventListener("click", () => {
+                if (siteContextUrl) {
+                    prepareNewDraftForSite(siteContextUrl);
+                    setEditorTab("editor");
+                    showBanner("Pre-filled new skill for current site.", false);
+                }
+            });
+
+            document.getElementById("btn-add-tab-pattern").addEventListener("click", () => {
+                const pat = document.getElementById("tab-pattern-select").value;
+                appendPatternToEditor(pat);
+            });
+
+            document.getElementById("btn-add-file").addEventListener("click", () => {
+                syncDraftFromInputs();
+                const idx = draft.supportingFiles.length + 1;
+                draft.supportingFiles.push({
+                    path: `references/note-${idx}.md`,
+                    content: "# Reference\n\n"
+                });
+                isDirty = true;
+                renderSupportingFiles();
+            });
+
+            document.getElementById("btn-save").addEventListener("click", () => {
+                syncDraftFromInputs();
+                selectedSkillName = draft.name;
+                ladybird.sendMessage("saveSkill", {
+                    name: draft.name,
+                    description: draft.description,
+                    enabled: draft.enabled,
+                    matches: draft.matches,
+                    body: draft.body,
+                    supportingFiles: draft.supportingFiles
+                });
+            });
+
+            document.getElementById("btn-revert").addEventListener("click", () => {
+                if (selectedSkillName) {
+                    const existing = state.skills.find(s => s.name === selectedSkillName);
+                    if (existing) {
+                        draft = clone(existing);
+                        isDirty = false;
+                        renderEditor();
+                        showBanner("Reverted unsaved changes.", false);
+                        return;
+                    }
+                }
+                draft = createBlankDraft();
+                isDirty = false;
+                renderEditor();
+            });
+
+            document.getElementById("btn-delete-current").addEventListener("click", () => {
+                if (!selectedSkillName) return;
+                const nameToDelete = selectedSkillName;
+                selectedSkillName = null;
+                ladybird.sendMessage("deleteSkill", nameToDelete);
+            });
+
+            function applyInitialSelectionFromState() {
+                if (siteContextUrl && !initialSiteAutoApplied && !isDirty) {
+                    initialSiteAutoApplied = true;
+                    const matches = state.skills.filter(s => matchesSiteUrlClient(s, siteContextUrl));
+                    if (matches.length > 0) {
+                        filterBySite = true;
+                        selectedSkillName = matches[0].name;
+                        draft = clone(matches[0]);
+                        renderEditor();
+                    } else {
+                        filterBySite = false;
+                        prepareNewDraftForSite(siteContextUrl);
+                    }
+                    return;
+                }
+                if (!selectedSkillName && !isDirty && state.skills.length > 0 && !siteContextUrl) {
+                    selectedSkillName = state.skills[0].name;
+                    draft = clone(state.skills[0]);
+                    renderEditor();
+                } else if (selectedSkillName && !isDirty) {
+                    const current = state.skills.find(s => s.name === selectedSkillName);
+                    if (current) {
+                        draft = clone(current);
+                        renderEditor();
+                    }
+                }
+            }
+
+            document.addEventListener("WebUIMessage", event => {
+                if (event.detail.name === "stateUpdated") {
+                    state = event.detail.data;
+                    applyInitialSelectionFromState();
+                    renderMcpAndMeta();
+                    renderSiteContextBanner();
+                    renderSkillList();
+                    renderTabsDropdown();
+                    if (activeEditorTab === "preview") renderPreview();
+                } else if (event.detail.name === "actionResult") {
+                    const res = event.detail.data;
+                    showBanner(res.message || (res.ok ? "Done" : "Failed"), !res.ok);
+                    if (res.ok && res.skillName) {
+                        selectedSkillName = res.skillName;
+                        isDirty = false;
+                        const found = state.skills.find(s => s.name === res.skillName);
+                        if (found) {
+                            draft = clone(found);
+                            renderEditor();
+                            renderSkillList();
+                        }
+                    }
+                }
+            });
+
+            window.addEventListener("hashchange", () => {
+                parseHashSiteContext();
+                initialSiteAutoApplied = false;
+                applyInitialSelectionFromState();
+                renderSiteContextBanner();
+                renderSkillList();
+            });
+
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) ladybird.sendMessage("loadState");
+            });
+
+            parseHashSiteContext();
+            renderEditor();
+            document.addEventListener("WebUILoaded", () => {
+                parseHashSiteContext();
+                ladybird.sendMessage("loadState");
+            });
+        </script>
+    </body>
+</html>

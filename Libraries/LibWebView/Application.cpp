@@ -81,6 +81,8 @@
 #include <LibWebView/ProcessType.h>
 #include <LibWebView/RequestServerManager.h>
 #include <LibWebView/SiteCompatibility.h>
+#include <LibWebView/Skills/SkillStore.h>
+#include <LibWebView/Skills/SkillTypes.h>
 #include <LibWebView/SpellChecker.h>
 #include <LibWebView/StorageAreaRegistry.h>
 #include <LibWebView/SystemProbeClient.h>
@@ -241,6 +243,7 @@ Application::~Application()
         m_flow_runner->cancel_all_runs("Browser shutting down"sv);
     m_extension_manager.clear();
     m_extension_store.clear();
+    m_skill_store.clear();
     m_flow_runner.clear();
     m_flow_store.clear();
     m_mcp.clear();
@@ -364,6 +367,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     Optional<StringView> mcp_token;
     Optional<StringView> mcp_upload_dir;
     bool mcp_allow_extension_install = false;
+    bool mcp_allow_skill_write = false;
     Vector<StringView> debug_processes;
     Optional<StringView> profile_process;
     Optional<StringView> profile_tool;
@@ -577,6 +581,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_token, "Authentication token for the embedded MCP server", "mcp-token", 0, "token");
     args_parser.add_option(mcp_upload_dir, "Restrict MCP upload_file tool to files inside this directory", "mcp-upload-dir", 0, "directory");
     args_parser.add_option(mcp_allow_extension_install, "Allow installing unpacked extensions via the MCP server", "mcp-allow-extension-install", 0);
+    args_parser.add_option(mcp_allow_skill_write, "Allow creating, editing, or deleting Agent Skills via the MCP server", "mcp-allow-skill-write", 0);
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -644,6 +649,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .mcp_token = mcp_token.has_value() ? Optional<String> { TRY(String::from_utf8(*mcp_token)) } : OptionalNone {},
         .mcp_upload_root = mcp_upload_dir.has_value() ? Optional<ByteString> { ByteString { *mcp_upload_dir } } : OptionalNone {},
         .mcp_allow_extension_install = mcp_allow_extension_install,
+        .mcp_allow_skill_write = mcp_allow_skill_write,
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
         .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
         .force_video_decoder_server = force_video_decoder_server ? ForceVideoDecoderServer::Yes : ForceVideoDecoderServer::No,
@@ -4658,6 +4664,7 @@ Optional<u16> Application::mcp_port() const
 ErrorOr<void> Application::launch_mcp_server()
 {
     VERIFY(!m_mcp);
+    (void)skill_store();
 
     String token;
     if (m_browser_options.mcp_token.has_value() && !m_browser_options.mcp_token->is_empty()) {
@@ -4903,6 +4910,8 @@ void Application::wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete o
             result.set("url"sv, allowed_view->url().to_string());
             result.set("title"sv, allowed_view->title().to_well_formed_utf8());
             result.set("is_loading"sv, allowed_view->is_loading());
+            if (auto hints = matching_skills_json_for_url(allowed_view->url()); !hints.is_empty())
+                result.set("matching_skills"sv, move(hints));
             finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { move(result) }));
         });
     };
@@ -4977,6 +4986,41 @@ ExtensionManager& Application::extension_manager()
     if (!m_extension_manager)
         m_extension_manager = make<ExtensionManager>(*this, extension_store(), flow_store());
     return *m_extension_manager;
+}
+
+SkillStore& Application::skill_store()
+{
+    if (!m_skill_store) {
+        auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
+        auto skills_dir = LexicalPath::join(base_dir, "skills"sv).string();
+        m_skill_store = make<SkillStore>(move(skills_dir));
+    }
+    return *m_skill_store;
+}
+
+Vector<MCP::SkillMatchHint> Application::matching_skill_hints_for_url(URL::URL const& url) const
+{
+    if (!m_skill_store)
+        return {};
+    Vector<MCP::SkillMatchHint> hints;
+    for (auto const& skill : m_skill_store->matching_skills_for_url(url)) {
+        hints.append({
+            .name = skill.name,
+            .uri = skill_uri(skill.name, "SKILL.md"sv),
+            .description = skill.description,
+        });
+    }
+    return hints;
+}
+
+JsonArray Application::matching_skills_json_for_url(URL::URL const& url) const
+{
+    if (!m_skill_store)
+        return {};
+    JsonArray array;
+    for (auto const& skill : m_skill_store->matching_skills_for_url(url))
+        array.must_append(serialize_skill_match_hint(skill));
+    return array;
 }
 
 void Application::did_start_load_for_extensions(ViewImplementation& view, URL::URL const& url)
@@ -5105,8 +5149,11 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 
     Vector<MCP::TabInfo> tabs;
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed())
-            tabs.append(view_to_mcp_tab_info(view, active_id));
+        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed()) {
+            auto info = view_to_mcp_tab_info(view, active_id);
+            info.matching_skills = matching_skill_hints_for_url(view.url());
+            tabs.append(move(info));
+        }
         return IterationDecision::Continue;
     });
     return tabs;
@@ -5117,7 +5164,9 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     auto active_view = active_web_view();
     if (!active_view.has_value() || active_view->owner_view_id().has_value() || active_view->is_private() == IsPrivate::Yes || !active_view->is_mcp_access_allowed())
         return {};
-    return view_to_mcp_tab_info(*active_view, active_view->view_id());
+    auto info = view_to_mcp_tab_info(*active_view, active_view->view_id());
+    info.matching_skills = matching_skill_hints_for_url(active_view->url());
+    return info;
 }
 
 void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete on_complete)
@@ -5169,6 +5218,8 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
     result.set("container_id"sv, view->container_id());
     result.set("mcp_access_allowed"sv, true);
     result.set("is_loading"sv, true);
+    if (auto hints = matching_skills_json_for_url(*parsed_url); !hints.is_empty())
+        result.set("matching_skills"sv, move(hints));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
@@ -5230,6 +5281,8 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
     JsonObject result;
     result.set("tab_id"sv, tab_id);
     result.set("url"sv, parsed_url.to_string());
+    if (auto hints = matching_skills_json_for_url(parsed_url); !hints.is_empty())
+        result.set("matching_skills"sv, move(hints));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
@@ -6235,7 +6288,29 @@ if (cfg.include_text && document.body) {
 return out;
 )JS"_string;
 
-    execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(on_complete));
+    auto wrapped_complete = [this, tab_id, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+        if (!res.is_error && m_skill_store) {
+            if (auto parsed = JsonValue::from_string(res.text); !parsed.is_error() && parsed.value().is_object()) {
+                auto obj = parsed.release_value().as_object();
+                Optional<URL::URL> url;
+                if (auto url_str = obj.get_string("url"sv); url_str.has_value())
+                    url = URL::Parser::basic_parse(*url_str);
+                if (!url.has_value()) {
+                    if (auto view = find_allowed_mcp_view(tab_id); view.has_value())
+                        url = view->url();
+                }
+                if (url.has_value()) {
+                    if (auto hints = matching_skills_json_for_url(*url); !hints.is_empty()) {
+                        obj.set("matching_skills"sv, move(hints));
+                        res.text = JsonValue { move(obj) }.serialized();
+                    }
+                }
+            }
+        }
+        on_complete(move(res));
+    };
+
+    execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(wrapped_complete));
 }
 
 void Application::press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete on_complete)
@@ -7398,6 +7473,297 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         }
         on_complete(mcp_ok_json(response.value()));
     });
+}
+
+static MCP::ProtocolCallResult mcp_proto_error(i32 code, StringView msg)
+{
+    return {
+        .is_error = true,
+        .error_code = code,
+        .error_message = String::from_utf8_without_validation(msg.bytes()),
+        .result = {},
+    };
+}
+
+void Application::skills_list(Optional<String> cursor, MCP::OnProtocolCallComplete on_complete)
+{
+    auto all_skills = skill_store().list_skills(false);
+    size_t offset = 0;
+    if (cursor.has_value() && !cursor->is_empty()) {
+        auto parsed_offset = cursor->to_number<size_t>();
+        if (!parsed_offset.has_value() || *parsed_offset > all_skills.size()) {
+            on_complete(mcp_proto_error(-32602, "Invalid pagination cursor"sv));
+            return;
+        }
+        offset = *parsed_offset;
+    }
+
+    constexpr size_t page_size = 50;
+    size_t end = min(offset + page_size, all_skills.size());
+
+    JsonArray skills_json;
+    for (size_t i = offset; i < end; ++i)
+        skills_json.must_append(serialize_skill_mcp_entry(all_skills[i]));
+
+    JsonObject result;
+    result.set("resultType"sv, "complete"sv);
+    result.set("skills"sv, move(skills_json));
+    result.set("ttlMs"sv, 60000);
+    result.set("cacheScope"sv, "private"sv);
+    if (end < all_skills.size())
+        result.set("nextCursor"sv, String::number(end));
+
+    on_complete({ .is_error = false, .result = move(result) });
+}
+
+void Application::skills_get(String uri, MCP::OnProtocolCallComplete on_complete)
+{
+    auto parsed = parse_skill_uri(uri, false);
+    if (!parsed.has_value() || parsed->relative_path != "SKILL.md"sv) {
+        on_complete(mcp_proto_error(-32602, "Unknown or invalid skill URI"sv));
+        return;
+    }
+
+    auto skill = skill_store().get_skill(parsed->name, false);
+    if (!skill.has_value()) {
+        on_complete(mcp_proto_error(-32602, "Unknown or disabled skill URI"sv));
+        return;
+    }
+
+    JsonObject result;
+    result.set("resultType"sv, "complete"sv);
+    result.set("skill"sv, serialize_skill_mcp_entry(*skill));
+    result.set("ttlMs"sv, 60000);
+    result.set("cacheScope"sv, "private"sv);
+    on_complete({ .is_error = false, .result = move(result) });
+}
+
+void Application::resources_read(String uri, MCP::OnProtocolCallComplete on_complete)
+{
+    auto resource = skill_store().read_skill_resource(uri, false);
+    if (resource.is_error()) {
+        on_complete(mcp_proto_error(-32602, MUST(String::formatted("Cannot read resource: {}", resource.error()))));
+        return;
+    }
+
+    JsonObject item;
+    item.set("uri"sv, resource.value().uri);
+    item.set("mimeType"sv, resource.value().mime_type);
+    item.set("text"sv, resource.value().text);
+
+    JsonArray contents;
+    contents.must_append(move(item));
+
+    JsonObject result;
+    result.set("resultType"sv, "complete"sv);
+    result.set("contents"sv, move(contents));
+    result.set("ttlMs"sv, 60000);
+    result.set("cacheScope"sv, "private"sv);
+    on_complete({ .is_error = false, .result = move(result) });
+}
+
+void Application::resources_directory_read(String uri, Optional<String> cursor, MCP::OnProtocolCallComplete on_complete)
+{
+    if (uri.ends_with('/')) {
+        on_complete(mcp_proto_error(-32602, "Directory URIs must not have a trailing slash"sv));
+        return;
+    }
+
+    auto entries_or = skill_store().read_skill_directory(uri, false);
+    if (entries_or.is_error()) {
+        on_complete(mcp_proto_error(-32602, MUST(String::formatted("Cannot read directory: {}", entries_or.error()))));
+        return;
+    }
+
+    auto const& all_entries = entries_or.value();
+    size_t offset = 0;
+    if (cursor.has_value() && !cursor->is_empty()) {
+        auto parsed_offset = cursor->to_number<size_t>();
+        if (!parsed_offset.has_value() || *parsed_offset > all_entries.size()) {
+            on_complete(mcp_proto_error(-32602, "Invalid pagination cursor"sv));
+            return;
+        }
+        offset = *parsed_offset;
+    }
+
+    constexpr size_t page_size = 100;
+    size_t end = min(offset + page_size, all_entries.size());
+
+    JsonArray resources;
+    for (size_t i = offset; i < end; ++i) {
+        JsonObject item;
+        item.set("uri"sv, all_entries[i].uri);
+        item.set("name"sv, all_entries[i].name);
+        item.set("mimeType"sv, all_entries[i].mime_type);
+        resources.must_append(move(item));
+    }
+
+    JsonObject result;
+    result.set("resultType"sv, "complete"sv);
+    result.set("resources"sv, move(resources));
+    result.set("ttlMs"sv, 60000);
+    result.set("cacheScope"sv, "private"sv);
+    if (end < all_entries.size())
+        result.set("nextCursor"sv, String::number(end));
+
+    on_complete({ .is_error = false, .result = move(result) });
+}
+
+void Application::list_skills_tool(Optional<u64> tab_id, Optional<String> url, bool include_disabled, MCP::OnToolCallComplete on_complete)
+{
+    Optional<URL::URL> filter_url;
+    if (tab_id.has_value()) {
+        auto view = find_allowed_mcp_view(*tab_id);
+        if (!view.has_value()) {
+            on_complete(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        filter_url = view->url();
+    } else if (url.has_value() && !url->is_empty()) {
+        filter_url = URL::Parser::basic_parse(*url);
+        if (!filter_url.has_value() || !filter_url->scheme().is_one_of("http"sv, "https"sv)) {
+            on_complete(mcp_error_result("Invalid URL filter (expected http: or https: URL)"sv));
+            return;
+        }
+    }
+
+    auto skills = filter_url.has_value()
+        ? skill_store().matching_skills_for_url(*filter_url)
+        : skill_store().list_skills(include_disabled);
+
+    JsonArray array;
+    for (auto const& skill : skills) {
+        auto entry = serialize_skill_mcp_entry(skill);
+        entry.set("name"sv, skill.name);
+        entry.set("description"sv, skill.description);
+        entry.set("enabled"sv, skill.enabled);
+        JsonArray matches_json;
+        for (auto const& m : skill.matches)
+            matches_json.must_append(m);
+        entry.set("matches"sv, move(matches_json));
+        array.must_append(move(entry));
+    }
+
+    JsonObject result;
+    result.set("count"sv, static_cast<u64>(skills.size()));
+    if (filter_url.has_value())
+        result.set("filtered_url"sv, filter_url->to_string());
+    result.set("skills"sv, move(array));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, MCP::OnToolCallComplete on_complete)
+{
+    String target_uri;
+    String skill_name;
+
+    if (uri.has_value() && !uri->is_empty()) {
+        auto parsed = parse_skill_uri(*uri, true);
+        if (!parsed.has_value()) {
+            on_complete(mcp_error_result("Invalid skill URI"sv));
+            return;
+        }
+        skill_name = parsed->name;
+        if (file.has_value() && !file->is_empty()) {
+            if (!is_safe_skill_relative_path(*file)) {
+                on_complete(mcp_error_result("Invalid supporting file path"sv));
+                return;
+            }
+            target_uri = skill_uri(skill_name, *file);
+        } else if (!parsed->relative_path.is_empty()) {
+            target_uri = *uri;
+        } else {
+            target_uri = skill_uri(skill_name, "SKILL.md"sv);
+        }
+    } else if (name.has_value() && !name->is_empty()) {
+        if (!is_valid_skill_name(*name)) {
+            on_complete(mcp_error_result("Invalid skill name"sv));
+            return;
+        }
+        skill_name = *name;
+        auto rel = (file.has_value() && !file->is_empty()) ? *file : "SKILL.md"_string;
+        if (!is_safe_skill_relative_path(rel)) {
+            on_complete(mcp_error_result("Invalid supporting file path"sv));
+            return;
+        }
+        target_uri = skill_uri(skill_name, rel);
+    } else {
+        on_complete(mcp_error_result("Provide 'name' or 'uri'"sv));
+        return;
+    }
+
+    auto skill = skill_store().get_skill(skill_name, false);
+    if (!skill.has_value()) {
+        on_complete(mcp_error_result("Skill not found or disabled"sv));
+        return;
+    }
+
+    auto resource = skill_store().read_skill_resource(target_uri, false);
+    if (resource.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Could not read skill resource: {}", resource.error()))));
+        return;
+    }
+
+    auto parsed_target = parse_skill_uri(target_uri, false);
+    JsonObject result;
+    result.set("name"sv, skill->name);
+    result.set("uri"sv, resource.value().uri);
+    result.set("file"sv, parsed_target.has_value() ? parsed_target->relative_path : "SKILL.md"_string);
+    result.set("mimeType"sv, resource.value().mime_type);
+    result.set("digest"sv, resource.value().digest);
+    result.set("size"sv, resource.value().size_bytes);
+    result.set("content"sv, resource.value().text);
+    result.set("frontmatter"sv, serialize_skill_frontmatter(*skill));
+    auto mcp_entry = serialize_skill_mcp_entry(*skill);
+    if (auto resources = mcp_entry.get_array("resources"sv); resources.has_value())
+        result.set("resources"sv, *resources);
+    else
+        result.set("resources"sv, JsonArray {});
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::save_skill_tool(JsonValue skill_json, MCP::OnToolCallComplete on_complete)
+{
+    if (!m_browser_options.mcp_allow_skill_write) {
+        on_complete(mcp_error_result("Writing skills via MCP is disabled by default for security. Manage skills in about:skills or launch Ladybird with --mcp-allow-skill-write"sv));
+        return;
+    }
+
+    Vector<SkillSupportingFile> supporting_files;
+    auto parsed = parse_skill_json(skill_json, supporting_files);
+    if (parsed.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Invalid skill definition: {}", parsed.error()))));
+        return;
+    }
+
+    auto saved = skill_store().save_skill(parsed.release_value(), move(supporting_files));
+    if (saved.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed saving skill: {}", saved.error()))));
+        return;
+    }
+
+    JsonObject result;
+    result.set("saved"sv, true);
+    result.set("skill"sv, serialize_skill_mcp_entry(saved.value()));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::delete_skill_tool(String name, MCP::OnToolCallComplete on_complete)
+{
+    if (!m_browser_options.mcp_allow_skill_write) {
+        on_complete(mcp_error_result("Writing skills via MCP is disabled by default for security. Manage skills in about:skills or launch Ladybird with --mcp-allow-skill-write"sv));
+        return;
+    }
+
+    if (auto res = skill_store().delete_skill(name); res.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed deleting skill: {}", res.error()))));
+        return;
+    }
+
+    JsonObject result;
+    result.set("deleted"sv, true);
+    result.set("name"sv, move(name));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
 }

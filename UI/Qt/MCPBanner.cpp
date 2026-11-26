@@ -40,6 +40,10 @@ MCPBanner::MCPBanner(QWidget* parent)
     connect(flows_button, &QPushButton::clicked, this, &MCPBanner::open_flows_requested);
     layout->addWidget(flows_button);
 
+    auto* skills_button = new QPushButton("Skills", this);
+    connect(skills_button, &QPushButton::clicked, this, &MCPBanner::open_skills_requested);
+    layout->addWidget(skills_button);
+
     m_copy_config_button = new QPushButton("Copy Config", this);
     connect(m_copy_config_button, &QPushButton::clicked, this, &MCPBanner::copy_config_requested);
     layout->addWidget(m_copy_config_button);

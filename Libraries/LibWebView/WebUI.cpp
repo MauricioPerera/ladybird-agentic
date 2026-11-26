@@ -17,6 +17,7 @@
 #include <LibWebView/WebUI/ExtensionsUI.h>
 #include <LibWebView/WebUI/FlowsUI.h>
 #include <LibWebView/WebUI/SettingsUI.h>
+#include <LibWebView/WebUI/SkillsUI.h>
 #include <LibWebView/WebUI/SupportUI.h>
 
 namespace WebView {
@@ -30,6 +31,7 @@ static constexpr auto s_pages = to_array<WebUI::Page>({
     { "licenses"sv, "Licenses"sv, WebUI::PageType::Static },
     { "newtab"sv, "New Tab"sv, WebUI::PageType::Static },
     { "settings"sv, "Settings"sv, WebUI::PageType::Dynamic },
+    { "skills"sv, "Agent Skills"sv, WebUI::PageType::Dynamic },
     { "support"sv, "Support"sv, WebUI::PageType::Dynamic },
     { "welcome"sv, "Welcome"sv, WebUI::PageType::Dynamic },
 });
@@ -111,6 +113,8 @@ ErrorOr<RefPtr<WebUI>> WebUI::create(WebContentClient& client, Web::PageId page_
         web_ui = TRY(create_web_ui<FlowsUI>(client, page_id, move(host)));
     else if (page->host.is_one_of("settings"sv, "welcome"sv))
         web_ui = TRY(create_web_ui<SettingsUI>(client, page_id, move(host)));
+    else if (page->host == "skills"sv)
+        web_ui = TRY(create_web_ui<SkillsUI>(client, page_id, move(host)));
     else if (page->host == "support"sv)
         web_ui = TRY(create_web_ui<SupportUI>(client, page_id, move(host)));
 

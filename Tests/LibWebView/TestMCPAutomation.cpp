@@ -21,10 +21,13 @@
 #include <LibMCP/MCPDelegate.h>
 #include <LibMCP/MCPServer.h>
 #include <LibTest/TestCase.h>
+#include <LibURL/Parser.h>
 #include <LibWebView/Automation/FlowStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
+#include <LibWebView/Skills/SkillStore.h>
+#include <LibWebView/Skills/SkillTypes.h>
 #include <LibWebView/Utilities.h>
 
 namespace {
@@ -57,10 +60,14 @@ public:
     explicit FakeMCPDelegate(ByteString storage_dir)
         : m_store(LexicalPath::join(storage_dir, "flows"sv).string())
         , m_ext_store(LexicalPath::join(storage_dir, "extensions"sv).string())
+        , m_skill_store(LexicalPath::join(storage_dir, "skills"sv).string())
     {
     }
 
     WebView::FlowStore& store() { return m_store; }
+    WebView::SkillStore& skill_store() { return m_skill_store; }
+    bool allow_skill_write { false };
+    Vector<MCP::TabInfo> mock_tabs;
 
     struct LastRunCall {
         Optional<String> flow_id;
@@ -81,8 +88,32 @@ public:
     };
     Optional<RecordedAction> last_action;
 
-    virtual Vector<MCP::TabInfo> list_allowed_tabs() const override { return {}; }
-    virtual Optional<MCP::TabInfo> active_allowed_tab() const override { return {}; }
+    virtual Vector<MCP::TabInfo> list_allowed_tabs() const override
+    {
+        Vector<MCP::TabInfo> out;
+        for (auto tab : mock_tabs) {
+            if (auto parsed = URL::Parser::basic_parse(tab.url); parsed.has_value()) {
+                for (auto const& s : m_skill_store.matching_skills_for_url(*parsed)) {
+                    tab.matching_skills.append({
+                        .name = s.name,
+                        .uri = WebView::skill_uri(s.name, "SKILL.md"sv),
+                        .description = s.description,
+                    });
+                }
+            }
+            out.append(move(tab));
+        }
+        return out;
+    }
+    virtual Optional<MCP::TabInfo> active_allowed_tab() const override
+    {
+        auto tabs = list_allowed_tabs();
+        for (auto const& tab : tabs) {
+            if (tab.is_active)
+                return tab;
+        }
+        return {};
+    }
 
     virtual void open_tab(Optional<String>, bool, bool, Optional<String>, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void switch_tab(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
@@ -528,9 +559,209 @@ public:
         cb(ok_json_result(JsonValue { move(out) }));
     }
 
+    virtual void skills_list(Optional<String> cursor, MCP::OnProtocolCallComplete cb) override
+    {
+        auto all_skills = m_skill_store.list_skills(false);
+        size_t offset = 0;
+        if (cursor.has_value() && !cursor->is_empty()) {
+            auto parsed = cursor->to_number<size_t>();
+            if (!parsed.has_value() || *parsed > all_skills.size()) {
+                cb({ .is_error = true, .error_code = -32602, .error_message = "Invalid cursor"_string });
+                return;
+            }
+            offset = *parsed;
+        }
+        JsonArray arr;
+        for (size_t i = offset; i < all_skills.size(); ++i)
+            arr.must_append(WebView::serialize_skill_mcp_entry(all_skills[i]));
+        JsonObject out;
+        out.set("resultType"sv, "complete"sv);
+        out.set("skills"sv, move(arr));
+        out.set("ttlMs"sv, 60000);
+        out.set("cacheScope"sv, "private"sv);
+        cb({ .is_error = false, .result = move(out) });
+    }
+
+    virtual void skills_get(String uri, MCP::OnProtocolCallComplete cb) override
+    {
+        auto skill = m_skill_store.get_skill_by_uri(uri, false);
+        if (!skill.has_value()) {
+            cb({ .is_error = true, .error_code = -32602, .error_message = "Unknown skill URI"_string });
+            return;
+        }
+        JsonObject out;
+        out.set("resultType"sv, "complete"sv);
+        out.set("skill"sv, WebView::serialize_skill_mcp_entry(*skill));
+        out.set("ttlMs"sv, 60000);
+        out.set("cacheScope"sv, "private"sv);
+        cb({ .is_error = false, .result = move(out) });
+    }
+
+    virtual void resources_read(String uri, MCP::OnProtocolCallComplete cb) override
+    {
+        auto res = m_skill_store.read_skill_resource(uri, false);
+        if (res.is_error()) {
+            cb({ .is_error = true, .error_code = -32602, .error_message = MUST(String::formatted("{}", res.error())) });
+            return;
+        }
+        JsonObject item;
+        item.set("uri"sv, res.value().uri);
+        item.set("mimeType"sv, res.value().mime_type);
+        item.set("text"sv, res.value().text);
+        JsonArray contents;
+        contents.must_append(move(item));
+        JsonObject out;
+        out.set("resultType"sv, "complete"sv);
+        out.set("contents"sv, move(contents));
+        out.set("ttlMs"sv, 60000);
+        out.set("cacheScope"sv, "private"sv);
+        cb({ .is_error = false, .result = move(out) });
+    }
+
+    virtual void resources_directory_read(String uri, Optional<String>, MCP::OnProtocolCallComplete cb) override
+    {
+        auto entries = m_skill_store.read_skill_directory(uri, false);
+        if (entries.is_error()) {
+            cb({ .is_error = true, .error_code = -32602, .error_message = MUST(String::formatted("{}", entries.error())) });
+            return;
+        }
+        JsonArray resources;
+        for (auto const& e : entries.value()) {
+            JsonObject obj;
+            obj.set("uri"sv, e.uri);
+            obj.set("name"sv, e.name);
+            obj.set("mimeType"sv, e.mime_type);
+            resources.must_append(move(obj));
+        }
+        JsonObject out;
+        out.set("resultType"sv, "complete"sv);
+        out.set("resources"sv, move(resources));
+        out.set("ttlMs"sv, 60000);
+        out.set("cacheScope"sv, "private"sv);
+        cb({ .is_error = false, .result = move(out) });
+    }
+
+    virtual void list_skills_tool(Optional<u64> tab_id, Optional<String> url, bool include_disabled, MCP::OnToolCallComplete cb) override
+    {
+        Optional<URL::URL> filter_url;
+        if (tab_id.has_value()) {
+            bool found = false;
+            for (auto const& t : mock_tabs) {
+                if (t.id == *tab_id) {
+                    filter_url = URL::Parser::basic_parse(t.url);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                cb(error_result("Tab not found"sv));
+                return;
+            }
+        } else if (url.has_value() && !url->is_empty()) {
+            filter_url = URL::Parser::basic_parse(*url);
+            if (!filter_url.has_value()) {
+                cb(error_result("Invalid URL"sv));
+                return;
+            }
+        }
+
+        auto skills = filter_url.has_value()
+            ? m_skill_store.matching_skills_for_url(*filter_url)
+            : m_skill_store.list_skills(include_disabled);
+        JsonArray arr;
+        for (auto const& s : skills) {
+            auto e = WebView::serialize_skill_mcp_entry(s);
+            e.set("name"sv, s.name);
+            e.set("description"sv, s.description);
+            e.set("enabled"sv, s.enabled);
+            arr.must_append(move(e));
+        }
+        JsonObject out;
+        out.set("count"sv, static_cast<u64>(skills.size()));
+        out.set("skills"sv, move(arr));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, MCP::OnToolCallComplete cb) override
+    {
+        String target_uri;
+        String skill_name;
+        if (uri.has_value() && !uri->is_empty()) {
+            auto parsed = WebView::parse_skill_uri(*uri, true);
+            if (!parsed.has_value()) {
+                cb(error_result("Invalid URI"sv));
+                return;
+            }
+            skill_name = parsed->name;
+            target_uri = file.has_value() && !file->is_empty()
+                ? WebView::skill_uri(skill_name, *file)
+                : (parsed->relative_path.is_empty() ? WebView::skill_uri(skill_name, "SKILL.md"sv) : *uri);
+        } else if (name.has_value()) {
+            skill_name = *name;
+            target_uri = WebView::skill_uri(skill_name, file.value_or("SKILL.md"_string));
+        } else {
+            cb(error_result("Missing name or uri"sv));
+            return;
+        }
+        auto skill = m_skill_store.get_skill(skill_name, false);
+        auto res = m_skill_store.read_skill_resource(target_uri, false);
+        if (!skill.has_value() || res.is_error()) {
+            cb(error_result("Skill resource not found"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("name"sv, skill->name);
+        out.set("uri"sv, res.value().uri);
+        out.set("mimeType"sv, res.value().mime_type);
+        out.set("digest"sv, res.value().digest);
+        out.set("size"sv, res.value().size_bytes);
+        out.set("content"sv, res.value().text);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void save_skill_tool(JsonValue skill_json, MCP::OnToolCallComplete cb) override
+    {
+        if (!allow_skill_write) {
+            cb(error_result("Writing skills via MCP is disabled by default for security."sv));
+            return;
+        }
+        Vector<WebView::SkillSupportingFile> files;
+        auto parsed = WebView::parse_skill_json(skill_json, files);
+        if (parsed.is_error()) {
+            cb(error_result(MUST(String::formatted("{}", parsed.error()))));
+            return;
+        }
+        auto saved = m_skill_store.save_skill(parsed.release_value(), move(files));
+        if (saved.is_error()) {
+            cb(error_result(MUST(String::formatted("{}", saved.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("saved"sv, true);
+        out.set("skill"sv, WebView::serialize_skill_mcp_entry(saved.value()));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void delete_skill_tool(String name, MCP::OnToolCallComplete cb) override
+    {
+        if (!allow_skill_write) {
+            cb(error_result("Writing skills via MCP is disabled by default for security."sv));
+            return;
+        }
+        if (auto res = m_skill_store.delete_skill(name); res.is_error()) {
+            cb(error_result(MUST(String::formatted("{}", res.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("deleted"sv, true);
+        out.set("name"sv, move(name));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
 private:
     WebView::FlowStore m_store;
     WebView::ExtensionStore m_ext_store;
+    WebView::SkillStore m_skill_store;
     Vector<String> m_active_runs;
     u64 m_run_counter { 0 };
 };
@@ -754,7 +985,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 43u);
+    EXPECT_EQ(tools->size(), 47u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -1362,4 +1593,256 @@ TEST_CASE(mcp_upload_path_security_guards)
     EXPECT(!WebView::validate_mcp_upload_path(photo_path).is_error());
     EXPECT(!WebView::validate_mcp_upload_path(photo_path, allowed_dir).is_error());
     EXPECT(WebView::validate_mcp_upload_path(outside_path, allowed_dir).is_error());
+}
+
+TEST_CASE(mcp_skills_store_and_url_matching)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    EXPECT(WebView::is_valid_skill_name("youtube-navigation"sv));
+    EXPECT(!WebView::is_valid_skill_name("-bad"sv));
+    EXPECT(!WebView::is_valid_skill_name("BadName"sv));
+    EXPECT(!WebView::is_valid_skill_name("bad--name"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("../secret.txt"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("/abs/path.md"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("a\\b.md"sv));
+    EXPECT(WebView::is_safe_skill_relative_path("references/checklist.md"sv));
+
+    auto skills_dir = LexicalPath::join(temp_dir, "skills"sv).string();
+    WebView::SkillStore store(skills_dir);
+
+    WebView::SkillDefinition yt;
+    yt.name = "youtube-navigation"_string;
+    yt.description = "Navigate YouTube & Studio cleanly."_string;
+    yt.matches.append("https://www.youtube.com/*"_string);
+    yt.matches.append("studio.youtube.com"_string);
+    yt.extra_frontmatter.set("license"_string, JsonValue { "MIT"_string });
+    yt.body = "# YouTube\n\nRead `references/checklist.md`."_string;
+
+    Vector<WebView::SkillSupportingFile> files;
+    files.append({ .relative_path = "references/checklist.md"_string, .content = "# Checklist\n\nCheck video title.\n"_string });
+
+    auto saved = MUST(store.save_skill(yt, move(files)));
+    EXPECT_EQ(saved.name, "youtube-navigation"sv);
+    EXPECT_EQ(saved.resources.size(), 2uz);
+
+    WebView::SkillStore reloaded(skills_dir);
+    auto fetched = reloaded.get_skill("youtube-navigation"sv);
+    EXPECT(fetched.has_value());
+    EXPECT_EQ(fetched->resources.size(), 2uz);
+    EXPECT_EQ(fetched->extra_frontmatter.get("license"sv)->as_string(), "MIT"sv);
+
+    bool found_skill_md = false;
+    bool found_ref = false;
+    for (auto const& r : fetched->resources) {
+        EXPECT(r.digest.starts_with_bytes("sha256:"sv));
+        EXPECT(r.size_bytes > 0);
+        if (r.uri == "skill://youtube-navigation/SKILL.md"sv)
+            found_skill_md = true;
+        if (r.uri == "skill://youtube-navigation/references/checklist.md"sv)
+            found_ref = true;
+    }
+    EXPECT(found_skill_md);
+    EXPECT(found_ref);
+
+    auto watch_url = URL::Parser::basic_parse("https://www.youtube.com/watch?v=123"sv).value();
+    auto studio_url = URL::Parser::basic_parse("https://studio.youtube.com/channel/abc"sv).value();
+    auto other_url = URL::Parser::basic_parse("https://example.com/"sv).value();
+
+    EXPECT_EQ(reloaded.matching_skills_for_url(watch_url).size(), 1uz);
+    EXPECT_EQ(reloaded.matching_skills_for_url(studio_url).size(), 1uz);
+    EXPECT_EQ(reloaded.matching_skills_for_url(other_url).size(), 0uz);
+
+    MUST(reloaded.set_skill_enabled("youtube-navigation"sv, false));
+    EXPECT_EQ(reloaded.matching_skills_for_url(watch_url).size(), 0uz);
+    EXPECT_EQ(reloaded.list_skills(false).size(), 0uz);
+    EXPECT_EQ(reloaded.list_skills(true).size(), 1uz);
+}
+
+TEST_CASE(mcp_skills_sep2640_protocol)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    WebView::SkillDefinition yt;
+    yt.name = "youtube-nav"_string;
+    yt.description = "YouTube helper skill."_string;
+    yt.matches.append("https://www.youtube.com/*"_string);
+    yt.body = "# Guide\n\nCheck `references/checklist.md`."_string;
+    Vector<WebView::SkillSupportingFile> files;
+    files.append({ .relative_path = "references/checklist.md"_string, .content = "Check audio."_string });
+    MUST(delegate.skill_store().save_skill(yt, move(files)));
+
+    auto token = "sep2640-test-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = server->local_port().value();
+
+    {
+        JsonObject init_params;
+        init_params.set("protocolVersion"sv, "2026-07-28"sv);
+        auto init_resp = call_mcp_rpc(port, token, 1, "initialize"sv, move(init_params));
+        auto result = init_resp.get_object("result"sv);
+        EXPECT(result.has_value());
+        EXPECT_EQ(result->get_string("protocolVersion"sv).value_or(String {}), "2026-07-28"sv);
+        auto caps = result->get_object("capabilities"sv);
+        EXPECT(caps.has_value());
+        EXPECT(caps->has("resources"sv));
+        auto exts = caps->get_object("extensions"sv);
+        EXPECT(exts.has_value());
+        auto skills_ext = exts->get_object("io.modelcontextprotocol/skills"sv);
+        EXPECT(skills_ext.has_value());
+        EXPECT(skills_ext->get_bool("directoryRead"sv).value_or(false));
+    }
+
+    {
+        auto discover_resp = call_mcp_rpc(port, token, 2, "server/discover"sv, JsonObject {});
+        auto caps = discover_resp.get_object("result"sv)->get_object("capabilities"sv);
+        EXPECT(caps->has("resources"sv));
+        EXPECT(caps->get_object("extensions"sv)->has("io.modelcontextprotocol/skills"sv));
+    }
+
+    {
+        auto list_resp = call_mcp_rpc(port, token, 3, "skills/list"sv, JsonObject {});
+        auto res = list_resp.get_object("result"sv);
+        EXPECT_EQ(res->get_string("resultType"sv).value_or(String {}), "complete"sv);
+        EXPECT(res->has("ttlMs"sv));
+        EXPECT(res->has("cacheScope"sv));
+        auto skills = res->get_array("skills"sv);
+        EXPECT_EQ(skills->size(), 1uz);
+        auto entry = skills->at(0).as_object();
+        EXPECT_EQ(entry.get_string("uri"sv).value_or(String {}), "skill://youtube-nav/SKILL.md"sv);
+        EXPECT_EQ(entry.get_object("frontmatter"sv)->get_string("name"sv).value_or(String {}), "youtube-nav"sv);
+        EXPECT_EQ(entry.get_array("resources"sv)->size(), 2uz);
+    }
+
+    {
+        JsonObject p;
+        p.set("uri"sv, "skill://youtube-nav/SKILL.md"sv);
+        auto get_resp = call_mcp_rpc(port, token, 4, "skills/get"sv, move(p));
+        auto skill = get_resp.get_object("result"sv)->get_object("skill"sv);
+        EXPECT_EQ(skill->get_string("uri"sv).value_or(String {}), "skill://youtube-nav/SKILL.md"sv);
+
+        JsonObject bad_p;
+        bad_p.set("uri"sv, "skill://missing-skill/SKILL.md"sv);
+        auto err_resp = call_mcp_rpc(port, token, 5, "skills/get"sv, move(bad_p));
+        EXPECT(err_resp.has("error"sv));
+        EXPECT_EQ(err_resp.get_object("error"sv)->get_integer<i64>("code"sv).value_or(0), -32602);
+    }
+
+    {
+        JsonObject p;
+        p.set("uri"sv, "skill://youtube-nav/references/checklist.md"sv);
+        auto read_resp = call_mcp_rpc(port, token, 6, "resources/read"sv, move(p));
+        auto contents = read_resp.get_object("result"sv)->get_array("contents"sv);
+        EXPECT_EQ(contents->size(), 1uz);
+        EXPECT_EQ(contents->at(0).as_object().get_string("text"sv).value_or(String {}), "Check audio."sv);
+    }
+
+    {
+        JsonObject p;
+        p.set("uri"sv, "skill://youtube-nav"sv);
+        auto dir_resp = call_mcp_rpc(port, token, 7, "resources/directory/read"sv, move(p));
+        auto resources = dir_resp.get_object("result"sv)->get_array("resources"sv);
+        EXPECT_EQ(resources->size(), 2uz);
+
+        JsonObject trailing;
+        trailing.set("uri"sv, "skill://youtube-nav/references/"sv);
+        auto err_resp = call_mcp_rpc(port, token, 8, "resources/directory/read"sv, move(trailing));
+        EXPECT(err_resp.has("error"sv));
+        EXPECT_EQ(err_resp.get_object("error"sv)->get_integer<i64>("code"sv).value_or(0), -32602);
+    }
+}
+
+TEST_CASE(mcp_skills_tools_and_write_gate)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    WebView::SkillDefinition yt = WebView::make_example_skill();
+    MUST(delegate.skill_store().save_skill(yt));
+
+    delegate.mock_tabs.append({
+        .id = 10,
+        .title = "YouTube Studio"_string,
+        .url = "https://studio.youtube.com/channel/UC123"_string,
+        .is_active = true,
+    });
+    delegate.mock_tabs.append({
+        .id = 11,
+        .title = "Example"_string,
+        .url = "https://example.com/"_string,
+        .is_active = false,
+    });
+
+    auto token = "skills-tools-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = server->local_port().value();
+
+    {
+        auto tabs_res = call_mcp_tool(port, token, 1, "list_tabs"sv, JsonObject {});
+        auto payload = parse_tool_json_payload(tabs_res);
+        auto tabs = payload.get_array("tabs"sv);
+        EXPECT_EQ(tabs->size(), 2uz);
+        auto yt_tab = tabs->at(0).as_object();
+        auto other_tab = tabs->at(1).as_object();
+        EXPECT_EQ(yt_tab.get_array("matching_skills"sv)->size(), 1uz);
+        EXPECT(!other_tab.has("matching_skills"sv));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 10);
+        auto res = call_mcp_tool(port, token, 2, "list_skills"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+
+        JsonObject args_none;
+        args_none.set("tab_id"sv, 11);
+        auto res_none = call_mcp_tool(port, token, 3, "list_skills"sv, move(args_none));
+        auto payload_none = parse_tool_json_payload(res_none);
+        EXPECT_EQ(payload_none.get_integer<u64>("count"sv).value_or(1), 0u);
+    }
+
+    {
+        JsonObject args;
+        args.set("name"sv, "youtube-navigation"sv);
+        auto res = call_mcp_tool(port, token, 4, "read_skill"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_string("content"sv).value_or(String {}).contains("YouTube & Studio Playbook"sv));
+    }
+
+    {
+        JsonObject skill_obj;
+        skill_obj.set("name"sv, "agent-created-skill"sv);
+        skill_obj.set("description"sv, "Created via MCP."sv);
+        skill_obj.set("body"sv, "# Body\n"_string);
+        JsonObject args;
+        args.set("skill"sv, move(skill_obj));
+
+        auto blocked = call_mcp_tool(port, token, 5, "save_skill"sv, args);
+        EXPECT(blocked.get_bool("isError"sv).value_or(false));
+
+        delegate.allow_skill_write = true;
+        auto allowed = call_mcp_tool(port, token, 6, "save_skill"sv, move(args));
+        EXPECT(!allowed.get_bool("isError"sv).value_or(true));
+        EXPECT(delegate.skill_store().get_skill("agent-created-skill"sv).has_value());
+
+        JsonObject del_args;
+        del_args.set("name"sv, "agent-created-skill"sv);
+        auto del_res = call_mcp_tool(port, token, 7, "delete_skill"sv, move(del_args));
+        EXPECT(!del_res.get_bool("isError"sv).value_or(true));
+        EXPECT(!delegate.skill_store().get_skill("agent-created-skill"sv).has_value());
+    }
 }

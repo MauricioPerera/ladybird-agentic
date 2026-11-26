@@ -37,6 +37,7 @@ set(ABOUT_PAGES
     licenses.html
     newtab.html
     settings.html
+    skills.html
     support.html
     version.html
     webui.css

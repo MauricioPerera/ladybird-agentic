@@ -64,6 +64,7 @@ class Application final
     friend class ApplicationActions;
     friend class Bookmarks;
     friend class BookmarksPage;
+    friend class BrowserWindow;
     friend class RemoteDownloads;
     friend class RemoteView;
     friend class HubConnection;

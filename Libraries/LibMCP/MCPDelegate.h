@@ -16,22 +16,37 @@
 
 namespace MCP {
 
+struct SkillMatchHint {
+    String name {};
+    String uri {};
+    String description {};
+};
+
 struct TabInfo {
     u64 id { 0 };
-    String title;
-    String url;
-    String container_id;
+    String title {};
+    String url {};
+    String container_id {};
     bool is_loading { false };
     bool is_active { false };
+    Vector<SkillMatchHint> matching_skills {};
 };
 
 struct ToolCallResult {
     bool is_error { false };
-    String text;
+    String text {};
     Optional<String> image_base64_png {};
 };
 
+struct ProtocolCallResult {
+    bool is_error { false };
+    i32 error_code { -32603 };
+    String error_message {};
+    JsonObject result {};
+};
+
 using OnToolCallComplete = Function<void(ToolCallResult)>;
+using OnProtocolCallComplete = Function<void(ProtocolCallResult)>;
 
 class MCP_API MCPDelegate {
 public:
@@ -84,6 +99,16 @@ public:
 
     virtual void list_page_tools(u64 tab_id, bool include_declarative, OnToolCallComplete) = 0;
     virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, OnToolCallComplete) = 0;
+
+    virtual void skills_list(Optional<String> cursor, OnProtocolCallComplete) = 0;
+    virtual void skills_get(String uri, OnProtocolCallComplete) = 0;
+    virtual void resources_read(String uri, OnProtocolCallComplete) = 0;
+    virtual void resources_directory_read(String uri, Optional<String> cursor, OnProtocolCallComplete) = 0;
+
+    virtual void list_skills_tool(Optional<u64> tab_id, Optional<String> url, bool include_disabled, OnToolCallComplete) = 0;
+    virtual void read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, OnToolCallComplete) = 0;
+    virtual void save_skill_tool(JsonValue skill_json, OnToolCallComplete) = 0;
+    virtual void delete_skill_tool(String name, OnToolCallComplete) = 0;
 };
 
 }
