@@ -181,8 +181,10 @@ private:
     QAction* m_open_downloads_page_action { nullptr };
     ReloadButton* m_reload_button { nullptr };
 
+#ifdef Q_OS_WIN
     RecordButton* m_record_button { nullptr };
     QTimer* m_recording_timer { nullptr };
+#endif
 
     DownloadsButton* m_downloads_button { nullptr };
     QPointer<DownloadsPopover> m_downloads_popover;

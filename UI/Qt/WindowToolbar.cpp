@@ -1654,8 +1654,10 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->addWidget(m_navigation_buttons, 0, Qt::AlignVCenter);
     m_navigation_buttons->show();
     toolbar_layout->addWidget(&field_slot(), 1);
+#ifdef Q_OS_WIN
     if (m_record_button)
         toolbar_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
+#endif
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -1694,8 +1696,10 @@ void WindowToolbar::lay_out_in_sidebar()
     m_window_controls_separator->hide();
 
     auto* footer_layout = static_cast<QBoxLayout*>(m_sidebar_footer->layout());
+#ifdef Q_OS_WIN
     if (m_record_button)
         footer_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
+#endif
     footer_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         footer_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -2018,6 +2022,7 @@ void WindowToolbar::show_tab(Tab& tab)
 
 void WindowToolbar::update_record_button()
 {
+#ifdef Q_OS_WIN
     if (!m_record_button)
         return;
 
@@ -2032,6 +2037,7 @@ void WindowToolbar::update_record_button()
         m_recording_timer->start();
     else if (!recording && m_recording_timer->isActive())
         m_recording_timer->stop();
+#endif
 }
 
 void WindowToolbar::show_location_edit(LocationEdit* location_edit)

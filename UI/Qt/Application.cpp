@@ -1887,11 +1887,13 @@ ErrorOr<Hub::TabContainerInfo> Application::create_container(String name, String
 {
 #ifdef LADYBIRD_HUB_IN_OWN_PROCESS
     auto response = HubConnection::the().create_container(move(name), move(color));
-    if (response.error().has_value())
-        return Error::from_string_view(*response.error());
+    if (response.error().has_value()) {
+        warnln("Failed to create container: {}", *response.error());
+        return Error::from_string_literal("Failed to create container");
+    }
     if (!response.container().has_value())
         return Error::from_string_literal("Failed to create container");
-    auto created = response.container().release_value();
+    auto created = *response.container();
     bool exists = any_of(m_containers, [&](auto const& existing) { return existing.id == created.id; });
     if (!exists)
         m_containers.append(created);
@@ -1911,8 +1913,10 @@ ErrorOr<void> Application::delete_container(StringView id)
 {
 #ifdef LADYBIRD_HUB_IN_OWN_PROCESS
     auto response = HubConnection::the().delete_container(TRY(String::from_utf8(id)));
-    if (response.has_value())
-        return Error::from_string_view(*response);
+    if (response.has_value()) {
+        warnln("Failed to delete container: {}", *response);
+        return Error::from_string_literal("Failed to delete container");
+    }
     m_containers.remove_all_matching([&](auto const& container) { return container.id == id; });
     update_tabs_display();
     return {};
