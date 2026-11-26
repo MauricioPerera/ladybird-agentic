@@ -219,9 +219,6 @@ static bool fire_an_event(Utf16FlyString const& name, Optional<Web::DOM::Element
 
 NonnullRefPtr<WebDriverConnection> WebDriverConnection::create(PageClient& page_client)
 {
-    // Allow pop-ups, or otherwise /window/new won't be able to open a new tab.
-    page_client.page().set_should_block_pop_ups(false);
-
     return adopt_ref(*new WebDriverConnection(page_client));
 }
 
@@ -234,7 +231,6 @@ WebDriverConnection::WebDriverConnection(PageClient& page_client)
         if (connection->m_pending_window_rect_requests.remove(request_id) && connection->m_pending_window_rect_requests.is_empty())
             connection->driver_execution_complete(serialize_rect(rect.to_type<int>()));
     }));
-    page_client.page().set_is_webdriver_active(true);
 }
 
 void WebDriverConnection::driver_execution_complete(Web::WebDriver::Response response)
@@ -410,6 +406,12 @@ void WebDriverConnection::run_command(u64 command_id, Optional<Web::HTML::CrossP
 
 void WebDriverConnection::set_session_config(Web::WebDriver::PageLoadStrategy page_load_strategy, bool strict_file_interactability, JsonValue const& timeouts)
 {
+    // Only real W3C WebDriver sessions push session config; internal extension, flow, and MCP
+    // commands reuse WebDriverConnection without setting navigator.webdriver or disabling pop-up blocking.
+    auto& page = m_page_client->page();
+    page.set_should_block_pop_ups(false);
+    page.set_is_webdriver_active(true);
+
     m_page_load_strategy = page_load_strategy;
     m_strict_file_interactability = strict_file_interactability;
 
