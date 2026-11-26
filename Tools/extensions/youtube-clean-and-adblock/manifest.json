@@ -3,7 +3,7 @@
   "id": "ladybird-youtube-clean-adblock",
   "name": "YouTube Clean & Adblock",
   "version": "1.0.0",
-  "description": "Blocks major ad/tracking requests via declarativeNetRequest + native filters, hides ad containers, and removes YouTube Shorts shelves & links.",
+  "description": "Blocks major ad/tracking requests via declarativeNetRequest + native filters, prunes player ad metadata, auto-skips video ads, and removes YouTube Shorts.",
   "permissions": ["declarativeNetRequest", "storage"],
   "host_permissions": ["https://*.youtube.com/*", "https://*.googlevideo.com/*"],
   "declarative_net_request": {
@@ -18,8 +18,13 @@
   "content_scripts": [
     {
       "matches": ["https://*.youtube.com/*"],
+      "js": ["early.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://*.youtube.com/*"],
       "css": ["content.css"],
-      "js": ["content.js"],
+      "js": ["early.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

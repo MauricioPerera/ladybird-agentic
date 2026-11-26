@@ -39,5 +39,32 @@
       "urlFilter": "||youtube.com/ptracking*",
       "resourceTypes": ["xmlhttprequest", "image", "other"]
     }
+  },
+  {
+    "id": 5,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "urlFilter": "||youtube.com/get_midroll_info*",
+      "resourceTypes": ["xmlhttprequest", "other"]
+    }
+  },
+  {
+    "id": 6,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "urlFilter": "||youtube.com/api/stats/atr*",
+      "resourceTypes": ["xmlhttprequest", "image", "other"]
+    }
+  },
+  {
+    "id": 7,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "urlFilter": "||youtube.com/pagead/adview*",
+      "resourceTypes": ["xmlhttprequest", "image", "other"]
+    }
   }
 ]

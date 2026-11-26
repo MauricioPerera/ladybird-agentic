@@ -2,6 +2,11 @@ ytd-reel-shelf-renderer,
 ytd-rich-shelf-renderer[is-shorts],
 ytd-shorts,
 ytd-ad-slot-renderer,
+ytd-in-feed-ad-layout-renderer,
+ytd-companion-slot-renderer,
+ytd-action-companion-ad-renderer,
+ytd-player-legacy-desktop-watch-ads-renderer,
+ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"],
 ytd-banner-promo-renderer,
 ytd-display-ad-renderer,
 ytd-promoted-sparkles-web-renderer,
@@ -9,7 +14,9 @@ ytd-guide-entry-renderer a[title="Shorts"],
 ytd-mini-guide-entry-renderer[aria-label="Shorts"],
 #player-ads,
 #masthead-ad,
-.ytp-ad-module,
-.ytp-ad-overlay-container {
+.ytp-ad-overlay-container,
+.ytp-ad-overlay-slot,
+.ytp-ad-text-overlay,
+.ytp-ad-image-overlay {
   display: none !important;
 }
