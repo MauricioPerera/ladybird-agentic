@@ -62,6 +62,7 @@ class ChromeHeaderButton;
 class LadybirdButton;
 
 class TabBarButton;
+class TabAgentIndicator;
 class TabMicrophoneIndicator;
 class TabWidget;
 class WindowControlsReveal;
@@ -115,6 +116,7 @@ public:
 
     void update_loading_ring_animation();
     void update_microphone_indicators();
+    void update_agent_indicators();
     // How far the end of the horizontal tabs is from where it settles, while tabs open and close.
     int horizontal_tabs_end_offset() const;
     // A horizontal tab that closes shrinks away as the others close the gap.
@@ -237,6 +239,7 @@ private:
     void set_tab_button(int index, TabBarButton* TabButtons::*, TabBarButton*);
     void update_tab_button_geometry();
     TabMicrophoneIndicator* microphone_indicator(int index) const;
+    TabAgentIndicator* agent_indicator(int index) const;
     int horizontal_tab_min_width(int index) const;
     int horizontal_tab_share() const;
 
@@ -288,6 +291,7 @@ private:
 
     QVariantAnimation* m_loading_ring_animation { nullptr };
     HashMap<Tab const*, TabMicrophoneIndicator*> m_microphone_indicators;
+    HashMap<Tab const*, TabAgentIndicator*> m_agent_indicators;
     QIcon m_fallback_tab_icon;
     QHash<QString, QStaticText> m_tab_title_texts;
     // The tabs whose titles were too long to show in full when last painted.
@@ -592,6 +596,23 @@ public:
     AK_ALLOC_WITH_KMALLOC;
 
     explicit TabMicrophoneIndicator(QWidget* parent);
+    void set_placement(TabBarButton::Placement);
+
+private:
+    virtual void paintEvent(QPaintEvent*) override;
+
+    TabBarButton::Placement m_placement { TabBarButton::Placement::Tab };
+};
+
+// Shows that a tab is controlled by an agent (MCP). It is not a control, so a press on it goes to the tab beneath.
+// NB: It is a label so that assistive technology reads it as text.
+class TabAgentIndicator final : public QLabel {
+    Q_OBJECT
+
+public:
+    AK_ALLOC_WITH_KMALLOC;
+
+    explicit TabAgentIndicator(QWidget* parent);
     void set_placement(TabBarButton::Placement);
 
 private:

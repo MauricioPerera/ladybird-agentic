@@ -1016,6 +1016,7 @@ void BrowserWindow::initialize_tab(Tab* tab)
     QObject::connect(tab, &Tab::mcp_access_changed, this, [this](int index) {
         if (m_tabs_container->tab(index) == m_current_tab)
             update_mcp_banner();
+        m_tabs_container->tab_bar()->update_agent_indicators();
     });
     QObject::connect(tab, &Tab::microphone_in_use_changed, this, [this] {
         m_tabs_container->tab_bar()->update_microphone_indicators();
@@ -1036,6 +1037,7 @@ void BrowserWindow::initialize_tab_view(Tab* tab)
 {
     if (tab == m_current_tab)
         update_mcp_banner();
+    m_tabs_container->tab_bar()->update_agent_indicators();
     QObject::connect(&tab->view(), &WebContentView::urls_dropped, this, [this](auto& urls) {
         VERIFY(urls.size());
         m_current_tab->view().load_from_user_input(ak_url_from_qurl(urls[0]));

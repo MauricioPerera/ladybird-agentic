@@ -419,10 +419,13 @@ static bool horizontal_tab_has_room_for_favicon_before(qreal close_button_left, 
 // then the microphone. The microphone of a tab without a speaker sits in the middle of the speaker's slot.
 // NB: paintEvent() ends the favicon's QRect TAB_CONTENT_BUTTON_GAP before the first button, and a QRect's right edge is
 //     its last pixel, so one pixel less than that gap is empty.
-static constexpr int horizontal_tab_min_width_with_media_indicators(bool has_speaker, bool has_microphone)
+static constexpr int horizontal_tab_min_width_with_media_indicators(bool has_speaker, bool has_microphone, bool has_agent = false)
 {
     auto microphone_in_speaker_slot_width = TAB_AUDIO_BUTTON_SIZE - ((TAB_AUDIO_BUTTON_SIZE - TAB_BUTTON_ICON_SIZE) / 2);
-    auto indicators_width = has_speaker ? TAB_AUDIO_BUTTON_SIZE + (has_microphone ? TAB_BUTTON_ICON_SIZE : 0) : microphone_in_speaker_slot_width;
+    auto non_speaker_count = (has_microphone ? 1 : 0) + (has_agent ? 1 : 0);
+    auto indicators_width = has_speaker
+        ? TAB_AUDIO_BUTTON_SIZE + (non_speaker_count * TAB_BUTTON_ICON_SIZE)
+        : microphone_in_speaker_slot_width + (max(0, non_speaker_count - 1) * TAB_BUTTON_ICON_SIZE);
     return static_cast<int>(2 * HORIZONTAL_TAB_CARD_SHAPE_HORIZONTAL_INSET) + HORIZONTAL_TAB_CONTENT_LEFT_PADDING
         + TAB_ICON_SIZE + (TAB_CONTENT_BUTTON_GAP - 1) + indicators_width + HORIZONTAL_TAB_CLOSE_BUTTON_GAP
         + TAB_CLOSE_BUTTON_HIT_SIZE.width() + HORIZONTAL_TAB_CONTENT_RIGHT_PADDING;
@@ -430,6 +433,8 @@ static constexpr int horizontal_tab_min_width_with_media_indicators(bool has_spe
 static_assert(horizontal_tab_min_width_with_media_indicators(true, false) == 75);
 static_assert(horizontal_tab_min_width_with_media_indicators(false, true) == 72);
 static_assert(horizontal_tab_min_width_with_media_indicators(true, true) == 89);
+static_assert(horizontal_tab_min_width_with_media_indicators(false, false, true) == 72);
+static_assert(horizontal_tab_min_width_with_media_indicators(true, false, true) == 89);
 // NB: At each of those widths the tab is padded, and its close button has room beside its favicon, so it shows.
 static_assert(horizontal_tab_min_width_with_media_indicators(false, true) >= HORIZONTAL_TAB_PADDED_MIN_WIDTH);
 static_assert(horizontal_tab_min_width_with_media_indicators(false, true) - static_cast<int>(2 * HORIZONTAL_TAB_CARD_SHAPE_HORIZONTAL_INSET)
@@ -1021,8 +1026,9 @@ int TabBar::horizontal_tab_min_width(int index) const
 {
     auto has_speaker = tab_audio_button(index) != nullptr;
     auto has_microphone = microphone_indicator(index) != nullptr;
-    if (has_speaker || has_microphone)
-        return horizontal_tab_min_width_with_media_indicators(has_speaker, has_microphone);
+    auto has_agent = agent_indicator(index) != nullptr;
+    if (has_speaker || has_microphone || has_agent)
+        return horizontal_tab_min_width_with_media_indicators(has_speaker, has_microphone, has_agent);
     if (index == currentIndex())
         return HORIZONTAL_SELECTED_TAB_MIN_WIDTH;
     return HORIZONTAL_TAB_MIN_WIDTH;
@@ -1064,17 +1070,19 @@ void TabBar::resizeEvent(QResizeEvent* event)
     update_tab_button_geometry();
 }
 
-// A tab moved between windows takes its microphone indicator with it.
+// A tab moved between windows takes its microphone and agent indicators with it.
 void TabBar::tabInserted(int index)
 {
     QTabBar::tabInserted(index);
     update_microphone_indicators();
+    update_agent_indicators();
 }
 
 void TabBar::tabRemoved(int index)
 {
     QTabBar::tabRemoved(index);
     update_microphone_indicators();
+    update_agent_indicators();
 }
 
 void TabBar::tabLayoutChange()
@@ -1382,8 +1390,8 @@ void TabBar::paintEvent(QPaintEvent*)
             if (auto* tab = m_tab_widget ? m_tab_widget->tab(index) : nullptr; tab && !tabText(index).isEmpty())
                 tabs_with_cut_titles.set(tab);
 
-            // The speaker and the microphone take the favicon's place on a pinned tile.
-            if (is_pinned_tile && (tab_audio_button(index) || microphone_indicator(index)))
+            // The speaker, microphone, and agent indicators take the favicon's place on a pinned tile.
+            if (is_pinned_tile && (tab_audio_button(index) || microphone_indicator(index) || agent_indicator(index)))
                 continue;
 
             auto icon_center = shape_rect.center();
@@ -1407,8 +1415,8 @@ void TabBar::paintEvent(QPaintEvent*)
         auto contents_rect = is_vertical
             ? shape_rect.toAlignedRect().adjusted(VERTICAL_TAB_CONTENT_LEADING_INSET, 0, -TAB_CONTENT_HORIZONTAL_INSET, 0)
             : horizontal_tab_contents_rect(index, layout_rect).toAlignedRect();
-        // The microphone and the speaker sit after the title, with the close button.
-        for (auto* indicator : { static_cast<QWidget*>(microphone_indicator(index)), static_cast<QWidget*>(tab_audio_button(index)) }) {
+        // The agent, microphone, and speaker sit after the title, with the close button.
+        for (auto* indicator : { static_cast<QWidget*>(agent_indicator(index)), static_cast<QWidget*>(microphone_indicator(index)), static_cast<QWidget*>(tab_audio_button(index)) }) {
             if (indicator && indicator->isVisible())
                 contents_rect.setRight(min(contents_rect.right(), indicator->geometry().left() - TAB_CONTENT_BUTTON_GAP));
         }
@@ -1426,7 +1434,7 @@ void TabBar::paintEvent(QPaintEvent*)
                 tabs_with_cut_titles.set(tab);
             auto* close_button = tab_close_button(index);
             auto close_button_replaces_favicon = close_button && close_button->isVisible()
-                && horizontal_tab_close_button_replaces_favicon(horizontal_tab_contents_rect(index, layout_rect), *close_button, is_selected, tab_audio_button(index) || microphone_indicator(index));
+                && horizontal_tab_close_button_replaces_favicon(horizontal_tab_contents_rect(index, layout_rect), *close_button, is_selected, tab_audio_button(index) || microphone_indicator(index) || agent_indicator(index));
             // NB: A tab too narrow for its favicon next to its mute button shows the mute button alone, rather than
             //     drawing the favicon over it.
             if (contents_rect.width() < TAB_ICON_SIZE && !close_button_replaces_favicon)
@@ -1619,7 +1627,7 @@ bool TabBar::eventFilter(QObject* watched, QEvent* event)
     //     indicator keeps its tab hovered like the buttons do.
     auto hovered_tab_for_button = [this](QObject* button) {
         for (int index = 0; index < count(); ++index) {
-            if (tab_audio_button(index) == button || tab_close_button(index) == button || microphone_indicator(index) == button)
+            if (tab_audio_button(index) == button || tab_close_button(index) == button || microphone_indicator(index) == button || agent_indicator(index) == button)
                 return index;
         }
         return -1;
@@ -2674,6 +2682,51 @@ TabMicrophoneIndicator* TabBar::microphone_indicator(int index) const
     return m_microphone_indicators.get(tab).value_or(nullptr);
 }
 
+void TabBar::update_agent_indicators()
+{
+    if (m_tab_widget && m_tab_widget->tab_updates_deferred())
+        return;
+
+    HashTable<Tab const*> agent_tabs;
+    for (int index = 0; index < count(); ++index) {
+        if (auto* tab = m_tab_widget ? m_tab_widget->tab(index) : nullptr; tab && tab->is_loaded() && tab->view().is_mcp_access_allowed())
+            agent_tabs.set(tab);
+    }
+
+    auto indicators_changed = false;
+    m_agent_indicators.remove_all_matching([&](Tab const* tab, TabAgentIndicator* indicator) {
+        if (agent_tabs.contains(tab))
+            return false;
+        indicator->hide();
+        indicator->deleteLater();
+        indicators_changed = true;
+        return true;
+    });
+
+    for (auto const* tab : agent_tabs) {
+        if (!m_agent_indicators.contains(tab)) {
+            m_agent_indicators.set(tab, new TabAgentIndicator(this));
+            indicators_changed = true;
+        }
+    }
+
+    // NB: A horizontal tab with an agent indicator has a larger minimum width (see tabSizeHint()).
+    if (indicators_changed && tab_layout() == TabLayout::Horizontal) {
+        refresh_tab_layout();
+        return;
+    }
+    update_tab_button_geometry();
+    update();
+}
+
+TabAgentIndicator* TabBar::agent_indicator(int index) const
+{
+    auto* tab = m_tab_widget ? m_tab_widget->tab(index) : nullptr;
+    if (!tab)
+        return nullptr;
+    return m_agent_indicators.get(tab).value_or(nullptr);
+}
+
 // The width of the tabs, which the bar reaches past on the page's side, where the selected tab joins the page's frame.
 int TabBar::vertical_bar_width() const
 {
@@ -2908,14 +2961,16 @@ void TabBar::update_tab_button_geometry()
             tab_bar_button->set_placement(placement);
         else if (auto* microphone = qobject_cast<TabMicrophoneIndicator*>(button))
             microphone->set_placement(placement);
+        else if (auto* agent = qobject_cast<TabAgentIndicator*>(button))
+            agent->set_placement(placement);
     };
 
-    // The speaker and the microphone take the favicon's place, side by side in the middle of a pinned tile's card.
-    auto center_indicators_in = [](TabMicrophoneIndicator* microphone, QWidget* speaker, QRectF const& card) {
+    // The agent, microphone, and speaker take the favicon's place, side by side in the middle of a pinned tile's card.
+    auto center_indicators_in = [](TabAgentIndicator* agent, TabMicrophoneIndicator* microphone, QWidget* speaker, QRectF const& card) {
         auto size_of = [](QWidget const& widget) { return widget.size().isEmpty() ? widget.sizeHint() : widget.size(); };
-        auto total_width = (microphone ? size_of(*microphone).width() : 0) + (speaker ? size_of(*speaker).width() : 0);
+        auto total_width = (agent ? size_of(*agent).width() : 0) + (microphone ? size_of(*microphone).width() : 0) + (speaker ? size_of(*speaker).width() : 0);
         auto left = card.center().x() - (total_width / 2.0);
-        for (auto* indicator : { static_cast<QWidget*>(microphone), speaker }) {
+        for (auto* indicator : { static_cast<QWidget*>(agent), static_cast<QWidget*>(microphone), speaker }) {
             if (!indicator)
                 continue;
             auto indicator_size = size_of(*indicator);
@@ -2951,10 +3006,12 @@ void TabBar::update_tab_button_geometry()
             prepare_button(left_button, TabBarButton::Placement::Tab);
             auto* microphone = microphone_indicator(index);
             prepare_button(microphone, TabBarButton::Placement::Tab);
+            auto* agent = agent_indicator(index);
+            prepare_button(agent, TabBarButton::Placement::Tab);
 
             if (index < pinned_count) {
-                center_indicators_in(microphone, left_button, shape_rect);
-                for (auto* indicator : { static_cast<QWidget*>(microphone), left_button }) {
+                center_indicators_in(agent, microphone, left_button, shape_rect);
+                for (auto* indicator : { static_cast<QWidget*>(agent), static_cast<QWidget*>(microphone), left_button }) {
                     if (!indicator)
                         continue;
                     if (auto visible = !is_dragged && is_in_view(indicator); indicator->isVisible() != visible)
@@ -2997,9 +3054,8 @@ void TabBar::update_tab_button_geometry()
                     trailing_edge = close_button_position.x() - HORIZONTAL_TAB_CLOSE_BUTTON_GAP;
             }
 
-            // The speaker of a tab playing audio sits left of the close button's slot, and the microphone of a tab using
-            // it sits left of the speaker, or in the speaker's slot without it. A tab too narrow for both shows only the
-            // microphone, in the speaker's slot, so that it never hides which tabs use the microphone.
+            // The speaker of a tab playing audio sits left of the close button's slot, the microphone sits left of the
+            // speaker (or in its slot), and the agent indicator sits left of both (or in the speaker's slot).
             auto speaker_slot_left = trailing_edge - TAB_AUDIO_BUTTON_SIZE;
             auto has_room_for_microphone_before_speaker = !microphone || speaker_slot_left - microphone->width() >= content_rect.left();
             auto shows_speaker = left_button && has_room_for_microphone_before_speaker;
@@ -3010,13 +3066,26 @@ void TabBar::update_tab_button_geometry()
                 if (auto visible = shows_speaker && !is_dragged && !is_growing && is_in_view(left_button); left_button->isVisible() != visible)
                     left_button->setVisible(visible);
             }
+            auto shows_microphone = false;
             if (microphone) {
                 auto x = shows_speaker ? left_button->x() - microphone->width() : speaker_slot_left + ((TAB_AUDIO_BUTTON_SIZE - microphone->width()) / 2);
                 QPoint position { x, button_y_in(microphone, shape_rect) };
                 if (microphone->pos() != position)
                     microphone->move(position);
-                if (auto visible = !is_dragged && !is_growing && is_in_view(microphone); microphone->isVisible() != visible)
-                    microphone->setVisible(visible);
+                shows_microphone = !is_dragged && !is_growing && is_in_view(microphone);
+                if (microphone->isVisible() != shows_microphone)
+                    microphone->setVisible(shows_microphone);
+            }
+            if (agent) {
+                auto x = shows_microphone ? microphone->x() - agent->width()
+                    : shows_speaker       ? left_button->x() - agent->width()
+                                          : speaker_slot_left + ((TAB_AUDIO_BUTTON_SIZE - agent->width()) / 2);
+                QPoint position { x, button_y_in(agent, shape_rect) };
+                if (agent->pos() != position)
+                    agent->move(position);
+                auto shows_agent = !is_dragged && !is_growing && is_in_view(agent) && (x >= content_rect.left() || (!shows_speaker && !shows_microphone));
+                if (agent->isVisible() != shows_agent)
+                    agent->setVisible(shows_agent);
             }
         }
         return;
@@ -3044,12 +3113,19 @@ void TabBar::update_tab_button_geometry()
         // NB: A QRect's right() is its last column, one short of its right edge.
         auto* close_button = tab_close_button(index);
         auto* speaker = tab_audio_button(index);
+        auto* microphone = microphone_indicator(index);
         auto end_radius = shape_rect.height() / 2;
         auto x = shape_rect.right() + 1 - end_radius - (button_size.width() / 2);
         if (button != close_button && close_button && close_button->isVisible())
             x = close_button->x() - SIDEBAR_ROW_BUTTON_GAP - ((SIDEBAR_ROW_AUDIO_BUTTON_SIZE + button_size.width()) / 2);
-        if (button == microphone_indicator(index) && speaker && speaker->isVisible())
+        if (button == microphone && speaker && speaker->isVisible())
             x = speaker->x() - button_size.width();
+        if (button == agent_indicator(index)) {
+            if (microphone && microphone->isVisible())
+                x = microphone->x() - button_size.width();
+            else if (speaker && speaker->isVisible())
+                x = speaker->x() - button_size.width();
+        }
 
         // The expanded layout is also used at narrow widths during hover expansion. Keep buttons from covering the
         // favicon while the sidebar grows.
@@ -3089,8 +3165,8 @@ void TabBar::update_tab_button_geometry()
         if (button_size.isEmpty())
             return;
 
-        // The close button sits on the favicon's top left corner, the speaker on its bottom right corner, and the
-        // microphone on its bottom left corner.
+        // The close button sits on the favicon's top left corner, the speaker on its bottom right corner, the microphone
+        // on its bottom left corner, and the agent indicator on its top right corner.
         auto icon_center = QRectF(shape_rect).center();
         QPoint icon_top_left { qRound(icon_center.x()) - (TAB_ICON_SIZE / 2), qRound(icon_center.y()) - (TAB_ICON_SIZE / 2) };
         auto is_close_button = button == tab_close_button(index);
@@ -3099,6 +3175,8 @@ void TabBar::update_tab_button_geometry()
             badge_center = icon_top_left - RAIL_BADGE_CORNER_OUTSET;
         else if (button == microphone_indicator(index))
             badge_center = icon_top_left + QPoint(-RAIL_BADGE_CORNER_OUTSET.x(), TAB_ICON_SIZE + RAIL_BADGE_CORNER_OUTSET.y());
+        else if (button == agent_indicator(index))
+            badge_center = icon_top_left + QPoint(TAB_ICON_SIZE + RAIL_BADGE_CORNER_OUTSET.x(), -RAIL_BADGE_CORNER_OUTSET.y());
         auto button_position = badge_center - QPoint(button_size.width() / 2, button_size.height() / 2);
 
         // NB: As above, move the button before showing it.
@@ -3129,10 +3207,11 @@ void TabBar::update_tab_button_geometry()
         auto* close_button = tab_close_button(index);
         QWidget* speaker = tab_audio_button(index);
         auto* microphone = microphone_indicator(index);
+        auto* agent = agent_indicator(index);
 
         // An unpinned tab scrolled under the pinned tabs keeps its buttons out of sight.
         if (region.count > 0 && !region.scrolls && index >= region.count && tab_rect.top() < region.height) {
-            for (auto* button : { static_cast<QWidget*>(close_button), speaker, static_cast<QWidget*>(microphone) }) {
+            for (auto* button : { static_cast<QWidget*>(close_button), speaker, static_cast<QWidget*>(microphone), static_cast<QWidget*>(agent) }) {
                 if (button && button->isVisible())
                     button->setVisible(false);
             }
@@ -3144,11 +3223,13 @@ void TabBar::update_tab_button_geometry()
             place_collapsed_button(index, speaker, shape_rect);
             place_collapsed_button(index, close_button, shape_rect);
             place_collapsed_button(index, microphone, shape_rect);
+            place_collapsed_button(index, agent, shape_rect);
         } else if (index < region.count && pinned_tabs_are_tiles()) {
             prepare_button(speaker, TabBarButton::Placement::Tab);
             prepare_button(microphone, TabBarButton::Placement::Tab);
-            center_indicators_in(microphone, speaker, tab_rect);
-            for (auto* indicator : { static_cast<QWidget*>(microphone), speaker }) {
+            prepare_button(agent, TabBarButton::Placement::Tab);
+            center_indicators_in(agent, microphone, speaker, tab_rect);
+            for (auto* indicator : { static_cast<QWidget*>(agent), static_cast<QWidget*>(microphone), speaker }) {
                 if (indicator && indicator->isVisible() != (index != dragged_index))
                     indicator->setVisible(index != dragged_index);
             }
@@ -3157,6 +3238,7 @@ void TabBar::update_tab_button_geometry()
             place_expanded_button(index, close_button, shape_rect);
             place_expanded_button(index, speaker, shape_rect);
             place_expanded_button(index, microphone, shape_rect);
+            place_expanded_button(index, agent, shape_rect);
         }
     }
 }
@@ -3514,6 +3596,7 @@ ScopeGuard<Function<void()>> TabWidget::defer_tab_updates()
         update_tab_layout();
         place_toolbar_over_page_column();
         m_tab_bar->update_microphone_indicators();
+        m_tab_bar->update_agent_indicators();
         m_tab_bar->update_loading_ring_animation();
     } };
 }
@@ -5832,6 +5915,46 @@ void TabBarButton::paintEvent(QPaintEvent*)
     painter.drawPixmap(QStyle::alignedRect(layoutDirection(), Qt::AlignCenter, iconSize(), rect()).topLeft(), icon_pixmap);
 }
 
+static void apply_tab_status_indicator_placement(QWidget& widget, TabBarButton::Placement& member, TabBarButton::Placement placement)
+{
+    member = placement;
+    switch (placement) {
+    case TabBarButton::Placement::Tab:
+        widget.setFixedSize(TAB_BUTTON_ICON_SIZE, TAB_AUDIO_BUTTON_SIZE);
+        break;
+    case TabBarButton::Placement::SidebarRow:
+        widget.setFixedSize(SIDEBAR_ROW_AUDIO_ICON_SIZE, SIDEBAR_ROW_AUDIO_BUTTON_SIZE);
+        break;
+    case TabBarButton::Placement::RailBadge:
+        widget.setFixedSize(RAIL_BADGE_SIZE, RAIL_BADGE_SIZE);
+        break;
+    }
+    widget.update();
+}
+
+static void paint_tab_status_indicator(QWidget const& widget, TabBarButton::Placement placement, ChromeIcon icon, QColor const& active_color)
+{
+    QPainter painter(const_cast<QWidget*>(&widget));
+
+    auto glyph_size = TAB_BUTTON_ICON_SIZE;
+    switch (placement) {
+    case TabBarButton::Placement::Tab:
+        break;
+    case TabBarButton::Placement::SidebarRow:
+        glyph_size = SIDEBAR_ROW_AUDIO_ICON_SIZE;
+        break;
+    case TabBarButton::Placement::RailBadge:
+        ChromeStyle::paint_tab_badge_frame(painter, widget);
+        glyph_size = RAIL_BADGE_AUDIO_ICON_SIZE;
+        break;
+    }
+
+    auto const& chrome = Theme::chrome(widget);
+    auto use_active = placement != TabBarButton::Placement::Tab && ChromeStyle::window_activity(widget) == ChromeStyle::WindowActivity::Active;
+    QRect glyph_rect { (widget.width() - glyph_size) / 2, (widget.height() - glyph_size) / 2, glyph_size, glyph_size };
+    create_chrome_icon(icon, use_active || icon == ChromeIcon::Agent ? active_color : chrome.muted).paint(&painter, glyph_rect);
+}
+
 TabMicrophoneIndicator::TabMicrophoneIndicator(QWidget* parent)
     : QLabel(parent)
 {
@@ -5846,43 +5969,36 @@ TabMicrophoneIndicator::TabMicrophoneIndicator(QWidget* parent)
 // The microphone has no button around it, so it is only as wide as its glyph beside the speaker, except as a badge.
 void TabMicrophoneIndicator::set_placement(TabBarButton::Placement placement)
 {
-    m_placement = placement;
-    switch (placement) {
-    case TabBarButton::Placement::Tab:
-        setFixedSize(TAB_BUTTON_ICON_SIZE, TAB_AUDIO_BUTTON_SIZE);
-        break;
-    case TabBarButton::Placement::SidebarRow:
-        setFixedSize(SIDEBAR_ROW_AUDIO_ICON_SIZE, SIDEBAR_ROW_AUDIO_BUTTON_SIZE);
-        break;
-    case TabBarButton::Placement::RailBadge:
-        setFixedSize(RAIL_BADGE_SIZE, RAIL_BADGE_SIZE);
-        break;
-    }
-    update();
+    apply_tab_status_indicator_placement(*this, m_placement, placement);
 }
 
 // The microphone is drawn like the speaker in each place, in the same color and at the same size.
 void TabMicrophoneIndicator::paintEvent(QPaintEvent*)
 {
-    QPainter painter(this);
+    paint_tab_status_indicator(*this, m_placement, ChromeIcon::Microphone, Theme::chrome(*this).icon);
+}
 
-    auto glyph_size = TAB_BUTTON_ICON_SIZE;
-    switch (m_placement) {
-    case TabBarButton::Placement::Tab:
-        break;
-    case TabBarButton::Placement::SidebarRow:
-        glyph_size = SIDEBAR_ROW_AUDIO_ICON_SIZE;
-        break;
-    case TabBarButton::Placement::RailBadge:
-        ChromeStyle::paint_tab_badge_frame(painter, *this);
-        glyph_size = RAIL_BADGE_AUDIO_ICON_SIZE;
-        break;
-    }
+TabAgentIndicator::TabAgentIndicator(QWidget* parent)
+    : QLabel(parent)
+{
+    setObjectName("LadybirdTabAgent");
+    setToolTip("Controlled by an agent (MCP)");
+    setAccessibleName("Controlled by an agent (MCP)");
+    setFocusPolicy(Qt::NoFocus);
+    set_placement(m_placement);
+    hide();
+}
 
+void TabAgentIndicator::set_placement(TabBarButton::Placement placement)
+{
+    apply_tab_status_indicator_placement(*this, m_placement, placement);
+}
+
+void TabAgentIndicator::paintEvent(QPaintEvent*)
+{
     auto const& chrome = Theme::chrome(*this);
-    auto takes_icon_color = m_placement != TabBarButton::Placement::Tab && ChromeStyle::window_activity(*this) == ChromeStyle::WindowActivity::Active;
-    QRect glyph_rect { (width() - glyph_size) / 2, (height() - glyph_size) / 2, glyph_size, glyph_size };
-    create_chrome_icon(ChromeIcon::Microphone, takes_icon_color ? chrome.icon : chrome.muted).paint(&painter, glyph_rect);
+    auto color = ChromeStyle::window_activity(*this) == ChromeStyle::WindowActivity::Active ? Theme::accent() : chrome.muted;
+    paint_tab_status_indicator(*this, m_placement, ChromeIcon::Agent, color);
 }
 
 }
