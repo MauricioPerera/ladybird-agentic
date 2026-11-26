@@ -122,24 +122,24 @@ private:
     ErrorOr<void> write_speakers_json_file(Media::SpeakerTimeline&, StringView mp4_filename, StringView json_path, AK::Duration batch_duration);
     ErrorOr<void> write_session_manifest(bool completed, AK::Duration total_duration);
 
-    WebContentView& m_view;
+    [[maybe_unused]] WebContentView& m_view;
     QTimer m_frame_timer;
 
     bool m_is_recording { false };
-    bool m_snapshot_in_flight { false };
     TabRecorderSettings m_active_settings;
     MonotonicTime m_start_time { MonotonicTime::now_coarse() };
     String m_session_dir;
     String m_session_id;
-    String m_mp4_path;
-    String m_speakers_json_path;
-    String m_recording_filename;
 
     AK::Mutex m_timeline_mutex;
     OwnPtr<Media::SpeakerTimeline> m_timeline;
     AK::Duration m_timeline_batch_start_offset { AK::Duration::zero() };
 
 #ifdef Q_OS_WIN
+    bool m_snapshot_in_flight { false };
+    String m_mp4_path;
+    String m_speakers_json_path;
+    String m_recording_filename;
     OwnPtr<Media::WindowsMediaFoundation::WindowsMediaFoundationMp4Recorder> m_recorder;
     AK::Duration m_recorder_batch_start_offset { AK::Duration::zero() };
     Optional<Error> m_recorder_init_error;
@@ -148,19 +148,18 @@ private:
     void* m_video_event { nullptr };
     void* m_recorder_init_event { nullptr };
     bool m_recorder_has_audio { false };
-#endif
-
     AK::Mutex m_recorder_mutex;
     AK::Mutex m_video_queue_mutex;
     Vector<QueuedVideoFrame> m_video_queue;
     bool m_stop_requested { false };
+    RefPtr<Threading::Thread> m_video_thread;
+    RefPtr<Threading::Thread> m_audio_thread;
+#endif
+
     Atomic<bool> m_audio_worker_stop { false };
     Atomic<bool> m_worker_failed { false };
     Atomic<u32> m_current_batch_index { 0 };
     Vector<CompletedBatch> m_completed_batches;
-
-    RefPtr<Threading::Thread> m_video_thread;
-    RefPtr<Threading::Thread> m_audio_thread;
 };
 
 }

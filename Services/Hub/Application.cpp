@@ -120,7 +120,7 @@ void Application::set_active_view(Optional<u64> view_id)
 Optional<WebView::ViewImplementation&> Application::active_web_view() const
 {
     if (!m_active_view_id.has_value())
-        return {};
+        return WebView::Application::active_web_view();
     return WebView::ViewImplementation::find_view_by_id(*m_active_view_id);
 }
 
@@ -148,7 +148,7 @@ Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::
 {
     auto* ui = ConnectionFromUI::the();
     if (!ui)
-        return {};
+        return WebView::Application::open_mcp_new_tab(activate_tab, move(container_id));
 
     View::InitialState initial_state;
     if (auto active_view = active_web_view(); active_view.has_value() && active_view->is_private() == WebView::IsPrivate::No) {

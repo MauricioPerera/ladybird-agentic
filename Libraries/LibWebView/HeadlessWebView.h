@@ -21,7 +21,7 @@ class WEBVIEW_API HeadlessWebView : public WebView::ViewImplementation {
 public:
     AK_ALLOC_WITH_KMALLOC;
 
-    static NonnullOwnPtr<HeadlessWebView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize window_size, IsPrivate = IsPrivate::No);
+    static NonnullOwnPtr<HeadlessWebView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize window_size, IsPrivate = IsPrivate::No, String container_id = {});
     enum class IsOwnedByParent : bool {
         No,
         Yes,
@@ -52,7 +52,7 @@ public:
     }
 
 protected:
-    HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSize viewport_size, IsPrivate = IsPrivate::No);
+    HeadlessWebView(Core::AnonymousBuffer theme, Web::DevicePixelSize viewport_size, IsPrivate = IsPrivate::No, String container_id = {});
 
     void propagate_web_content_crash(WebContentCrashReason);
     HeadlessWebView& adopt_child_web_view(NonnullOwnPtr<HeadlessWebView>);

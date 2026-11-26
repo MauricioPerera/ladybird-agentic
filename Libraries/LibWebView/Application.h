@@ -323,11 +323,11 @@ public:
 
     Function<void()> on_compositor_process_death;
 
-    virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
+    virtual Optional<ViewImplementation&> active_web_view() const;
     virtual Optional<ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const { return {}; }
 
     virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, ViewImplementation const* = nullptr) const { return {}; }
-    virtual Optional<ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab, String = {}) const { return {}; }
+    virtual Optional<ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab, String = {}) const;
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, ViewImplementation const* source_view = nullptr) const;
     virtual void activate_or_open_tab_with_url(URL::URL const&) const;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
@@ -970,6 +970,10 @@ private:
     HashMap<u64, Vector<MCPNetworkEntry>> m_mcp_network_requests;
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
+
+    struct HeadlessSessionState;
+    HeadlessWebView& register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView>, bool activate, bool exit_on_last_close);
+    OwnPtr<HeadlessSessionState> m_headless_state;
 };
 
 }

@@ -258,6 +258,7 @@ Application::~Application()
     m_flow_store.clear();
     m_mcp.clear();
     fail_all_mcp_requests("Browser shutting down"sv);
+    m_headless_state.clear();
 
 #if !defined(AK_OS_WINDOWS)
     // No event loop runs the handlers during teardown, so a signal from here on takes its default action again.
@@ -2779,6 +2780,81 @@ static void load_page_and_exit_on_close(Core::EventLoop& event_loop, HeadlessWeb
     view.load_from_browser_ui(url);
 }
 
+struct Application::HeadlessSessionState {
+    AK_ALLOC_WITH_KMALLOC;
+    Core::AnonymousBuffer theme;
+    Vector<NonnullOwnPtr<HeadlessWebView>> views;
+    Optional<u64> active_view_id;
+};
+
+HeadlessWebView& Application::register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView> view, bool activate, bool exit_on_last_close)
+{
+    if (!m_headless_state)
+        m_headless_state = make<HeadlessSessionState>();
+
+    auto view_id = view->view_id();
+    view->set_mcp_access_allowed(true);
+    view->on_activate_tab = [this, view_id]() {
+        if (m_headless_state)
+            m_headless_state->active_view_id = view_id;
+    };
+    view->on_close = [this, view_id, exit_on_last_close]() {
+        Core::deferred_invoke([this, view_id, exit_on_last_close]() {
+            if (!m_headless_state)
+                return;
+            m_headless_state->views.remove_first_matching([view_id](auto const& candidate) {
+                return candidate->view_id() == view_id;
+            });
+            if (m_headless_state->active_view_id == view_id) {
+                m_headless_state->active_view_id = m_headless_state->views.is_empty()
+                    ? Optional<u64> {}
+                    : Optional<u64> { m_headless_state->views.last()->view_id() };
+            }
+            if (exit_on_last_close && m_headless_state->views.is_empty() && m_event_loop)
+                m_event_loop->quit(0);
+        });
+    };
+
+    m_headless_state->views.append(move(view));
+    if (activate || !m_headless_state->active_view_id.has_value())
+        m_headless_state->active_view_id = view_id;
+
+    return *m_headless_state->views.last();
+}
+
+Optional<ViewImplementation&> Application::active_web_view() const
+{
+    if (!m_headless_state)
+        return {};
+    if (m_headless_state->active_view_id.has_value()) {
+        if (auto view = ViewImplementation::find_view_by_id(*m_headless_state->active_view_id); view.has_value())
+            return view;
+    }
+    if (!m_headless_state->views.is_empty())
+        return *m_headless_state->views.first();
+    return {};
+}
+
+Optional<ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab, String container_id) const
+{
+    if (m_browser_options.headless_mode != HeadlessMode::Manual
+        || !m_browser_options.mcp_port.has_value()
+        || !m_headless_state
+        || !m_headless_state->theme.is_valid()) {
+        return {};
+    }
+
+    auto view = HeadlessWebView::create(
+        m_headless_state->theme,
+        { m_browser_options.window_width, m_browser_options.window_height },
+        IsPrivate::No,
+        move(container_id));
+    return const_cast<Application&>(*this).register_headless_mcp_view(
+        move(view),
+        activate_tab == Web::HTML::ActivateTab::Yes,
+        false);
+}
+
 ErrorOr<int> Application::execute()
 {
     if (!m_browser_options.headless_mode.has_value())
@@ -2791,38 +2867,62 @@ ErrorOr<int> Application::execute()
         auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
         auto theme = TRY(Gfx::load_system_theme(theme_path.string()));
 
+        if (!m_headless_state)
+            m_headless_state = make<HeadlessSessionState>();
+        m_headless_state->theme = theme;
+
+        bool is_headless_mcp = !m_browser_options.webdriver_browser_endpoint.has_value()
+            && *m_browser_options.headless_mode == HeadlessMode::Manual
+            && m_browser_options.mcp_port.has_value();
+        String initial_container_id;
+        if (is_headless_mcp) {
+            if (auto resolved = mcp_resolve_container_against_policy(OptionalNone {}, mcp_security_policy()); !resolved.is_error())
+                initial_container_id = resolved.release_value();
+        }
+
 #if !defined(AK_OS_WINDOWS)
         if (*m_browser_options.headless_mode == HeadlessMode::Terminal)
             view = TRY(TerminalWebView::create(move(theme), m_browser_options.device_pixel_ratio));
         else
 #endif
-            view = HeadlessWebView::create(move(theme), { m_browser_options.window_width, m_browser_options.window_height });
+            view = HeadlessWebView::create(move(theme), { m_browser_options.window_width, m_browser_options.window_height }, IsPrivate::No, move(initial_container_id));
 
         if (!m_browser_options.webdriver_browser_endpoint.has_value()) {
-            if (m_browser_options.urls.size() != 1)
-                return Error::from_string_literal("Headless mode currently only supports exactly one URL");
+            if (is_headless_mcp) {
+                if (!m_browser_options.raw_urls.is_empty() && m_browser_options.urls.size() > 1)
+                    return Error::from_string_literal("Headless mode currently only supports at most one URL");
+                auto initial_url = m_browser_options.raw_urls.is_empty() ? URL::about_blank() : m_browser_options.urls.first();
+                auto& headless_view = register_headless_mcp_view(view.release_nonnull(), true, false);
+                if (initial_url != URL::about_blank())
+                    headless_view.load_from_browser_ui(initial_url);
+            } else {
+                if (m_browser_options.urls.size() != 1)
+                    return Error::from_string_literal("Headless mode currently only supports exactly one URL");
 
-            switch (*m_browser_options.headless_mode) {
-            case HeadlessMode::Screenshot:
-                screenshot_timer = load_page_for_screenshot_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), m_browser_options.screenshot_delay);
-                break;
-            case HeadlessMode::LayoutTree:
-                load_page_for_info_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), WebView::PageInfoType::LayoutTree);
-                break;
-            case HeadlessMode::Text:
-                load_page_for_info_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), WebView::PageInfoType::Text);
-                break;
-            case HeadlessMode::Manual:
-            case HeadlessMode::Terminal:
-                load_page_and_exit_on_close(*m_event_loop, *view, m_browser_options.urls.first());
-                break;
-            case HeadlessMode::Test:
-                VERIFY_NOT_REACHED();
+                switch (*m_browser_options.headless_mode) {
+                case HeadlessMode::Screenshot:
+                    screenshot_timer = load_page_for_screenshot_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), m_browser_options.screenshot_delay);
+                    break;
+                case HeadlessMode::LayoutTree:
+                    load_page_for_info_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), WebView::PageInfoType::LayoutTree);
+                    break;
+                case HeadlessMode::Text:
+                    load_page_for_info_and_exit(*m_event_loop, *view, m_browser_options.urls.first(), WebView::PageInfoType::Text);
+                    break;
+                case HeadlessMode::Manual:
+                case HeadlessMode::Terminal:
+                    load_page_and_exit_on_close(*m_event_loop, *view, m_browser_options.urls.first());
+                    break;
+                case HeadlessMode::Test:
+                    VERIFY_NOT_REACHED();
+                }
             }
         }
     }
 
-    return m_event_loop->exec();
+    auto exit_code = m_event_loop->exec();
+    m_headless_state.clear();
+    return exit_code;
 }
 
 Core::EventLoop& Application::create_platform_event_loop()

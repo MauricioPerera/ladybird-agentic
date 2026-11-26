@@ -49,6 +49,7 @@ class FlowStore;
 class FlowsUI;
 class FontService;
 class FontServiceHost;
+class HeadlessWebView;
 class HistoryStore;
 class HSTSStore;
 class ImageDecoderControlClient;

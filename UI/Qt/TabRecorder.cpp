@@ -52,6 +52,9 @@ namespace Ladybird {
 namespace {
 
 constexpr u32 DEFAULT_TARGET_FPS = 30;
+
+#ifdef Q_OS_WIN
+
 constexpr u32 TARGET_AUDIO_SAMPLE_RATE = 48000;
 constexpr u16 TARGET_AUDIO_CHANNELS = 2;
 constexpr size_t AUDIO_CHUNK_FRAMES = 960; // 20 ms at 48 kHz
@@ -72,8 +75,6 @@ String sanitize_filename_part(StringView input)
     }
     return MUST(builder.to_string());
 }
-
-#ifdef Q_OS_WIN
 
 using Microsoft::WRL::ComPtr;
 
@@ -652,9 +653,11 @@ TabRecorder::~TabRecorder()
 #endif
 }
 
-void TabRecorder::handle_worker_failure(Error error)
+void TabRecorder::handle_worker_failure([[maybe_unused]] Error error)
 {
+#ifdef Q_OS_WIN
     m_recorder_finalize_error = move(error);
+#endif
     m_audio_worker_stop.store(true, AK::MemoryOrder::memory_order_release);
 #ifdef Q_OS_WIN
     if (m_stop_event)
@@ -1085,7 +1088,7 @@ void TabRecorder::enqueue_video_frame(QImage snapshot)
 #endif
 }
 
-void TabRecorder::run_video_worker(u32 width, u32 height, u32 fps, bool record_audio)
+void TabRecorder::run_video_worker([[maybe_unused]] u32 width, [[maybe_unused]] u32 height, [[maybe_unused]] u32 fps, [[maybe_unused]] bool record_audio)
 {
 #ifdef Q_OS_WIN
     ScopedComInitializer com(COINIT_MULTITHREADED);
