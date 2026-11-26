@@ -44,6 +44,10 @@ MCPBanner::MCPBanner(QWidget* parent)
     connect(skills_button, &QPushButton::clicked, this, &MCPBanner::open_skills_requested);
     layout->addWidget(skills_button);
 
+    auto* vault_button = new QPushButton("Vault", this);
+    connect(vault_button, &QPushButton::clicked, this, &MCPBanner::open_vault_requested);
+    layout->addWidget(vault_button);
+
     m_copy_config_button = new QPushButton("Copy Config", this);
     connect(m_copy_config_button, &QPushButton::clicked, this, &MCPBanner::copy_config_requested);
     layout->addWidget(m_copy_config_button);

@@ -115,6 +115,12 @@ struct BrowserOptions {
     Optional<ByteString> mcp_upload_root {};
     bool mcp_allow_extension_install { false };
     bool mcp_allow_skill_write { false };
+    Optional<String> mcp_vault_passphrase {};
+    Vector<String> mcp_allowed_containers {};
+    Vector<String> mcp_allowed_domains {};
+    Vector<String> mcp_blocked_domains {};
+    bool mcp_disable_eval_js { false };
+    size_t mcp_max_tabs { 16 };
     EnableContentBlocker enable_content_blocker { EnableContentBlocker::Yes };
     DisableSandbox disable_sandbox { DisableSandbox::No };
     ForceVideoDecoderServer force_video_decoder_server { ForceVideoDecoderServer::No };

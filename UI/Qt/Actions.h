@@ -83,6 +83,7 @@ enum class ActionID {
     OpenExtensionsPage,
     OpenFlowsPage,
     OpenSkillsPage,
+    OpenVaultPage,
     ViewSource,
     InspectElement,
 

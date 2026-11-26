@@ -39,6 +39,7 @@ set(ABOUT_PAGES
     settings.html
     skills.html
     support.html
+    vault.html
     version.html
     webui.css
     welcome.css

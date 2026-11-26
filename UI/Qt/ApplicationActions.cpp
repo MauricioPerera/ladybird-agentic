@@ -263,6 +263,11 @@ ApplicationActions::ApplicationActions(PageOptions const& options)
     });
     m_inspect_menu->add_action(*m_open_skills_page_action);
 
+    m_open_vault_page_action = Action::create("Credential Vault"sv, ActionID::OpenVaultPage, [] {
+        Application::the().activate_or_open_tab_with_url(URL::about_vault());
+    });
+    m_inspect_menu->add_action(*m_open_vault_page_action);
+
     m_report_website_issue_action = Action::create("Report Website Issue…"sv, ActionID::ReportWebsiteIssue, on_active_view([](RemoteView& view) {
         view.report_website_issue();
     }));

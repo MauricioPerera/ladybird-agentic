@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Credential Vault</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
+        <style>
+            body {
+                max-width: 1180px;
+                padding: 36px 24px 64px 24px;
+            }
+
+            header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            header h1 {
+                flex: none;
+            }
+
+            .meta-bar {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+                min-width: 240px;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: var(--control);
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 500;
+            }
+
+            .badge.on {
+                color: #16a34a;
+            }
+
+            .badge.err {
+                color: #ef4444;
+            }
+
+            .header-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            button {
+                height: 30px;
+                padding: 0 12px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--control-hover);
+            }
+
+            button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+
+            button.primary {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            button.primary:hover:not(:disabled) {
+                background: #1d4ed8;
+            }
+
+            button.danger {
+                color: #ef4444;
+            }
+
+            button.small {
+                height: 24px;
+                padding: 0 8px;
+                font-size: 12px;
+            }
+
+            input[type="text"],
+            input[type="password"],
+            select,
+            textarea {
+                width: 100%;
+                padding: 6px 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                box-sizing: border-box;
+            }
+
+            textarea.origins {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                min-height: 68px;
+                resize: vertical;
+            }
+
+            textarea.notes {
+                min-height: 70px;
+                resize: vertical;
+            }
+
+            .status-banner {
+                margin-bottom: 14px;
+                padding: 10px 14px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                font-size: 13px;
+            }
+
+            .status-banner.hidden {
+                display: none;
+            }
+
+            .status-banner.error {
+                border-color: #ef4444;
+                color: #ef4444;
+            }
+
+            .site-context-banner {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 14px;
+                padding: 12px 14px;
+                border-radius: 10px;
+                border: 1px solid #2563eb;
+                background: color-mix(in srgb, #2563eb 10%, var(--tile));
+                font-size: 13px;
+            }
+
+            .site-context-banner.hidden {
+                display: none;
+            }
+
+            .layout {
+                display: grid;
+                grid-template-columns: 330px 1fr;
+                gap: 18px;
+                align-items: start;
+            }
+
+            @media (max-width: 860px) {
+                .layout {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .panel {
+                background: var(--card-background-color);
+                border: 1px solid var(--border-color);
+                border-radius: var(--card-radius);
+                padding: 16px;
+            }
+
+            .sidebar-header {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-bottom: 12px;
+            }
+
+            .cred-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .cred-item {
+                padding: 10px 12px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                cursor: pointer;
+            }
+
+            .cred-item.selected {
+                border-color: #2563eb;
+                box-shadow: 0 0 0 1px #2563eb;
+            }
+
+            .cred-item.disabled {
+                opacity: 0.65;
+            }
+
+            .cred-item-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+            }
+
+            .cred-item-name {
+                font-weight: 600;
+                font-size: 13px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            }
+
+            .cred-item-label {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 2px;
+            }
+
+            .cred-chips {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-top: 6px;
+            }
+
+            .chip {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 11px;
+                padding: 1px 6px;
+                border-radius: 5px;
+                background: var(--page);
+                border: 1px solid var(--border-color);
+                color: var(--muted);
+            }
+
+            .pill {
+                display: inline-flex;
+                align-items: center;
+                padding: 1px 7px;
+                border-radius: 999px;
+                font-size: 11px;
+                background: var(--control);
+                color: var(--muted);
+            }
+
+            .pill.on {
+                color: #16a34a;
+            }
+
+            .cred-item-actions {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+            }
+
+            .tabs {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 14px;
+                border-bottom: 1px solid var(--border-color);
+                padding-bottom: 10px;
+            }
+
+            .tab-btn.active {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            .hidden {
+                display: none !important;
+            }
+
+            .grid-2 {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                align-items: end;
+            }
+
+            @media (max-width: 640px) {
+                .grid-2 {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .field {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                margin-bottom: 12px;
+            }
+
+            .field label {
+                font-size: 12px;
+                font-weight: 600;
+                color: var(--muted);
+            }
+
+            .checkbox-box {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                height: 32px;
+                padding: 0 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--page);
+                font-size: 13px;
+                cursor: pointer;
+            }
+
+            .checkbox-box input {
+                width: auto;
+                margin: 0;
+            }
+
+            .target-bar {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+                padding: 10px 12px;
+                margin-bottom: 14px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+            }
+
+            .target-bar select {
+                flex: 1;
+                min-width: 220px;
+            }
+
+            .inline-row {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .totp-preview {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 10px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 13px;
+                margin-top: 6px;
+            }
+
+            table.audit {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-top: 8px;
+            }
+
+            table.audit th,
+            table.audit td {
+                text-align: left;
+                padding: 6px 8px;
+                border-bottom: 1px solid var(--border-color);
+                vertical-align: top;
+            }
+
+            table.audit td.mono {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            }
+
+            .policy-box {
+                padding: 12px;
+                border-radius: 9px;
+                border: 1px solid var(--border-color);
+                background: var(--tile);
+                margin-bottom: 14px;
+                font-size: 12px;
+                line-height: 1.5;
+            }
+
+            .muted {
+                color: var(--muted);
+                font-size: 12px;
+            }
+
+            .storage-footer {
+                margin-top: 12px;
+                color: var(--muted);
+                font-size: 11px;
+                word-break: break-all;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Blind Credential Vault</h1>
+            <div class="meta-bar">
+                <span id="vault-lock-badge" class="badge">Locked</span>
+                <span id="vault-count-badge" class="badge">0 credentials</span>
+            </div>
+            <div class="header-actions">
+                <button id="btn-new" class="primary" type="button">+ New Credential</button>
+                <button id="btn-open-skills" type="button">Agent Skills</button>
+                <button id="btn-open-flows" type="button">Automation Flows</button>
+            </div>
+        </header>
+
+        <div id="status-banner" class="status-banner hidden"></div>
+
+        <div id="site-context-banner" class="site-context-banner hidden">
+            <div id="site-context-text"></div>
+            <button id="btn-new-for-site" class="primary small" type="button">New Credential for This Origin</button>
+        </div>
+
+        <div class="layout">
+            <aside class="panel">
+                <div class="sidebar-header">
+                    <input id="search-input" type="text" placeholder="Filter credentials by id, label, or origin..." />
+                </div>
+                <div id="cred-list" class="cred-list"></div>
+                <div id="empty-creds" class="muted hidden">No credentials stored yet. Agents never see stored passwords or TOTP seeds — they invoke login_with_credential blindly.</div>
+                <div id="storage-dir" class="storage-footer"></div>
+            </aside>
+
+            <main class="panel">
+                <div class="target-bar">
+                    <select id="tab-origin-select">
+                        <option value="">Pin exact origin from an open tab...</option>
+                    </select>
+                    <button id="btn-add-tab-origin" type="button">+ Pin Tab Origin</button>
+                </div>
+
+                <div class="tabs">
+                    <button id="tab-editor" class="tab-btn active" type="button">Credential Editor</button>
+                    <button id="tab-audit" class="tab-btn" type="button">Audit Log &amp; MCP Security Policy</button>
+                </div>
+
+                <section id="view-editor">
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="v-id">Credential ID (slug used by MCP agents, e.g. github-agent)</label>
+                            <input id="v-id" type="text" placeholder="github-agent" />
+                        </div>
+                        <div class="field">
+                            <label for="v-label">Display Label</label>
+                            <input id="v-label" type="text" placeholder="GitHub Agent Account" />
+                        </div>
+                    </div>
+
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="v-container">Pinned Tab Container (recommended for VPS/autonomous isolation)</label>
+                            <select id="v-container">
+                                <option value="">Any MCP-allowed container</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>Status</label>
+                            <label class="checkbox-box">
+                                <input id="v-enabled" type="checkbox" checked />
+                                <span>Enabled for blind MCP login</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="v-origins">Pinned Allowed Origins (one exact https:// origin per line; wildcards * forbidden)</label>
+                        <textarea id="v-origins" class="origins" spellcheck="false" placeholder="https://github.com"></textarea>
+                    </div>
+
+                    <div class="field">
+                        <label for="v-username">Username / Email</label>
+                        <input id="v-username" type="text" autocomplete="off" placeholder="agent@example.com" />
+                    </div>
+
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="v-password">Password <span id="pw-status" class="muted"></span></label>
+                            <input id="v-password" type="password" autocomplete="new-password" placeholder="Enter password..." />
+                        </div>
+                        <div class="field">
+                            <label for="v-totp">TOTP 2FA Secret (Base32 optional) <span id="totp-status" class="muted"></span></label>
+                            <div class="inline-row">
+                                <input id="v-totp" type="password" autocomplete="off" placeholder="JBSWY3DPEHPK3PXP" />
+                                <button id="btn-test-totp" type="button">Test 2FA</button>
+                            </div>
+                            <div id="totp-preview" class="totp-preview hidden"></div>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="v-notes">Human Notes (never returned by list_credentials)</label>
+                        <textarea id="v-notes" class="notes" placeholder="Internal notes..."></textarea>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button id="btn-save" class="primary" type="button">Save Encrypted</button>
+                        <button id="btn-revert" type="button">Revert</button>
+                        <button id="btn-delete-current" class="danger" type="button">Delete</button>
+                    </div>
+                </section>
+
+                <section id="view-audit" class="hidden">
+                    <div id="policy-box" class="policy-box"></div>
+                    <h3 style="margin: 0 0 8px 0; font-size: 14px;">Recent Vault Audit Log</h3>
+                    <table class="audit">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Credential</th>
+                                <th>Origin</th>
+                                <th>Field</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-body"></tbody>
+                    </table>
+                    <div id="empty-audit" class="muted hidden" style="margin-top: 8px;">No vault activity recorded yet.</div>
+                </section>
+            </main>
+        </div>
+
+        <script>
+            let state = {
+                unlocked: false,
+                keyMode: "",
+                lastError: null,
+                credentials: [],
+                containers: [],
+                tabs: [],
+                audit: [],
+                policy: { allowedContainers: [], allowedDomains: [], blockedDomains: [], disableEvalJs: false, maxTabs: 16 },
+                mcpEnabled: false,
+                storageDirectory: ""
+            };
+            let selectedId = null;
+            let activeTab = "editor";
+            let siteContextUrl = null;
+            let initialSiteApplied = false;
+            let isDirty = false;
+            let draft = createBlankDraft();
+
+            const statusBanner = document.getElementById("status-banner");
+            const siteBanner = document.getElementById("site-context-banner");
+            const siteText = document.getElementById("site-context-text");
+            const credListEl = document.getElementById("cred-list");
+            const emptyCredsEl = document.getElementById("empty-creds");
+            const searchInput = document.getElementById("search-input");
+            const totpPreview = document.getElementById("totp-preview");
+
+            function createBlankDraft() {
+                return {
+                    id: "site-login",
+                    label: "",
+                    allowedOrigins: [],
+                    containerId: "",
+                    username: "",
+                    password: "",
+                    totpSecret: "",
+                    hasPassword: false,
+                    hasTotp: false,
+                    notes: "",
+                    enabled: true
+                };
+            }
+
+            function clone(obj) {
+                return JSON.parse(JSON.stringify(obj));
+            }
+
+            function showBanner(msg, isError) {
+                if (!msg) {
+                    statusBanner.classList.add("hidden");
+                    return;
+                }
+                statusBanner.textContent = msg;
+                statusBanner.classList.toggle("error", Boolean(isError));
+                statusBanner.classList.remove("hidden");
+            }
+
+            function originFromUrl(rawUrl) {
+                try {
+                    return new URL(rawUrl).origin;
+                } catch {
+                    return "";
+                }
+            }
+
+            function slugifyOrigin(rawUrl) {
+                try {
+                    const host = new URL(rawUrl).hostname.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+                    return `${host || "site"}-login`;
+                } catch {
+                    return "site-login";
+                }
+            }
+
+            function parseHashSiteContext() {
+                const hash = location.hash ? location.hash.slice(1) : "";
+                if (!hash) {
+                    siteContextUrl = null;
+                    return;
+                }
+                const params = new URLSearchParams(hash);
+                const rawSite = params.get("site");
+                siteContextUrl = (rawSite && (rawSite.startsWith("http://") || rawSite.startsWith("https://"))) ? rawSite : null;
+            }
+
+            function prepareNewForSite(rawUrl) {
+                const origin = originFromUrl(rawUrl);
+                selectedId = null;
+                draft = createBlankDraft();
+                draft.id = slugifyOrigin(rawUrl);
+                draft.label = origin;
+                draft.allowedOrigins = origin ? [origin] : [];
+                isDirty = false;
+                renderCredList();
+                renderEditor();
+            }
+
+            function renderMetaAndPolicy() {
+                const lockBadge = document.getElementById("vault-lock-badge");
+                if (state.unlocked) {
+                    lockBadge.textContent = `Unlocked (${state.keyMode})`;
+                    lockBadge.classList.add("on");
+                    lockBadge.classList.remove("err");
+                } else {
+                    lockBadge.textContent = state.lastError ? `Locked: ${state.lastError}` : "Locked";
+                    lockBadge.classList.remove("on");
+                    lockBadge.classList.add("err");
+                }
+                document.getElementById("vault-count-badge").textContent = `${state.credentials.length} credential${state.credentials.length === 1 ? "" : "s"}`;
+                document.getElementById("storage-dir").textContent = state.storageDirectory ? `Encrypted Vault: ${state.storageDirectory}` : "";
+
+                const p = state.policy || {};
+                const policyEl = document.getElementById("policy-box");
+                const containers = (p.allowedContainers && p.allowedContainers.length) ? p.allowedContainers.join(", ") : "Any (set --mcp-allowed-containers to enforce isolation)";
+                const allowedDom = (p.allowedDomains && p.allowedDomains.length) ? p.allowedDomains.join(", ") : "All (set --mcp-allowed-domains to restrict)";
+                const blockedDom = (p.blockedDomains && p.blockedDomains.length) ? p.blockedDomains.join(", ") : "None (set --mcp-blocked-domains to block)";
+                policyEl.innerHTML = "";
+                const lines = [
+                    `Active MCP Security Policy (configure via CLI flags when launching Ladybird --mcp):`,
+                    `• Allowed Containers: ${containers}`,
+                    `• Allowed Domains: ${allowedDom}`,
+                    `• Blocked Domains: ${blockedDom}`,
+                    `• Global eval_js: ${p.disableEvalJs ? "DISABLED (--mcp-disable-eval-js)" : "Allowed (automatically quarantined after blind password/TOTP fill until navigation)"}`,
+                    `• Max Concurrent MCP Tabs: ${p.maxTabs || 16}`
+                ];
+                lines.forEach(line => {
+                    const d = document.createElement("div");
+                    d.textContent = line;
+                    policyEl.appendChild(d);
+                });
+            }
+
+            function renderContainersAndTabs() {
+                const containerSel = document.getElementById("v-container");
+                containerSel.innerHTML = "";
+                const anyOpt = document.createElement("option");
+                anyOpt.value = "";
+                anyOpt.textContent = "Any MCP-allowed container";
+                containerSel.appendChild(anyOpt);
+                (state.containers || []).forEach(c => {
+                    const opt = document.createElement("option");
+                    opt.value = c.id;
+                    opt.textContent = `${c.name} (${c.id})`;
+                    containerSel.appendChild(opt);
+                });
+                containerSel.value = draft.containerId || "";
+
+                const tabSel = document.getElementById("tab-origin-select");
+                const prev = tabSel.value;
+                tabSel.innerHTML = "";
+                const placeholder = document.createElement("option");
+                placeholder.value = "";
+                placeholder.textContent = state.tabs.length > 0 ? "Pin exact origin from an open tab..." : "No open http/https tabs";
+                tabSel.appendChild(placeholder);
+                state.tabs.forEach(t => {
+                    const opt = document.createElement("option");
+                    opt.value = t.origin || "";
+                    opt.textContent = `${t.origin} — ${(t.title || t.url).slice(0, 46)}${t.containerId ? ` [${t.containerId}]` : ""}`;
+                    tabSel.appendChild(opt);
+                });
+                if ([...tabSel.options].some(o => o.value === prev)) tabSel.value = prev;
+            }
+
+            function renderEditor() {
+                document.getElementById("v-id").value = draft.id || "";
+                document.getElementById("v-label").value = draft.label || "";
+                document.getElementById("v-container").value = draft.containerId || "";
+                document.getElementById("v-enabled").checked = draft.enabled !== false;
+                document.getElementById("v-origins").value = (draft.allowedOrigins || []).join("\n");
+                document.getElementById("v-username").value = draft.username || "";
+                document.getElementById("v-password").value = "";
+                document.getElementById("v-password").placeholder = draft.hasPassword ? "(encrypted password stored — leave blank to keep)" : "Enter password...";
+                document.getElementById("pw-status").textContent = draft.hasPassword ? "(saved)" : "";
+                document.getElementById("v-totp").value = "";
+                document.getElementById("v-totp").placeholder = draft.hasTotp ? "(encrypted TOTP seed stored — leave blank to keep)" : "JBSWY3DPEHPK3PXP";
+                document.getElementById("totp-status").textContent = draft.hasTotp ? "(saved)" : "";
+                document.getElementById("v-notes").value = draft.notes || "";
+                document.getElementById("btn-delete-current").disabled = !state.credentials.some(c => c.id === selectedId);
+                totpPreview.classList.add("hidden");
+            }
+
+            function renderSiteContextBanner() {
+                if (!siteContextUrl) {
+                    siteBanner.classList.add("hidden");
+                    return;
+                }
+                const origin = originFromUrl(siteContextUrl);
+                siteText.textContent = `Site context origin: ${origin} (pin this origin to restrict where MCP agents can use the credential)`;
+                siteBanner.classList.remove("hidden");
+            }
+
+            function renderCredList() {
+                const q = searchInput.value.trim().toLowerCase();
+                const filtered = state.credentials.filter(c => {
+                    if (!q) return true;
+                    return c.id.toLowerCase().includes(q)
+                        || (c.label || "").toLowerCase().includes(q)
+                        || (c.allowedOrigins || []).join(" ").toLowerCase().includes(q);
+                });
+
+                credListEl.innerHTML = "";
+                emptyCredsEl.classList.toggle("hidden", filtered.length > 0);
+
+                filtered.forEach(c => {
+                    const item = document.createElement("div");
+                    item.className = `cred-item${c.id === selectedId ? " selected" : ""}${c.enabled ? "" : " disabled"}`;
+
+                    const top = document.createElement("div");
+                    top.className = "cred-item-top";
+                    const nameEl = document.createElement("div");
+                    nameEl.className = "cred-item-name";
+                    nameEl.textContent = c.id;
+                    const pill = document.createElement("span");
+                    pill.className = `pill${c.enabled ? " on" : ""}`;
+                    pill.textContent = c.enabled ? "Enabled" : "Disabled";
+                    top.append(nameEl, pill);
+
+                    const labelEl = document.createElement("div");
+                    labelEl.className = "cred-item-label";
+                    labelEl.textContent = c.label || c.username || "";
+
+                    const chips = document.createElement("div");
+                    chips.className = "cred-chips";
+                    (c.allowedOrigins || []).slice(0, 2).forEach(o => {
+                        const ch = document.createElement("span");
+                        ch.className = "chip";
+                        ch.textContent = o;
+                        chips.appendChild(ch);
+                    });
+                    if (c.containerId) {
+                        const ch = document.createElement("span");
+                        ch.className = "chip";
+                        ch.textContent = `container:${c.containerId}`;
+                        chips.appendChild(ch);
+                    }
+                    if (c.hasTotp) {
+                        const ch = document.createElement("span");
+                        ch.className = "chip";
+                        ch.textContent = "2FA-TOTP";
+                        chips.appendChild(ch);
+                    }
+
+                    const actions = document.createElement("div");
+                    actions.className = "cred-item-actions";
+                    const toggleBtn = document.createElement("button");
+                    toggleBtn.type = "button";
+                    toggleBtn.className = "small";
+                    toggleBtn.textContent = c.enabled ? "Disable" : "Enable";
+                    toggleBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        ladybird.sendMessage("setCredentialEnabled", { id: c.id, enabled: !c.enabled });
+                    });
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "small danger";
+                    delBtn.textContent = "Delete";
+                    delBtn.addEventListener("click", e => {
+                        e.stopPropagation();
+                        if (selectedId === c.id) selectedId = null;
+                        ladybird.sendMessage("deleteCredential", c.id);
+                    });
+                    actions.append(toggleBtn, delBtn);
+
+                    item.append(top, labelEl, chips, actions);
+                    item.addEventListener("click", () => {
+                        selectedId = c.id;
+                        draft = clone(c);
+                        isDirty = false;
+                        renderCredList();
+                        renderEditor();
+                    });
+                    credListEl.appendChild(item);
+                });
+            }
+
+            function renderAudit() {
+                const tbody = document.getElementById("audit-body");
+                const empty = document.getElementById("empty-audit");
+                tbody.innerHTML = "";
+                const rows = state.audit || [];
+                empty.classList.toggle("hidden", rows.length > 0);
+                rows.forEach(r => {
+                    const tr = document.createElement("tr");
+                    const dt = r.timestampMs ? new Date(r.timestampMs).toLocaleTimeString() : "";
+                    const cells = [
+                        dt,
+                        r.action || "",
+                        r.credentialId || "",
+                        r.origin || "",
+                        r.field || "-",
+                        r.ok ? `OK (${r.detail || ""})` : `DENIED (${r.detail || ""})`
+                    ];
+                    cells.forEach((txt, idx) => {
+                        const td = document.createElement("td");
+                        if (idx === 1 || idx === 2 || idx === 3) td.className = "mono";
+                        td.textContent = txt;
+                        tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
+                });
+            }
+
+            function setTab(tab) {
+                activeTab = tab;
+                document.getElementById("tab-editor").classList.toggle("active", tab === "editor");
+                document.getElementById("tab-audit").classList.toggle("active", tab === "audit");
+                document.getElementById("view-editor").classList.toggle("hidden", tab !== "editor");
+                document.getElementById("view-audit").classList.toggle("hidden", tab !== "audit");
+            }
+
+            document.getElementById("tab-editor").addEventListener("click", () => setTab("editor"));
+            document.getElementById("tab-audit").addEventListener("click", () => setTab("audit"));
+            searchInput.addEventListener("input", renderCredList);
+
+            ["v-id", "v-label", "v-container", "v-enabled", "v-origins", "v-username", "v-password", "v-totp", "v-notes"].forEach(id => {
+                document.getElementById(id).addEventListener("input", () => { isDirty = true; });
+            });
+
+            document.getElementById("btn-open-skills").addEventListener("click", () => { window.location.href = "about:skills"; });
+            document.getElementById("btn-open-flows").addEventListener("click", () => { window.location.href = "about:flows"; });
+
+            document.getElementById("btn-new").addEventListener("click", () => {
+                selectedId = null;
+                draft = createBlankDraft();
+                draft.id = `cred-${Date.now().toString(36)}`;
+                if (siteContextUrl) {
+                    const o = originFromUrl(siteContextUrl);
+                    if (o) draft.allowedOrigins = [o];
+                }
+                isDirty = false;
+                renderCredList();
+                renderEditor();
+                setTab("editor");
+            });
+
+            document.getElementById("btn-new-for-site").addEventListener("click", () => {
+                if (siteContextUrl) {
+                    prepareNewForSite(siteContextUrl);
+                    setTab("editor");
+                }
+            });
+
+            document.getElementById("btn-add-tab-origin").addEventListener("click", () => {
+                const origin = document.getElementById("tab-origin-select").value;
+                if (!origin) return;
+                const current = document.getElementById("v-origins").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                if (!current.includes(origin)) {
+                    current.push(origin);
+                    document.getElementById("v-origins").value = current.join("\n");
+                    isDirty = true;
+                }
+            });
+
+            document.getElementById("btn-test-totp").addEventListener("click", () => {
+                ladybird.sendMessage("testTotp", {
+                    id: selectedId || "",
+                    totpSecret: document.getElementById("v-totp").value.trim()
+                });
+            });
+
+            document.getElementById("btn-save").addEventListener("click", () => {
+                const origins = document.getElementById("v-origins").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                const payload = {
+                    id: document.getElementById("v-id").value.trim(),
+                    label: document.getElementById("v-label").value.trim(),
+                    containerId: document.getElementById("v-container").value,
+                    enabled: document.getElementById("v-enabled").checked,
+                    allowedOrigins: origins,
+                    username: document.getElementById("v-username").value,
+                    password: document.getElementById("v-password").value,
+                    totpSecret: document.getElementById("v-totp").value.trim(),
+                    notes: document.getElementById("v-notes").value
+                };
+                selectedId = payload.id;
+                ladybird.sendMessage("saveCredential", payload);
+            });
+
+            document.getElementById("btn-revert").addEventListener("click", () => {
+                if (selectedId) {
+                    const existing = state.credentials.find(c => c.id === selectedId);
+                    if (existing) {
+                        draft = clone(existing);
+                        isDirty = false;
+                        renderEditor();
+                        return;
+                    }
+                }
+                draft = createBlankDraft();
+                isDirty = false;
+                renderEditor();
+            });
+
+            document.getElementById("btn-delete-current").addEventListener("click", () => {
+                if (!selectedId) return;
+                const del = selectedId;
+                selectedId = null;
+                ladybird.sendMessage("deleteCredential", del);
+            });
+
+            function applyInitialSelection() {
+                if (siteContextUrl && !initialSiteApplied && !isDirty) {
+                    initialSiteApplied = true;
+                    const origin = originFromUrl(siteContextUrl);
+                    const match = state.credentials.find(c => (c.allowedOrigins || []).includes(origin));
+                    if (match) {
+                        selectedId = match.id;
+                        draft = clone(match);
+                        renderEditor();
+                    } else {
+                        prepareNewForSite(siteContextUrl);
+                    }
+                    return;
+                }
+                if (!selectedId && !isDirty && state.credentials.length > 0 && !siteContextUrl) {
+                    selectedId = state.credentials[0].id;
+                    draft = clone(state.credentials[0]);
+                    renderEditor();
+                } else if (selectedId && !isDirty) {
+                    const cur = state.credentials.find(c => c.id === selectedId);
+                    if (cur) {
+                        draft = clone(cur);
+                        renderEditor();
+                    }
+                }
+            }
+
+            document.addEventListener("WebUIMessage", event => {
+                if (event.detail.name === "stateUpdated") {
+                    state = event.detail.data;
+                    applyInitialSelection();
+                    renderMetaAndPolicy();
+                    renderContainersAndTabs();
+                    renderSiteContextBanner();
+                    renderCredList();
+                    renderAudit();
+                } else if (event.detail.name === "actionResult") {
+                    const res = event.detail.data;
+                    showBanner(res.message || (res.ok ? "Done" : "Failed"), !res.ok);
+                    if (res.ok && res.credentialId) {
+                        selectedId = res.credentialId;
+                        isDirty = false;
+                        const found = state.credentials.find(c => c.id === res.credentialId);
+                        if (found) {
+                            draft = clone(found);
+                            renderEditor();
+                            renderCredList();
+                        }
+                    }
+                } else if (event.detail.name === "totpResult") {
+                    const res = event.detail.data;
+                    totpPreview.classList.remove("hidden");
+                    totpPreview.textContent = res.ok
+                        ? `Current 2FA Code: ${res.code} (valid ${res.secondsRemaining}s)`
+                        : `TOTP error: ${res.error}`;
+                }
+            });
+
+            window.addEventListener("hashchange", () => {
+                parseHashSiteContext();
+                initialSiteApplied = false;
+                applyInitialSelection();
+                renderSiteContextBanner();
+            });
+
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) ladybird.sendMessage("loadState");
+            });
+
+            parseHashSiteContext();
+            renderEditor();
+            document.addEventListener("WebUILoaded", () => {
+                parseHashSiteContext();
+                ladybird.sendMessage("loadState");
+            });
+        </script>
+    </body>
+</html>

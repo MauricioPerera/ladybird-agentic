@@ -29,6 +29,8 @@
 #include <LibWebView/Skills/SkillStore.h>
 #include <LibWebView/Skills/SkillTypes.h>
 #include <LibWebView/Utilities.h>
+#include <LibWebView/Vault/VaultStore.h>
+#include <LibWebView/Vault/VaultTypes.h>
 
 namespace {
 
@@ -61,11 +63,14 @@ public:
         : m_store(LexicalPath::join(storage_dir, "flows"sv).string())
         , m_ext_store(LexicalPath::join(storage_dir, "extensions"sv).string())
         , m_skill_store(LexicalPath::join(storage_dir, "skills"sv).string())
+        , m_vault_store(LexicalPath::join(storage_dir, "vault"sv).string(), "test-vault-passphrase"_string)
     {
     }
 
     WebView::FlowStore& store() { return m_store; }
     WebView::SkillStore& skill_store() { return m_skill_store; }
+    WebView::VaultStore& vault_store() { return m_vault_store; }
+    HashTable<u64>& tainted_tabs() { return m_tainted_tabs; }
     bool allow_skill_write { false };
     Vector<MCP::TabInfo> mock_tabs;
 
@@ -100,6 +105,13 @@ public:
                         .description = s.description,
                     });
                 }
+                for (auto const& c : m_vault_store.matching_credentials(*parsed, tab.container_id)) {
+                    tab.matching_credentials.append({
+                        .id = c.id,
+                        .label = c.label,
+                        .fields = WebView::vault_credential_available_fields(c),
+                    });
+                }
             }
             out.append(move(tab));
         }
@@ -123,7 +135,16 @@ public:
     virtual void go_back(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void go_forward(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void get_accessibility_tree(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
-    virtual void get_dom_tree(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
+    virtual void get_dom_tree(u64 tab_id, MCP::OnToolCallComplete cb) override
+    {
+        if (m_tainted_tabs.contains(tab_id)) {
+            cb(error_result("Blocked by credential vault quarantine"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("ok"sv, true);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
     virtual void get_page_source(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void find_elements(u64, String, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void click_element(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, MCP::OnToolCallComplete cb) override
@@ -257,8 +278,24 @@ public:
         out.set("requests"sv, move(reqs));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void evaluate_javascript(u64, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
-    virtual void take_screenshot(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
+    virtual void evaluate_javascript(u64 tab_id, String, MCP::OnToolCallComplete cb) override
+    {
+        if (m_tainted_tabs.contains(tab_id)) {
+            cb(error_result("Blocked by credential vault quarantine"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("value"sv, "ok"sv);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void take_screenshot(u64 tab_id, MCP::OnToolCallComplete cb) override
+    {
+        if (m_tainted_tabs.contains(tab_id)) {
+            cb(error_result("Blocked by credential vault quarantine"sv));
+            return;
+        }
+        cb(error_result("unsupported"sv));
+    }
 
     virtual void list_flows(MCP::OnToolCallComplete cb) override
     {
@@ -758,10 +795,111 @@ public:
         cb(ok_json_result(JsonValue { move(out) }));
     }
 
+    virtual void list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallComplete cb) override
+    {
+        Vector<WebView::VaultCredential> creds;
+        if (tab_id.has_value()) {
+            bool found = false;
+            for (auto const& t : mock_tabs) {
+                if (t.id == *tab_id) {
+                    auto parsed = URL::Parser::basic_parse(t.url);
+                    if (parsed.has_value())
+                        creds = m_vault_store.matching_credentials(*parsed, t.container_id);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                cb(error_result("Tab not found"sv));
+                return;
+            }
+        } else {
+            creds = m_vault_store.list_credentials(false);
+        }
+        JsonArray arr;
+        for (auto const& c : creds)
+            arr.must_append(WebView::serialize_vault_credential_metadata(c));
+        JsonObject out;
+        out.set("count"sv, static_cast<u64>(creds.size()));
+        out.set("credentials"sv, move(arr));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String>, Optional<String>, MCP::OnToolCallComplete cb) override
+    {
+        MCP::TabInfo const* target = nullptr;
+        for (auto const& t : mock_tabs) {
+            if (t.id == tab_id) {
+                target = &t;
+                break;
+            }
+        }
+        if (!target) {
+            cb(error_result("Tab not found"sv));
+            return;
+        }
+        auto parsed = URL::Parser::basic_parse(target->url);
+        if (!parsed.has_value()) {
+            cb(error_result("Invalid tab URL"sv));
+            return;
+        }
+        auto val = m_vault_store.resolve_field_value(credential_id, field, *parsed, target->container_id);
+        if (val.is_error()) {
+            cb(error_result(MUST(String::formatted("Vault refused: {}", val.error()))));
+            return;
+        }
+        bool quarantined = (field == "password"sv || field == "totp"sv);
+        if (quarantined)
+            m_tainted_tabs.set(tab_id);
+
+        JsonObject out;
+        out.set("filled"sv, true);
+        out.set("tab_id"sv, tab_id);
+        out.set("credential_id"sv, move(credential_id));
+        out.set("field"sv, move(field));
+        out.set("quarantined"sv, quarantined);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void login_with_credential_tool(u64 tab_id, String credential_id, Optional<String>, Optional<String>, Optional<String>, Optional<String>, Optional<String>, Optional<String>, Optional<String>, Optional<String>, bool, MCP::OnToolCallComplete cb) override
+    {
+        MCP::TabInfo const* target = nullptr;
+        for (auto const& t : mock_tabs) {
+            if (t.id == tab_id) {
+                target = &t;
+                break;
+            }
+        }
+        if (!target) {
+            cb(error_result("Tab not found"sv));
+            return;
+        }
+        auto parsed = URL::Parser::basic_parse(target->url);
+        if (!parsed.has_value()) {
+            cb(error_result("Invalid tab URL"sv));
+            return;
+        }
+        auto pw = m_vault_store.resolve_field_value(credential_id, "password"sv, *parsed, target->container_id);
+        if (pw.is_error()) {
+            cb(error_result(MUST(String::formatted("Vault refused: {}", pw.error()))));
+            return;
+        }
+        m_tainted_tabs.set(tab_id);
+        JsonObject out;
+        out.set("submitted"sv, true);
+        out.set("tab_id"sv, tab_id);
+        out.set("credential_id"sv, move(credential_id));
+        out.set("quarantined"sv, true);
+        out.set("navigated"sv, true);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
 private:
     WebView::FlowStore m_store;
     WebView::ExtensionStore m_ext_store;
     WebView::SkillStore m_skill_store;
+    WebView::VaultStore m_vault_store;
+    HashTable<u64> m_tainted_tabs;
     Vector<String> m_active_runs;
     u64 m_run_counter { 0 };
 };
@@ -985,7 +1123,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 47u);
+    EXPECT_EQ(tools->size(), 50u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -1845,4 +1983,244 @@ TEST_CASE(mcp_skills_tools_and_write_gate)
         EXPECT(!del_res.get_bool("isError"sv).value_or(true));
         EXPECT(!delegate.skill_store().get_skill("agent-created-skill"sv).has_value());
     }
+}
+
+TEST_CASE(mcp_vault_crypto_totp_and_origin_pinning)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    // 1. AES-256-GCM encrypt/decrypt + tamper detection
+    auto salt = ByteBuffer::copy("0123456789abcdef"sv.bytes()).release_value();
+    auto key = MUST(WebView::vault_derive_key_pbkdf2("correct horse battery staple"sv, salt.bytes(), 1000));
+    auto aad = "ladybird-vault-v1"sv.bytes();
+    auto secret_msg = "{\"password\":\"SuperSecret#2026!\"}"sv;
+    auto blob = MUST(WebView::vault_encrypt_aes_256_gcm(key.bytes(), secret_msg.bytes(), aad));
+    auto plain = MUST(WebView::vault_decrypt_aes_256_gcm(key.bytes(), blob.nonce.bytes(), blob.ciphertext.bytes(), blob.tag.bytes(), aad));
+    EXPECT_EQ(StringView { plain.bytes() }, secret_msg);
+
+    auto bad_tag = blob.tag;
+    bad_tag[0] ^= 0xff;
+    EXPECT(WebView::vault_decrypt_aes_256_gcm(key.bytes(), blob.nonce.bytes(), blob.ciphertext.bytes(), bad_tag.bytes(), aad).is_error());
+
+    // 2. RFC 6238 SHA-1 TOTP test vector ("12345678901234567890" -> "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", t=59 -> "287082")
+    EXPECT_EQ(MUST(WebView::generate_totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"sv, 59)), "287082"sv);
+
+    // 3. Origin pinning validation
+    EXPECT(WebView::normalize_vault_origin("https://github.com/login"sv).value() == "https://github.com"sv);
+    EXPECT(WebView::normalize_vault_origin("http://localhost:3000/auth"sv).value() == "http://localhost:3000"sv);
+    EXPECT(WebView::normalize_vault_origin("http://example.com"sv).is_error());
+    EXPECT(WebView::normalize_vault_origin("https://*.github.com"sv).is_error());
+
+    // 4. Encrypted VaultStore save + reload + zero-plaintext on disk + audit log
+    auto vault_dir = LexicalPath::join(temp_dir, "vault"sv).string();
+    {
+        WebView::VaultStore store(vault_dir, "my-master-passphrase"_string);
+        EXPECT(store.is_unlocked());
+
+        WebView::VaultCredential cred;
+        cred.id = "github-agent"_string;
+        cred.label = "GitHub Agent"_string;
+        cred.allowed_origins.append("https://github.com"_string);
+        cred.container_id = "agent"_string;
+        cred.username = "agent-bot"_string;
+        cred.password = "TopSecretPass!99"_string;
+        cred.totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"_string;
+        MUST(store.save_credential(cred));
+    }
+
+    auto enc_path = LexicalPath::join(vault_dir, "vault.enc.json"sv).string();
+    auto enc_file = MUST(Core::File::open(enc_path, Core::File::OpenMode::Read));
+    auto enc_raw = MUST(enc_file->read_until_eof());
+    StringView enc_view { enc_raw.bytes() };
+    EXPECT(!enc_view.contains("TopSecretPass!99"sv));
+    EXPECT(!enc_view.contains("GEZDGNBVGY3TQOJQ"sv));
+    EXPECT(!enc_view.contains("agent-bot"sv));
+
+    // Wrong passphrase fails to unlock
+    {
+        WebView::VaultStore wrong_store(vault_dir, "wrong-passphrase"_string);
+        EXPECT(!wrong_store.is_unlocked());
+    }
+
+    // Correct passphrase unlocks and enforces exact origin + container pinning
+    WebView::VaultStore reloaded(vault_dir, "my-master-passphrase"_string);
+    EXPECT(reloaded.is_unlocked());
+    auto good_url = URL::Parser::basic_parse("https://github.com/login"sv).value();
+    auto wrong_url = URL::Parser::basic_parse("https://evil-github.com/login"sv).value();
+
+    EXPECT(reloaded.resolve_field_value("github-agent"sv, "password"sv, wrong_url, "agent"sv).is_error());
+    EXPECT(reloaded.resolve_field_value("github-agent"sv, "password"sv, good_url, "personal"sv).is_error());
+    EXPECT_EQ(MUST(reloaded.resolve_field_value("github-agent"sv, "password"sv, good_url, "agent"sv)), "TopSecretPass!99"sv);
+
+    auto totp_now = MUST(reloaded.resolve_field_value("github-agent"sv, "totp"sv, good_url, "agent"sv));
+    EXPECT_EQ(totp_now.bytes().size(), 6uz);
+
+    // 5. Secret scrubbing (plain, URL-encoded, base64)
+    Array<String, 1> secrets { "TopSecretPass!99"_string };
+    auto scrubbed = WebView::scrub_secrets_from_string("leak=TopSecretPass%2199&raw=TopSecretPass!99"sv, secrets);
+    EXPECT(!scrubbed.contains("TopSecretPass"sv));
+    EXPECT(scrubbed.contains("[REDACTED_VAULT_SECRET]"sv));
+
+    // 6. Audit file never contains secrets
+    auto audit_path = LexicalPath::join(vault_dir, "audit.jsonl"sv).string();
+    auto audit_file = MUST(Core::File::open(audit_path, Core::File::OpenMode::Read));
+    auto audit_raw = MUST(audit_file->read_until_eof());
+    StringView audit_view { audit_raw.bytes() };
+    EXPECT(audit_view.contains("github-agent"sv));
+    EXPECT(!audit_view.contains("TopSecretPass!99"sv));
+    EXPECT(!audit_view.contains("GEZDGNBVGY3TQOJQ"sv));
+}
+
+TEST_CASE(mcp_vault_blind_fill_and_quarantine)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    WebView::VaultCredential cred;
+    cred.id = "yt-studio"_string;
+    cred.label = "YouTube Studio"_string;
+    cred.allowed_origins.append("https://accounts.google.com"_string);
+    cred.container_id = "agent"_string;
+    cred.username = "creator@example.com"_string;
+    cred.password = "NeverLeakMe!123"_string;
+    cred.totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"_string;
+    MUST(delegate.vault_store().save_credential(cred));
+
+    delegate.mock_tabs.append({
+        .id = 20,
+        .title = "Google Sign In"_string,
+        .url = "https://accounts.google.com/v3/signin"_string,
+        .container_id = "agent"_string,
+        .is_active = true,
+    });
+    delegate.mock_tabs.append({
+        .id = 21,
+        .title = "Personal Tab"_string,
+        .url = "https://accounts.google.com/v3/signin"_string,
+        .container_id = "personal"_string,
+        .is_active = false,
+    });
+
+    auto token = "vault-mcp-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = server->local_port().value();
+
+    // 1. list_tabs shows matching_credentials ONLY on tab 20 (matching origin + container)
+    {
+        auto tabs_res = call_mcp_tool(port, token, 1, "list_tabs"sv, JsonObject {});
+        auto payload = parse_tool_json_payload(tabs_res);
+        auto tabs = payload.get_array("tabs"sv);
+        EXPECT_EQ(tabs->size(), 2uz);
+        auto t20 = tabs->at(0).as_object();
+        auto t21 = tabs->at(1).as_object();
+        EXPECT_EQ(t20.get_array("matching_credentials"sv)->size(), 1uz);
+        EXPECT(!t21.has("matching_credentials"sv));
+    }
+
+    // 2. list_credentials returns metadata only — zero secrets
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 20);
+        auto res = call_mcp_tool(port, token, 2, "list_credentials"sv, move(args));
+        auto raw_text = res.get_array("content"sv)->at(0).as_object().get_string("text"sv).value_or(String {});
+        EXPECT(!raw_text.contains("NeverLeakMe!123"sv));
+        EXPECT(!raw_text.contains("GEZDGNBVGY3TQOJQ"sv));
+        EXPECT(!raw_text.contains("creator@example.com"sv));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+    }
+
+    // 3. fill_credential fails on wrong container tab 21, succeeds blindly on tab 20 and quarantines it
+    {
+        JsonObject bad_args;
+        bad_args.set("tab_id"sv, 21);
+        bad_args.set("credential_id"sv, "yt-studio"sv);
+        bad_args.set("field"sv, "password"sv);
+        auto blocked = call_mcp_tool(port, token, 3, "fill_credential"sv, move(bad_args));
+        EXPECT(blocked.get_bool("isError"sv).value_or(false));
+
+        JsonObject ok_args;
+        ok_args.set("tab_id"sv, 20);
+        ok_args.set("credential_id"sv, "yt-studio"sv);
+        ok_args.set("field"sv, "password"sv);
+        auto filled = call_mcp_tool(port, token, 4, "fill_credential"sv, move(ok_args));
+        EXPECT(!filled.get_bool("isError"sv).value_or(true));
+        auto raw_text = filled.get_array("content"sv)->at(0).as_object().get_string("text"sv).value_or(String {});
+        EXPECT(!raw_text.contains("NeverLeakMe!123"sv));
+        auto payload = parse_tool_json_payload(filled);
+        EXPECT(payload.get_bool("filled"sv).value_or(false));
+        EXPECT(payload.get_bool("quarantined"sv).value_or(false));
+    }
+
+    // 4. While quarantined, eval_js / get_dom_tree / take_screenshot are blocked
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 20);
+        args.set("script"sv, "return document.querySelector('input').value;"sv);
+        auto eval_blocked = call_mcp_tool(port, token, 5, "eval_js"sv, args);
+        EXPECT(eval_blocked.get_bool("isError"sv).value_or(false));
+
+        JsonObject dom_args;
+        dom_args.set("tab_id"sv, 20);
+        auto dom_blocked = call_mcp_tool(port, token, 6, "get_dom_tree"sv, dom_args);
+        EXPECT(dom_blocked.get_bool("isError"sv).value_or(false));
+
+        auto ss_blocked = call_mcp_tool(port, token, 7, "take_screenshot"sv, dom_args);
+        EXPECT(ss_blocked.get_bool("isError"sv).value_or(false));
+
+        // Clearing taint (simulating navigation commit) restores eval_js
+        delegate.tainted_tabs().remove(20);
+        auto eval_ok = call_mcp_tool(port, token, 8, "eval_js"sv, move(args));
+        EXPECT(!eval_ok.get_bool("isError"sv).value_or(true));
+    }
+
+    // 5. login_with_credential succeeds atomically and leaks zero secrets
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 20);
+        args.set("credential_id"sv, "yt-studio"sv);
+        auto res = call_mcp_tool(port, token, 9, "login_with_credential"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto raw_text = res.get_array("content"sv)->at(0).as_object().get_string("text"sv).value_or(String {});
+        EXPECT(!raw_text.contains("NeverLeakMe!123"sv));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("submitted"sv).value_or(false));
+        EXPECT(payload.get_bool("quarantined"sv).value_or(false));
+    }
+}
+
+TEST_CASE(mcp_security_policy_guards)
+{
+    WebView::MCPSecurityPolicy policy;
+    policy.allowed_containers.append("agent"_string);
+    policy.allowed_domains.append("*.youtube.com"_string);
+    policy.allowed_domains.append("github.com"_string);
+    policy.blocked_domains.append("accounts.google.com"_string);
+    policy.blocked_domains.append("bank.com"_string);
+
+    auto yt_watch = URL::Parser::basic_parse("https://www.youtube.com/watch?v=1"sv).value();
+    auto yt_studio = URL::Parser::basic_parse("https://studio.youtube.com/"sv).value();
+    auto evil = URL::Parser::basic_parse("https://evil.com/"sv).value();
+    auto bank = URL::Parser::basic_parse("https://bank.com/"sv).value();
+    auto g_acct = URL::Parser::basic_parse("https://accounts.google.com/"sv).value();
+
+    EXPECT(!WebView::mcp_validate_url_against_policy(yt_watch, policy).is_error());
+    EXPECT(!WebView::mcp_validate_url_against_policy(yt_studio, policy).is_error());
+    EXPECT(!WebView::mcp_validate_url_against_policy(URL::about_blank(), policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(evil, policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(bank, policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(g_acct, policy).is_error());
+
+    EXPECT_EQ(MUST(WebView::mcp_resolve_container_against_policy(OptionalNone {}, policy)), "agent"sv);
+    EXPECT_EQ(MUST(WebView::mcp_resolve_container_against_policy("agent"_string, policy)), "agent"sv);
+    EXPECT(WebView::mcp_resolve_container_against_policy("personal"_string, policy).is_error());
+    EXPECT(WebView::mcp_container_is_allowed_by_policy("agent"sv, policy));
+    EXPECT(!WebView::mcp_container_is_allowed_by_policy(""sv, policy));
 }

@@ -428,8 +428,16 @@ public:
     ExtensionStore& extension_store();
     ExtensionManager& extension_manager();
     SkillStore& skill_store();
+    VaultStore& vault_store();
+    MCPSecurityPolicy mcp_security_policy() const;
     Vector<MCP::SkillMatchHint> matching_skill_hints_for_url(URL::URL const&) const;
     JsonArray matching_skills_json_for_url(URL::URL const&) const;
+    Vector<MCP::CredentialMatchHint> matching_credential_hints_for_view(URL::URL const&, StringView container_id) const;
+    JsonArray matching_credentials_json_for_view(URL::URL const&, StringView container_id) const;
+    bool is_view_mcp_secret_tainted(u64 view_id) const;
+    void mark_view_mcp_secret_tainted(u64 view_id, StringView secret_to_scrub = {});
+    void clear_view_mcp_secret_taint(u64 view_id);
+    MCP::ToolCallResult scrub_mcp_tool_result(MCP::ToolCallResult) const;
     void did_start_load_for_extensions(ViewImplementation&, URL::URL const&);
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
@@ -721,6 +729,9 @@ private:
     virtual void read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, MCP::OnToolCallComplete) override;
     virtual void save_skill_tool(JsonValue skill_json, MCP::OnToolCallComplete) override;
     virtual void delete_skill_tool(String name, MCP::OnToolCallComplete) override;
+    virtual void list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallComplete) override;
+    virtual void fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
+    virtual void login_with_credential_tool(u64 tab_id, String credential_id, Optional<String> username_ref, Optional<String> username_selector, Optional<String> password_ref, Optional<String> password_selector, Optional<String> totp_ref, Optional<String> totp_selector, Optional<String> submit_ref, Optional<String> submit_selector, bool wait_for_navigation, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
@@ -878,6 +889,9 @@ private:
     OwnPtr<ExtensionStore> m_extension_store;
     OwnPtr<ExtensionManager> m_extension_manager;
     OwnPtr<SkillStore> m_skill_store;
+    OwnPtr<VaultStore> m_vault_store;
+    HashTable<u64> m_mcp_secret_tainted_views;
+    Vector<String> m_mcp_active_secrets;
     u64 m_next_mcp_command_id { 0x8000'0000'0000'0001ULL };
     u64 m_next_mcp_wait_id { 1 };
 

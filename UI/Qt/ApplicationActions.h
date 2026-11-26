@@ -58,6 +58,7 @@ public:
     Action& open_extensions_page_action() { return *m_open_extensions_page_action; }
     Action& open_flows_page_action() { return *m_open_flows_page_action; }
     Action& open_skills_page_action() { return *m_open_skills_page_action; }
+    Action& open_vault_page_action() { return *m_open_vault_page_action; }
     Action& zoom_in_action() { return *m_zoom_in_action; }
     Action& zoom_out_action() { return *m_zoom_out_action; }
     Action& reset_zoom_action() { return *m_reset_zoom_action; }
@@ -112,6 +113,7 @@ private:
     RefPtr<Action> m_open_extensions_page_action;
     RefPtr<Action> m_open_flows_page_action;
     RefPtr<Action> m_open_skills_page_action;
+    RefPtr<Action> m_open_vault_page_action;
     RefPtr<Action> m_report_website_issue_action;
     RefPtr<Action> m_show_tab_performance_monitor_action;
     RefPtr<Action> m_show_line_box_borders_action;

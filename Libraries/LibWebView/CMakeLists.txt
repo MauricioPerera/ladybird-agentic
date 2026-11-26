@@ -96,6 +96,8 @@ set(SOURCES
     UpdateCheck.cpp
     UserAgent.cpp
     Utilities.cpp
+    Vault/VaultStore.cpp
+    Vault/VaultTypes.cpp
     VideoDecoderServerControlClient.cpp
     ViewImplementation.cpp
     WebCompatReport.cpp
@@ -115,6 +117,7 @@ set(SOURCES
     WebUI/SkillsUI.cpp
     WebUI/SupportUI.cpp
     WebUI/SettingsUI.cpp
+    WebUI/VaultUI.cpp
     WebWorkerClient.cpp
     WorkerAgentManager.cpp
 )
@@ -197,6 +200,10 @@ endif()
 
 target_link_libraries(LibWebView PUBLIC LibCompositing LibPlatformFeatures LibSandbox LibWebCommon)
 target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibMCP LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading)
+
+if (WIN32)
+    target_link_libraries(LibWebView PRIVATE crypt32)
+endif()
 
 if (LINUX)
     # The connect broker asks the audio library where the daemon is before connecting a helper to it.

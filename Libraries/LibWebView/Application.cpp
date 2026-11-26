@@ -84,6 +84,8 @@
 #include <LibWebView/Skills/SkillStore.h>
 #include <LibWebView/Skills/SkillTypes.h>
 #include <LibWebView/SpellChecker.h>
+#include <LibWebView/Vault/VaultStore.h>
+#include <LibWebView/Vault/VaultTypes.h>
 #include <LibWebView/StorageAreaRegistry.h>
 #include <LibWebView/SystemProbeClient.h>
 #include <LibWebView/TabDiscarder.h>
@@ -244,6 +246,9 @@ Application::~Application()
     m_extension_manager.clear();
     m_extension_store.clear();
     m_skill_store.clear();
+    m_vault_store.clear();
+    m_mcp_secret_tainted_views.clear();
+    m_mcp_active_secrets.clear();
     m_flow_runner.clear();
     m_flow_store.clear();
     m_mcp.clear();
@@ -368,6 +373,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     Optional<StringView> mcp_upload_dir;
     bool mcp_allow_extension_install = false;
     bool mcp_allow_skill_write = false;
+    Optional<StringView> mcp_vault_passphrase;
+    Optional<StringView> mcp_allowed_containers_arg;
+    Optional<StringView> mcp_allowed_domains_arg;
+    Optional<StringView> mcp_blocked_domains_arg;
+    bool mcp_disable_eval_js = false;
+    Optional<size_t> mcp_max_tabs;
     Vector<StringView> debug_processes;
     Optional<StringView> profile_process;
     Optional<StringView> profile_tool;
@@ -582,6 +593,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_upload_dir, "Restrict MCP upload_file tool to files inside this directory", "mcp-upload-dir", 0, "directory");
     args_parser.add_option(mcp_allow_extension_install, "Allow installing unpacked extensions via the MCP server", "mcp-allow-extension-install", 0);
     args_parser.add_option(mcp_allow_skill_write, "Allow creating, editing, or deleting Agent Skills via the MCP server", "mcp-allow-skill-write", 0);
+    args_parser.add_option(mcp_vault_passphrase, "Passphrase for decrypting/encrypting the blind Credential Vault (alternative to OS keychain / LADYBIRD_VAULT_PASSPHRASE)", "mcp-vault-passphrase", 0, "passphrase");
+    args_parser.add_option(mcp_allowed_containers_arg, "Comma-separated list of tab container IDs that MCP may open or access", "mcp-allowed-containers", 0, "containers");
+    args_parser.add_option(mcp_allowed_domains_arg, "Comma-separated domain allowlist for MCP navigation (supports *.domain.com)", "mcp-allowed-domains", 0, "domains");
+    args_parser.add_option(mcp_blocked_domains_arg, "Comma-separated domain denylist for MCP navigation (supports *.domain.com)", "mcp-blocked-domains", 0, "domains");
+    args_parser.add_option(mcp_disable_eval_js, "Disable the eval_js MCP tool for hardened autonomous agent operation", "mcp-disable-eval-js", 0);
+    args_parser.add_option(mcp_max_tabs, "Maximum concurrent MCP-accessible tabs allowed (default: 16)", "mcp-max-tabs", 0, "count");
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -650,6 +667,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .mcp_upload_root = mcp_upload_dir.has_value() ? Optional<ByteString> { ByteString { *mcp_upload_dir } } : OptionalNone {},
         .mcp_allow_extension_install = mcp_allow_extension_install,
         .mcp_allow_skill_write = mcp_allow_skill_write,
+        .mcp_vault_passphrase = mcp_vault_passphrase.has_value() ? Optional<String> { TRY(String::from_utf8(*mcp_vault_passphrase)) } : OptionalNone {},
+        .mcp_allowed_containers = {},
+        .mcp_allowed_domains = {},
+        .mcp_blocked_domains = {},
+        .mcp_disable_eval_js = mcp_disable_eval_js,
+        .mcp_max_tabs = mcp_max_tabs.value_or(16),
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
         .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
         .force_video_decoder_server = force_video_decoder_server ? ForceVideoDecoderServer::Yes : ForceVideoDecoderServer::No,
@@ -664,6 +687,23 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         m_browser_options.screenshot_delay = *screenshot_delay;
     if (screenshot_path.has_value())
         m_browser_options.screenshot_path = *screenshot_path;
+
+    auto parse_csv_list = [](Optional<StringView> raw, Vector<String>& dest, bool validate_containers = false) {
+        if (!raw.has_value() || raw->is_empty())
+            return;
+        for (auto item : raw->split_view(',', SplitBehavior::Nothing)) {
+            auto trimmed = item.trim(" \t\r\n"sv);
+            if (trimmed.is_empty())
+                continue;
+            if (validate_containers && !is_valid_container_id(trimmed))
+                continue;
+            dest.append(MUST(String::from_utf8(trimmed)));
+        }
+    };
+    parse_csv_list(mcp_allowed_containers_arg, m_browser_options.mcp_allowed_containers, true);
+    parse_csv_list(mcp_allowed_domains_arg, m_browser_options.mcp_allowed_domains);
+    parse_csv_list(mcp_blocked_domains_arg, m_browser_options.mcp_blocked_domains);
+    m_browser_options.mcp_max_tabs = max<size_t>(1, m_browser_options.mcp_max_tabs);
     if (window_width.has_value())
         m_browser_options.window_width = *window_width;
     if (window_height.has_value())
@@ -4615,6 +4655,8 @@ static Optional<ViewImplementation&> find_allowed_mcp_view(u64 tab_id)
     auto view = ViewImplementation::find_view_by_id(tab_id);
     if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes || !view->is_mcp_access_allowed())
         return {};
+    if (!mcp_container_is_allowed_by_policy(view->container_id(), Application::the().mcp_security_policy()))
+        return {};
     return view;
 }
 
@@ -4665,6 +4707,7 @@ ErrorOr<void> Application::launch_mcp_server()
 {
     VERIFY(!m_mcp);
     (void)skill_store();
+    (void)vault_store();
 
     String token;
     if (m_browser_options.mcp_token.has_value() && !m_browser_options.mcp_token->is_empty()) {
@@ -4695,6 +4738,8 @@ ErrorOr<void> Application::toggle_mcp_enabled()
         fail_all_mcp_requests("MCP server disabled"sv);
         m_mcp.clear();
         m_mcp_token.clear();
+        m_mcp_secret_tainted_views.clear();
+        m_mcp_active_secrets.clear();
         on_mcp_disabled();
     } else {
         TRY(launch_mcp_server());
@@ -4705,6 +4750,7 @@ ErrorOr<void> Application::toggle_mcp_enabled()
 void Application::did_revoke_mcp_access_for_view(u64 view_id)
 {
     fail_mcp_requests_for_view(view_id, mcp_denied_message);
+    clear_view_mcp_secret_taint(view_id);
     m_mcp_console_logs.remove(view_id);
     m_mcp_network_requests.remove(view_id);
 }
@@ -4714,6 +4760,7 @@ void Application::did_close_mcp_view(u64 view_id)
     if (m_flow_runner)
         m_flow_runner->did_close_view(view_id);
     fail_mcp_requests_for_view(view_id, "Tab closed"sv);
+    clear_view_mcp_secret_taint(view_id);
     m_mcp_content_queues.remove(view_id);
     m_mcp_console_logs.remove(view_id);
     m_mcp_network_requests.remove(view_id);
@@ -4912,6 +4959,8 @@ void Application::wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete o
             result.set("is_loading"sv, allowed_view->is_loading());
             if (auto hints = matching_skills_json_for_url(allowed_view->url()); !hints.is_empty())
                 result.set("matching_skills"sv, move(hints));
+            if (auto cred_hints = matching_credentials_json_for_view(allowed_view->url(), allowed_view->container_id()); !cred_hints.is_empty())
+                result.set("matching_credentials"sv, move(cred_hints));
             finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { move(result) }));
         });
     };
@@ -5023,10 +5072,88 @@ JsonArray Application::matching_skills_json_for_url(URL::URL const& url) const
     return array;
 }
 
+VaultStore& Application::vault_store()
+{
+    if (!m_vault_store) {
+        auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
+        auto vault_dir = LexicalPath::join(base_dir, "vault"sv).string();
+        m_vault_store = make<VaultStore>(move(vault_dir), m_browser_options.mcp_vault_passphrase);
+    }
+    return *m_vault_store;
+}
+
+MCPSecurityPolicy Application::mcp_security_policy() const
+{
+    return {
+        .allowed_containers = m_browser_options.mcp_allowed_containers,
+        .allowed_domains = m_browser_options.mcp_allowed_domains,
+        .blocked_domains = m_browser_options.mcp_blocked_domains,
+        .disable_eval_js = m_browser_options.mcp_disable_eval_js,
+        .max_tabs = m_browser_options.mcp_max_tabs,
+    };
+}
+
+Vector<MCP::CredentialMatchHint> Application::matching_credential_hints_for_view(URL::URL const& url, StringView container_id) const
+{
+    if (!m_vault_store)
+        return {};
+    Vector<MCP::CredentialMatchHint> hints;
+    for (auto const& cred : m_vault_store->matching_credentials(url, container_id)) {
+        hints.append({
+            .id = cred.id,
+            .label = cred.label,
+            .fields = vault_credential_available_fields(cred),
+        });
+    }
+    return hints;
+}
+
+JsonArray Application::matching_credentials_json_for_view(URL::URL const& url, StringView container_id) const
+{
+    if (!m_vault_store)
+        return {};
+    JsonArray array;
+    for (auto const& cred : m_vault_store->matching_credentials(url, container_id))
+        array.must_append(serialize_vault_credential_hint(cred));
+    return array;
+}
+
+bool Application::is_view_mcp_secret_tainted(u64 view_id) const
+{
+    return m_mcp_secret_tainted_views.contains(view_id);
+}
+
+void Application::mark_view_mcp_secret_tainted(u64 view_id, StringView secret_to_scrub)
+{
+    m_mcp_secret_tainted_views.set(view_id);
+    if (!secret_to_scrub.is_empty()) {
+        auto secret_str = String::from_utf8_without_validation(secret_to_scrub.bytes());
+        if (!m_mcp_active_secrets.contains_slow(secret_str)) {
+            if (m_mcp_active_secrets.size() >= 64)
+                m_mcp_active_secrets.take_first();
+            m_mcp_active_secrets.append(move(secret_str));
+        }
+    }
+}
+
+void Application::clear_view_mcp_secret_taint(u64 view_id)
+{
+    m_mcp_secret_tainted_views.remove(view_id);
+}
+
+MCP::ToolCallResult Application::scrub_mcp_tool_result(MCP::ToolCallResult result) const
+{
+    if (m_mcp_active_secrets.is_empty() || result.text.is_empty())
+        return result;
+    result.text = scrub_secrets_from_string(result.text, m_mcp_active_secrets.span());
+    return result;
+}
+
 void Application::did_start_load_for_extensions(ViewImplementation& view, URL::URL const& url)
 {
     if (view.owner_view_id().has_value())
         return;
+    clear_view_mcp_secret_taint(view.view_id());
     if (url.scheme() != "http"sv && url.scheme() != "https"sv)
         return;
     inject_webmcp_shim_if_needed(view, url);
@@ -5048,8 +5175,12 @@ Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool
     auto view = ViewImplementation::find_view_by_id(tab_id);
     if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes)
         return {};
-    if (require_mcp_permission && !view->is_mcp_access_allowed())
-        return {};
+    if (require_mcp_permission) {
+        if (!view->is_mcp_access_allowed())
+            return {};
+        if (!mcp_container_is_allowed_by_policy(view->container_id(), mcp_security_policy()))
+            return {};
+    }
     return view;
 }
 
@@ -5146,12 +5277,14 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 {
     auto active_view = active_web_view();
     Optional<u64> active_id = active_view.has_value() ? Optional<u64> { active_view->view_id() } : OptionalNone {};
+    auto policy = mcp_security_policy();
 
     Vector<MCP::TabInfo> tabs;
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed()) {
+        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed() && mcp_container_is_allowed_by_policy(view.container_id(), policy)) {
             auto info = view_to_mcp_tab_info(view, active_id);
             info.matching_skills = matching_skill_hints_for_url(view.url());
+            info.matching_credentials = matching_credential_hints_for_view(view.url(), view.container_id());
             tabs.append(move(info));
         }
         return IterationDecision::Continue;
@@ -5164,18 +5297,31 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     auto active_view = active_web_view();
     if (!active_view.has_value() || active_view->owner_view_id().has_value() || active_view->is_private() == IsPrivate::Yes || !active_view->is_mcp_access_allowed())
         return {};
+    if (!mcp_container_is_allowed_by_policy(active_view->container_id(), mcp_security_policy()))
+        return {};
     auto info = view_to_mcp_tab_info(*active_view, active_view->view_id());
     info.matching_skills = matching_skill_hints_for_url(active_view->url());
+    info.matching_credentials = matching_credential_hints_for_view(active_view->url(), active_view->container_id());
     return info;
 }
 
 void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete on_complete)
 {
+    auto policy = mcp_security_policy();
+    if (list_allowed_tabs().size() >= policy.max_tabs) {
+        on_complete(mcp_error_result("Maximum concurrent MCP tabs limit reached (--mcp-max-tabs)"sv));
+        return;
+    }
+
     Optional<URL::URL> parsed_url;
     if (url.has_value() && !url->is_empty()) {
         auto maybe_url = validate_mcp_url(*url);
         if (maybe_url.is_error()) {
             on_complete(mcp_error_result(maybe_url.error().string_literal()));
+            return;
+        }
+        if (auto policy_check = mcp_validate_url_against_policy(maybe_url.value(), policy); policy_check.is_error()) {
+            on_complete(mcp_error_result(policy_check.error().string_literal()));
             return;
         }
         parsed_url = maybe_url.release_value();
@@ -5186,7 +5332,13 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         return;
     }
 
-    auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, container_id.value_or(String {}));
+    auto resolved_container = mcp_resolve_container_against_policy(container_id, policy);
+    if (resolved_container.is_error()) {
+        on_complete(mcp_error_result(resolved_container.error().string_literal()));
+        return;
+    }
+
+    auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, resolved_container.release_value());
     if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
         on_complete(mcp_error_result("UI unavailable to open non-private tab"sv));
         return;
@@ -5220,6 +5372,8 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
     result.set("is_loading"sv, true);
     if (auto hints = matching_skills_json_for_url(*parsed_url); !hints.is_empty())
         result.set("matching_skills"sv, move(hints));
+    if (auto cred_hints = matching_credentials_json_for_view(*parsed_url, view->container_id()); !cred_hints.is_empty())
+        result.set("matching_credentials"sv, move(cred_hints));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
@@ -5270,6 +5424,10 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
         return;
     }
     auto parsed_url = maybe_url.release_value();
+    if (auto policy_check = mcp_validate_url_against_policy(parsed_url, mcp_security_policy()); policy_check.is_error()) {
+        on_complete(mcp_error_result(policy_check.error().string_literal()));
+        return;
+    }
 
     if (wait_for_load && parsed_url != URL::about_blank()) {
         wait_for_mcp_navigation(tab_id, move(on_complete));
@@ -5283,6 +5441,8 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
     result.set("url"sv, parsed_url.to_string());
     if (auto hints = matching_skills_json_for_url(parsed_url); !hints.is_empty())
         result.set("matching_skills"sv, move(hints));
+    if (auto cred_hints = matching_credentials_json_for_view(parsed_url, view->container_id()); !cred_hints.is_empty())
+        result.set("matching_credentials"sv, move(cred_hints));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
@@ -5364,6 +5524,8 @@ void Application::get_accessibility_tree(u64 tab_id, MCP::OnToolCallComplete on_
     view->inspect_accessibility_tree();
 }
 
+static constexpr auto mcp_vault_quarantine_message = "Blocked by credential vault quarantine: read/eval tools are disabled on this tab until navigation commits to a new document."sv;
+
 void Application::get_dom_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
     auto view = find_allowed_mcp_view(tab_id);
@@ -5371,12 +5533,18 @@ void Application::get_dom_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
         on_complete(mcp_error_result(mcp_denied_message));
         return;
     }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
 
     auto wait_id = m_next_mcp_wait_id++;
     auto wait = make<PendingMCPTreeWait>();
     wait->view_id = tab_id;
     wait->is_accessibility = false;
-    wait->on_complete = move(on_complete);
+    wait->on_complete = [this, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+        on_complete(scrub_mcp_tool_result(move(res)));
+    };
     wait->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(10), [this, wait_id] {
         finish_mcp_tree_wait(wait_id, mcp_error_result("Timed out waiting for DOM tree"sv));
     });
@@ -5393,16 +5561,20 @@ void Application::get_dom_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
 
 void Application::get_page_source(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
-    enqueue_mcp_webdriver_command(tab_id, "get_source"_string, JsonValue {}, {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
+    enqueue_mcp_webdriver_command(tab_id, "get_source"_string, JsonValue {}, {}, [this, on_complete = move(on_complete)](Web::WebDriver::Response response) {
         if (response.is_error()) {
             on_complete(format_mcp_webdriver_error(response.error()));
             return;
         }
         auto const& value = response.value();
-        on_complete({
+        on_complete(scrub_mcp_tool_result({
             .is_error = false,
             .text = value.is_string() ? value.as_string() : value.serialized(),
-        });
+        }));
     });
 }
 
@@ -6289,25 +6461,32 @@ return out;
 )JS"_string;
 
     auto wrapped_complete = [this, tab_id, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
-        if (!res.is_error && m_skill_store) {
+        if (!res.is_error) {
             if (auto parsed = JsonValue::from_string(res.text); !parsed.is_error() && parsed.value().is_object()) {
                 auto obj = parsed.release_value().as_object();
                 Optional<URL::URL> url;
                 if (auto url_str = obj.get_string("url"sv); url_str.has_value())
                     url = URL::Parser::basic_parse(*url_str);
-                if (!url.has_value()) {
-                    if (auto view = find_allowed_mcp_view(tab_id); view.has_value())
-                        url = view->url();
-                }
+                auto view = find_allowed_mcp_view(tab_id);
+                if (!url.has_value() && view.has_value())
+                    url = view->url();
+                bool modified = false;
                 if (url.has_value()) {
                     if (auto hints = matching_skills_json_for_url(*url); !hints.is_empty()) {
                         obj.set("matching_skills"sv, move(hints));
-                        res.text = JsonValue { move(obj) }.serialized();
+                        modified = true;
+                    }
+                    auto container = view.has_value() ? view->container_id() : String {};
+                    if (auto cred_hints = matching_credentials_json_for_view(*url, container); !cred_hints.is_empty()) {
+                        obj.set("matching_credentials"sv, move(cred_hints));
+                        modified = true;
                     }
                 }
+                if (modified)
+                    res.text = JsonValue { move(obj) }.serialized();
             }
         }
-        on_complete(move(res));
+        on_complete(scrub_mcp_tool_result(move(res)));
     };
 
     execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(wrapped_complete));
@@ -7020,6 +7199,10 @@ void Application::get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::On
         on_complete(mcp_error_result(mcp_denied_message));
         return;
     }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
 
     size_t clamped_limit = clamp(limit, static_cast<size_t>(1), max_mcp_buffered_events);
     JsonArray items;
@@ -7044,13 +7227,17 @@ void Application::get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::On
     result.set("tab_id"sv, tab_id);
     result.set("count"sv, static_cast<u64>(items.size()));
     result.set("logs"sv, move(items));
-    on_complete(mcp_ok_json(JsonValue { move(result) }));
+    on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
 }
 
 void Application::get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete on_complete)
 {
     if (!find_allowed_mcp_view(tab_id).has_value()) {
         on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
         return;
     }
 
@@ -7093,28 +7280,41 @@ void Application::get_network_requests(u64 tab_id, size_t limit, bool clear, boo
     result.set("tab_id"sv, tab_id);
     result.set("count"sv, static_cast<u64>(items.size()));
     result.set("requests"sv, move(items));
-    on_complete(mcp_ok_json(JsonValue { move(result) }));
+    on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
 }
 
 void Application::evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete on_complete)
 {
+    if (m_browser_options.mcp_disable_eval_js) {
+        on_complete(mcp_error_result("eval_js is disabled by MCP security policy (--mcp-disable-eval-js)"sv));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
+
     JsonObject payload;
     payload.set("script"sv, move(script));
     payload.set("args"sv, JsonArray {});
 
-    enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+    enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [this, on_complete = move(on_complete)](Web::WebDriver::Response response) {
         if (response.is_error()) {
             on_complete(format_mcp_webdriver_error(response.error()));
             return;
         }
         JsonObject result;
         result.set("value"sv, response.value());
-        on_complete(mcp_ok_json(JsonValue { move(result) }));
+        on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
     });
 }
 
 void Application::take_screenshot(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
     enqueue_mcp_webdriver_command(tab_id, "take_screenshot"_string, JsonValue {}, {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
         if (response.is_error()) {
             on_complete(format_mcp_webdriver_error(response.error()));
@@ -7764,6 +7964,393 @@ void Application::delete_skill_tool(String name, MCP::OnToolCallComplete on_comp
     result.set("deleted"sv, true);
     result.set("name"sv, move(name));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallComplete on_complete)
+{
+    if (!vault_store().is_unlocked()) {
+        on_complete(mcp_error_result("Credential vault is locked"sv));
+        return;
+    }
+
+    Vector<VaultCredential> creds;
+    Optional<String> filtered_origin;
+    if (tab_id.has_value()) {
+        auto view = find_allowed_mcp_view(*tab_id);
+        if (!view.has_value()) {
+            on_complete(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        filtered_origin = view->url().origin().serialize();
+        creds = vault_store().matching_credentials(view->url(), view->container_id());
+    } else {
+        creds = vault_store().list_credentials(false);
+    }
+
+    JsonArray arr;
+    for (auto const& cred : creds)
+        arr.must_append(serialize_vault_credential_metadata(cred));
+
+    JsonObject result;
+    result.set("count"sv, static_cast<u64>(creds.size()));
+    if (filtered_origin.has_value())
+        result.set("filtered_origin"sv, *filtered_origin);
+    result.set("credentials"sv, move(arr));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+static constexpr auto mcp_vault_fill_helper_js = R"JS(
+const isVisibleInput = (el) => {
+  if (!el || el.nodeType !== 1 || el.disabled || el.readOnly) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag !== 'input' && tag !== 'textarea') return false;
+  const style = window.getComputedStyle(el);
+  if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const resolveFieldTarget = (kind, ref, selector) => {
+  if (ref || selector) {
+    const res = resolveTarget({ ref, selector });
+    if (res.error) return res;
+    if (!res.el || (res.el.tagName || '').toLowerCase() !== 'input')
+      return { error: 'Vault target must be an <input> element' };
+    return { el: res.el };
+  }
+  const inputs = Array.from(document.querySelectorAll('input')).filter(isVisibleInput);
+  if (kind === 'password') {
+    const pw = inputs.find(el => (el.type || '').toLowerCase() === 'password');
+    return pw ? { el: pw } : { error: 'No visible <input type="password"> found' };
+  }
+  if (kind === 'totp') {
+    const otp = inputs.find(el => {
+      const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+      const nm = (el.name || el.id || el.placeholder || el.getAttribute('aria-label') || '').toLowerCase();
+      return ac === 'one-time-code' || /otp|totp|2fa|code|token|mfa/.test(nm);
+    }) || inputs.find(el => ['text', 'tel', 'number', ''].includes((el.getAttribute('type') || '').toLowerCase()));
+    return otp ? { el: otp } : { error: 'No visible 2FA/TOTP <input> found' };
+  }
+  const user = inputs.find(el => {
+    const t = (el.getAttribute('type') || 'text').toLowerCase();
+    return ['email', 'text', 'tel'].includes(t) && (el.getAttribute('autocomplete') || '').toLowerCase() !== 'one-time-code';
+  });
+  return user ? { el: user } : { error: 'No visible username/email <input> found' };
+};
+const validateFormAction = (el, allowedOrigins) => {
+  const form = el.form || (el.closest && el.closest('form'));
+  if (!form) return { ok: true };
+  const rawAction = form.getAttribute('action');
+  if (!rawAction || !rawAction.trim()) return { ok: true };
+  try {
+    const actionUrl = new URL(rawAction, window.location.href);
+    if (!allowedOrigins.includes(actionUrl.origin))
+      return { error: 'Form action origin "' + actionUrl.origin + '" is not in credential allowed_origins' };
+    return { ok: true };
+  } catch (e) {
+    return { error: 'Invalid form action URL' };
+  }
+};
+const setNativeInputValue = (el, value) => {
+  if (typeof el.focus === 'function') el.focus();
+  const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  if (desc && typeof desc.set === 'function') desc.set.call(el, value);
+  else el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+};
+)JS"sv;
+
+void Application::fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto resolved = vault_store().resolve_field_value(credential_id, field, view->url(), view->container_id());
+    if (resolved.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Vault refused field '{}': {}", field, resolved.error()))));
+        return;
+    }
+
+    auto cred = vault_store().get_credential(credential_id, false);
+    if (!cred.has_value()) {
+        on_complete(mcp_error_result("Credential unavailable"sv));
+        return;
+    }
+
+    bool should_quarantine = (field == "password"sv || field == "totp"sv);
+    if (should_quarantine)
+        mark_view_mcp_secret_tainted(tab_id, resolved.value());
+
+    JsonArray allowed_origins_json;
+    for (auto const& o : cred->allowed_origins)
+        allowed_origins_json.must_append(o);
+
+    JsonObject cfg;
+    cfg.set("credential_id"sv, credential_id);
+    cfg.set("field"sv, field);
+    cfg.set("value"sv, resolved.release_value());
+    cfg.set("expected_origin"sv, view->url().origin().serialize());
+    cfg.set("allowed_origins"sv, move(allowed_origins_json));
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(mcp_vault_fill_helper_js);
+    js.append(R"JS(
+if (window.location.origin !== cfg.expected_origin)
+  return { error: 'Page origin changed unexpectedly before blind fill' };
+const resolved = resolveFieldTarget(cfg.field, cfg.ref, cfg.selector);
+if (resolved.error) return { error: resolved.error };
+const el = resolved.el;
+if (cfg.field === 'password' && (el.type || '').toLowerCase() !== 'password')
+  return { error: 'Refusing to inject password into non-password input type="' + el.type + '"' };
+const actionCheck = validateFormAction(el, cfg.allowed_origins || []);
+if (actionCheck.error) return { error: actionCheck.error };
+setNativeInputValue(el, cfg.value);
+return { filled: true, credential_id: cfg.credential_id, field: cfg.field };
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), [tab_id, should_quarantine, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+        if (!res.is_error) {
+            if (auto parsed = JsonValue::from_string(res.text); !parsed.is_error() && parsed.value().is_object()) {
+                auto obj = parsed.release_value().as_object();
+                obj.set("tab_id"sv, tab_id);
+                obj.set("quarantined"sv, should_quarantine);
+                res.text = JsonValue { move(obj) }.serialized();
+            }
+        }
+        on_complete(move(res));
+    });
+}
+
+void Application::login_with_credential_tool(
+    u64 tab_id,
+    String credential_id,
+    Optional<String> username_ref,
+    Optional<String> username_selector,
+    Optional<String> password_ref,
+    Optional<String> password_selector,
+    Optional<String> totp_ref,
+    Optional<String> totp_selector,
+    Optional<String> submit_ref,
+    Optional<String> submit_selector,
+    bool wait_for_navigation,
+    MCP::OnToolCallComplete on_complete)
+{
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto committed_url = view->url();
+    auto tab_container = view->container_id();
+    auto cred = vault_store().get_credential(credential_id, false);
+    if (!cred.has_value()) {
+        vault_store().record_audit("login_with_credential"_string, credential_id, committed_url.origin().serialize(), String {}, false, "Unknown or disabled credential"_string);
+        on_complete(mcp_error_result("Unknown or disabled vault credential"sv));
+        return;
+    }
+
+    if (!vault_credential_matches_origin(*cred, committed_url)) {
+        vault_store().record_audit("login_with_credential"_string, credential_id, committed_url.origin().serialize(), String {}, false, "Origin mismatch"_string);
+        on_complete(mcp_error_result("Tab origin does not match credential's pinned allowed_origins"sv));
+        return;
+    }
+    if (!vault_credential_matches_container(*cred, tab_container)) {
+        vault_store().record_audit("login_with_credential"_string, credential_id, committed_url.origin().serialize(), String {}, false, "Container mismatch"_string);
+        on_complete(mcp_error_result("Tab container_id does not match credential's pinned container_id"sv));
+        return;
+    }
+
+    Optional<String> username_val;
+    Optional<String> password_val;
+    Optional<String> totp_val;
+    if (!cred->username.is_empty()) {
+        if (auto r = vault_store().resolve_field_value(credential_id, "username"sv, committed_url, tab_container); !r.is_error())
+            username_val = r.release_value();
+    }
+    if (!cred->password.is_empty()) {
+        auto r = vault_store().resolve_field_value(credential_id, "password"sv, committed_url, tab_container);
+        if (r.is_error()) {
+            on_complete(mcp_error_result("Failed resolving password from vault"sv));
+            return;
+        }
+        password_val = r.release_value();
+        mark_view_mcp_secret_tainted(tab_id, *password_val);
+    }
+    if (!cred->totp_secret.is_empty()) {
+        if (auto r = vault_store().resolve_field_value(credential_id, "totp"sv, committed_url, tab_container); !r.is_error()) {
+            totp_val = r.release_value();
+            mark_view_mcp_secret_tainted(tab_id, *totp_val);
+        }
+    }
+
+    if (!username_val.has_value() && !password_val.has_value() && !totp_val.has_value()) {
+        on_complete(mcp_error_result("Credential has no fields to fill"sv));
+        return;
+    }
+
+    JsonArray allowed_origins_json;
+    for (auto const& o : cred->allowed_origins)
+        allowed_origins_json.must_append(o);
+
+    JsonObject cfg;
+    cfg.set("credential_id"sv, credential_id);
+    cfg.set("expected_origin"sv, committed_url.origin().serialize());
+    cfg.set("allowed_origins"sv, move(allowed_origins_json));
+    if (username_val.has_value())
+        cfg.set("username"sv, *username_val);
+    if (password_val.has_value())
+        cfg.set("password"sv, *password_val);
+    if (totp_val.has_value())
+        cfg.set("totp"sv, *totp_val);
+    if (username_ref.has_value() && !username_ref->is_empty())
+        cfg.set("username_ref"sv, *username_ref);
+    if (username_selector.has_value() && !username_selector->is_empty())
+        cfg.set("username_selector"sv, *username_selector);
+    if (password_ref.has_value() && !password_ref->is_empty())
+        cfg.set("password_ref"sv, *password_ref);
+    if (password_selector.has_value() && !password_selector->is_empty())
+        cfg.set("password_selector"sv, *password_selector);
+    if (totp_ref.has_value() && !totp_ref->is_empty())
+        cfg.set("totp_ref"sv, *totp_ref);
+    if (totp_selector.has_value() && !totp_selector->is_empty())
+        cfg.set("totp_selector"sv, *totp_selector);
+    if (submit_ref.has_value() && !submit_ref->is_empty())
+        cfg.set("submit_ref"sv, *submit_ref);
+    if (submit_selector.has_value() && !submit_selector->is_empty())
+        cfg.set("submit_selector"sv, *submit_selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(mcp_vault_fill_helper_js);
+    js.append(R"JS(
+if (window.location.origin !== cfg.expected_origin)
+  return { error: 'Page origin changed unexpectedly before blind login' };
+const filled = [];
+let submitAnchor = null;
+if (cfg.username !== undefined) {
+  const uRes = resolveFieldTarget('username', cfg.username_ref, cfg.username_selector);
+  if (!uRes.error) {
+    const check = validateFormAction(uRes.el, cfg.allowed_origins || []);
+    if (check.error) return { error: check.error };
+    setNativeInputValue(uRes.el, cfg.username);
+    filled.push('username');
+    submitAnchor = uRes.el;
+  } else if (cfg.username_ref || cfg.username_selector) {
+    return { error: uRes.error };
+  }
+}
+if (cfg.password !== undefined) {
+  const pRes = resolveFieldTarget('password', cfg.password_ref, cfg.password_selector);
+  if (!pRes.error) {
+    if ((pRes.el.type || '').toLowerCase() !== 'password')
+      return { error: 'Refusing to inject password into non-password input' };
+    const check = validateFormAction(pRes.el, cfg.allowed_origins || []);
+    if (check.error) return { error: check.error };
+    setNativeInputValue(pRes.el, cfg.password);
+    filled.push('password');
+    submitAnchor = pRes.el;
+  } else if (cfg.password_ref || cfg.password_selector || filled.length === 0) {
+    return { error: pRes.error };
+  }
+}
+if (cfg.totp !== undefined && (cfg.totp_ref || cfg.totp_selector || filled.length === 0)) {
+  const tRes = resolveFieldTarget('totp', cfg.totp_ref, cfg.totp_selector);
+  if (!tRes.error) {
+    const check = validateFormAction(tRes.el, cfg.allowed_origins || []);
+    if (check.error) return { error: check.error };
+    setNativeInputValue(tRes.el, cfg.totp);
+    filled.push('totp');
+    submitAnchor = tRes.el;
+  } else if (cfg.totp_ref || cfg.totp_selector) {
+    return { error: tRes.error };
+  }
+}
+if (filled.length === 0)
+  return { error: 'No matching login inputs found on page' };
+if (cfg.submit_ref || cfg.submit_selector) {
+  const sRes = resolveTarget({ ref: cfg.submit_ref, selector: cfg.submit_selector });
+  if (sRes.error) return { error: sRes.error };
+  const check = validateFormAction(sRes.el, cfg.allowed_origins || []);
+  if (check.error) return { error: check.error };
+  sRes.el.click();
+} else if (submitAnchor && submitAnchor.form) {
+  if (typeof submitAnchor.form.requestSubmit === 'function')
+    submitAnchor.form.requestSubmit();
+  else
+    submitAnchor.form.submit();
+} else if (submitAnchor) {
+  const enterInit = { key: 'Enter', bubbles: true, cancelable: true };
+  submitAnchor.dispatchEvent(new KeyboardEvent('keydown', enterInit));
+  submitAnchor.dispatchEvent(new KeyboardEvent('keyup', enterInit));
+}
+return { submitted: true, credential_id: cfg.credential_id, filled_fields: filled, url: window.location.href };
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), [this, tab_id, wait_for_navigation, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+        auto build_login_result = [this, tab_id, base_text = res.text](bool navigated) -> MCP::ToolCallResult {
+            JsonObject out;
+            if (auto parsed = JsonValue::from_string(base_text); !parsed.is_error() && parsed.value().is_object())
+                out = parsed.release_value().as_object();
+            out.set("tab_id"sv, tab_id);
+            out.set("navigated"sv, navigated);
+            out.set("quarantined"sv, is_view_mcp_secret_tainted(tab_id));
+            if (auto v = find_allowed_mcp_view(tab_id); v.has_value())
+                out.set("url"sv, v->url().to_string());
+            return mcp_ok_json(JsonValue { move(out) });
+        };
+
+        if (res.is_error || !wait_for_navigation) {
+            if (!res.is_error)
+                res = build_login_result(false);
+            on_complete(move(res));
+            return;
+        }
+
+        auto view = find_allowed_mcp_view(tab_id);
+        if (!view.has_value()) {
+            on_complete(build_login_result(false));
+            return;
+        }
+
+        auto wait_id = m_next_mcp_wait_id++;
+        auto wait = make<PendingMCPNavigationWait>();
+        wait->view_id = tab_id;
+        wait->on_complete = [build_login_result = move(build_login_result), on_complete = move(on_complete)](MCP::ToolCallResult nav_res) mutable {
+            if (!nav_res.is_error) {
+                on_complete(build_login_result(true));
+                return;
+            }
+            if (nav_res.text == mcp_denied_message || nav_res.text == "Tab closed"sv) {
+                on_complete(move(nav_res));
+                return;
+            }
+            on_complete(build_login_result(false));
+        };
+
+        ViewImplementation::NavigationListener listener;
+        listener.on_load_finish = [this, wait_id](URL::URL const&) {
+            Core::deferred_invoke([this, wait_id] {
+                finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { JsonObject {} }));
+            });
+        };
+        wait->listener_id = view->add_navigation_listener(move(listener));
+        wait->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(4), [this, wait_id] {
+            finish_mcp_navigation_wait(wait_id, mcp_error_result("Navigation timeout"sv));
+        });
+        wait->timer->start();
+        m_mcp_nav_waits.set(wait_id, move(wait));
+    });
 }
 
 }

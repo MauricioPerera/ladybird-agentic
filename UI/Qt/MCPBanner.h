@@ -31,6 +31,7 @@ signals:
     void toggle_current_tab_access_requested();
     void open_flows_requested();
     void open_skills_requested();
+    void open_vault_requested();
     void copy_config_requested();
     void disable_requested();
 

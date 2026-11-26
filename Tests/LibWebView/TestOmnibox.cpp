@@ -358,6 +358,7 @@ TEST_CASE(all_web_ui_pages_are_suggested)
         "about:settings"sv,
         "about:skills"sv,
         "about:support"sv,
+        "about:vault"sv,
         "about:welcome"sv,
     };
 

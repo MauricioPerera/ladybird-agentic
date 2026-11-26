@@ -21,6 +21,7 @@ namespace URL {
     __URL_ENUMERATE(newtab)     \
     __URL_ENUMERATE(settings)   \
     __URL_ENUMERATE(skills)     \
+    __URL_ENUMERATE(vault)      \
     __URL_ENUMERATE(version)    \
     __URL_ENUMERATE(welcome)
 

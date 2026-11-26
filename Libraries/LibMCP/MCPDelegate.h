@@ -22,6 +22,12 @@ struct SkillMatchHint {
     String description {};
 };
 
+struct CredentialMatchHint {
+    String id {};
+    String label {};
+    Vector<String> fields {};
+};
+
 struct TabInfo {
     u64 id { 0 };
     String title {};
@@ -30,6 +36,7 @@ struct TabInfo {
     bool is_loading { false };
     bool is_active { false };
     Vector<SkillMatchHint> matching_skills {};
+    Vector<CredentialMatchHint> matching_credentials {};
 };
 
 struct ToolCallResult {
@@ -109,6 +116,10 @@ public:
     virtual void read_skill_tool(Optional<String> name, Optional<String> uri, Optional<String> file, OnToolCallComplete) = 0;
     virtual void save_skill_tool(JsonValue skill_json, OnToolCallComplete) = 0;
     virtual void delete_skill_tool(String name, OnToolCallComplete) = 0;
+
+    virtual void list_credentials_tool(Optional<u64> tab_id, OnToolCallComplete) = 0;
+    virtual void fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
+    virtual void login_with_credential_tool(u64 tab_id, String credential_id, Optional<String> username_ref, Optional<String> username_selector, Optional<String> password_ref, Optional<String> password_selector, Optional<String> totp_ref, Optional<String> totp_selector, Optional<String> submit_ref, Optional<String> submit_selector, bool wait_for_navigation, OnToolCallComplete) = 0;
 };
 
 }

@@ -19,6 +19,7 @@
 #include <LibWebView/WebUI/SettingsUI.h>
 #include <LibWebView/WebUI/SkillsUI.h>
 #include <LibWebView/WebUI/SupportUI.h>
+#include <LibWebView/WebUI/VaultUI.h>
 
 namespace WebView {
 
@@ -33,6 +34,7 @@ static constexpr auto s_pages = to_array<WebUI::Page>({
     { "settings"sv, "Settings"sv, WebUI::PageType::Dynamic },
     { "skills"sv, "Agent Skills"sv, WebUI::PageType::Dynamic },
     { "support"sv, "Support"sv, WebUI::PageType::Dynamic },
+    { "vault"sv, "Credential Vault"sv, WebUI::PageType::Dynamic },
     { "welcome"sv, "Welcome"sv, WebUI::PageType::Dynamic },
 });
 
@@ -117,6 +119,8 @@ ErrorOr<RefPtr<WebUI>> WebUI::create(WebContentClient& client, Web::PageId page_
         web_ui = TRY(create_web_ui<SkillsUI>(client, page_id, move(host)));
     else if (page->host == "support"sv)
         web_ui = TRY(create_web_ui<SupportUI>(client, page_id, move(host)));
+    else if (page->host == "vault"sv)
+        web_ui = TRY(create_web_ui<VaultUI>(client, page_id, move(host)));
 
     VERIFY(web_ui);
     web_ui->register_interfaces();

@@ -473,8 +473,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     connect(m_mcp_banner, &MCPBanner::open_flows_requested, this, [] {
         ApplicationActions::the().open_flows_page_action().activate();
     });
-    connect(m_mcp_banner, &MCPBanner::open_skills_requested, this, [this] {
-        auto url = URL::about_skills();
+    auto open_about_page_for_current_site = [this](URL::URL url) {
         if (m_current_tab && m_current_tab->is_loaded()) {
             auto const& tab_url = m_current_tab->view().url();
             if (tab_url.scheme().is_one_of("http"sv, "https"sv)) {
@@ -483,6 +482,12 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
             }
         }
         Application::the().activate_or_open_tab_with_url(url);
+    };
+    connect(m_mcp_banner, &MCPBanner::open_skills_requested, this, [open_about_page_for_current_site] {
+        open_about_page_for_current_site(URL::about_skills());
+    });
+    connect(m_mcp_banner, &MCPBanner::open_vault_requested, this, [open_about_page_for_current_site] {
+        open_about_page_for_current_site(URL::about_vault());
     });
     connect(m_mcp_banner, &MCPBanner::copy_config_requested, this, [this] {
         auto port = Application::the().mcp_port();

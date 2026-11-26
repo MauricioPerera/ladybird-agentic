@@ -75,14 +75,15 @@ static JsonObject make_prop(StringView type, StringView description)
     return prop;
 }
 
-static JsonObject make_string_enum_prop(StringView description, ReadonlySpan<StringView> values, StringView default_value)
+static JsonObject make_string_enum_prop(StringView description, ReadonlySpan<StringView> values, Optional<StringView> default_value = {})
 {
     JsonObject prop = make_prop("string"sv, description);
     JsonArray enum_values;
     for (auto value : values)
         enum_values.must_append(value);
     prop.set("enum"sv, move(enum_values));
-    prop.set("default"sv, default_value);
+    if (default_value.has_value())
+        prop.set("default"sv, *default_value);
     return prop;
 }
 
@@ -793,6 +794,54 @@ static JsonArray build_tool_definitions()
             Array { "name"sv }));
     }
 
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "Optional MCP-allowed tab ID to filter credentials pinned to that tab's origin and container."sv));
+        tools.must_append(make_tool_schema(
+            "list_credentials"sv,
+            "List blind credential metadata from the browser's encrypted Vault (about:vault). Returns only IDs, labels, pinned origins, containers, and available field types ('username', 'password', 'totp') — never secrets."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab currently committed on a pinned origin of the credential."sv));
+        props.set("credential_id"sv, make_prop("string"sv, "Vault credential ID to inject blindly."sv));
+        static constexpr Array vault_fields { "username"sv, "password"sv, "totp"sv };
+        props.set("field"sv, make_string_enum_prop("Credential field to inject blindly into the input."sv, vault_fields));
+        props.set("ref"sv, make_prop("string"sv, "Optional snapshot @eN element ref for the target input (auto-detects visible input if omitted)."sv));
+        props.set("selector"sv, make_prop("string"sv, "Optional CSS selector for the target input."sv));
+        tools.must_append(make_tool_schema(
+            "fill_credential"sv,
+            "Blindly inject a single credential field ('username', 'password', or live 6-digit 'totp') into an input on an origin- and container-pinned tab without revealing the value to the agent. Injecting 'password' or 'totp' quarantines read/eval tools on the tab until post-login navigation."sv,
+            move(props),
+            Array { "tab_id"sv, "credential_id"sv, "field"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab currently committed on a pinned origin of the credential."sv));
+        props.set("credential_id"sv, make_prop("string"sv, "Vault credential ID for atomic blind login."sv));
+        props.set("username_ref"sv, make_prop("string"sv, "Optional @eN ref for username/email input."sv));
+        props.set("username_selector"sv, make_prop("string"sv, "Optional CSS selector for username/email input."sv));
+        props.set("password_ref"sv, make_prop("string"sv, "Optional @eN ref for <input type='password'>."sv));
+        props.set("password_selector"sv, make_prop("string"sv, "Optional CSS selector for <input type='password'>."sv));
+        props.set("totp_ref"sv, make_prop("string"sv, "Optional @eN ref for 2FA TOTP code input."sv));
+        props.set("totp_selector"sv, make_prop("string"sv, "Optional CSS selector for 2FA TOTP code input."sv));
+        props.set("submit_ref"sv, make_prop("string"sv, "Optional @eN ref for submit button."sv));
+        props.set("submit_selector"sv, make_prop("string"sv, "Optional CSS selector for submit button."sv));
+        props.set("wait_for_navigation"sv, [] {
+            auto p = make_prop("boolean"sv, "Wait briefly for post-login navigation commit (default: true)."sv);
+            p.set("default"sv, true);
+            return p;
+        }());
+        tools.must_append(make_tool_schema(
+            "login_with_credential"sv,
+            "Preferred atomic blind login: verifies exact origin and container pinning, fills username/password/(optional TOTP), validates form action origin, submits, and quarantines read/eval tools until navigation commits — zero secrets ever enter the MCP response."sv,
+            move(props),
+            Array { "tab_id"sv, "credential_id"sv }));
+    }
+
     return tools;
 }
 
@@ -832,6 +881,20 @@ static JsonObject tab_info_to_json(TabInfo const& info)
             skills_json.must_append(move(s));
         }
         object.set("matching_skills"sv, move(skills_json));
+    }
+    if (!info.matching_credentials.is_empty()) {
+        JsonArray creds_json;
+        for (auto const& hint : info.matching_credentials) {
+            JsonObject c;
+            c.set("id"sv, hint.id);
+            c.set("label"sv, hint.label);
+            JsonArray fields_json;
+            for (auto const& f : hint.fields)
+                fields_json.must_append(f);
+            c.set("fields"sv, move(fields_json));
+            creds_json.must_append(move(c));
+        }
+        object.set("matching_credentials"sv, move(creds_json));
     }
     return object;
 }
@@ -1078,7 +1141,7 @@ private:
             result.set("protocolVersion"sv, negotiated_version);
             result.set("capabilities"sv, build_server_capabilities());
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. When list_tabs, get_active_tab, open_tab, navigate, or get_page_snapshot includes matching_skills, call read_skill (or SEP-2640 skills/get + resources/read) to load site-specific instructions before acting, and use list_skills to discover skills. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions. Use list_page_tools and call_page_tool to discover and invoke page- or extension-registered WebMCP tools (document.modelContext / navigator.modelContext and declarative <form toolname> elements) before falling back to low-level DOM primitives."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. When list_tabs, get_active_tab, open_tab, navigate, or get_page_snapshot includes matching_skills, call read_skill (or SEP-2640 skills/get + resources/read) to load site-specific instructions before acting, and use list_skills to discover skills. When matching_credentials is present or login is needed, use list_credentials, login_with_credential (preferred atomic blind login), or fill_credential (multi-step blind fill): credentials stay in the browser vault and are never revealed, and injecting password/totp quarantines read/eval tools on that tab until navigation commits. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions. Use list_page_tools and call_page_tool to discover and invoke page- or extension-registered WebMCP tools (document.modelContext / navigator.modelContext and declarative <form toolname> elements) before falling back to low-level DOM primitives."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -1752,6 +1815,95 @@ private:
             if (!name.has_value() || name->is_empty())
                 return fail_invalid_params("Missing string parameter 'name'"sv);
             delegate.delete_skill_tool(*name, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_credentials"sv) {
+            auto tab_id = arguments.get_u64("tab_id"sv);
+            if (arguments.has("tab_id"sv) && (!tab_id.has_value() || *tab_id == 0))
+                return fail_invalid_params("Parameter 'tab_id' must be a positive integer"sv);
+            delegate.list_credentials_tool(tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "fill_credential"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto credential_id = arguments.get_string("credential_id"sv);
+            auto field = arguments.get_string("field"sv);
+            if (!credential_id.has_value() || credential_id->is_empty() || !field.has_value() || field->is_empty())
+                return fail_invalid_params("Missing required parameters 'credential_id' and 'field'"sv);
+            if (*field != "username"sv && *field != "password"sv && *field != "totp"sv)
+                return fail_invalid_params("Parameter 'field' must be one of: username, password, totp"sv);
+
+            Optional<String> ref;
+            if (arguments.has("ref"sv) && !arguments.get("ref"sv)->is_null()) {
+                auto raw = arguments.get_string("ref"sv);
+                if (!raw.has_value())
+                    return fail_invalid_params("Parameter 'ref' must be a string"sv);
+                ref = *raw;
+            }
+            Optional<String> selector;
+            if (arguments.has("selector"sv) && !arguments.get("selector"sv)->is_null()) {
+                auto raw = arguments.get_string("selector"sv);
+                if (!raw.has_value())
+                    return fail_invalid_params("Parameter 'selector' must be a string"sv);
+                selector = *raw;
+            }
+            delegate.fill_credential_tool(*tab_id, *credential_id, *field, move(ref), move(selector), move(complete));
+            return;
+        }
+
+        if (tool_name == "login_with_credential"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto credential_id = arguments.get_string("credential_id"sv);
+            if (!credential_id.has_value() || credential_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'credential_id'"sv);
+
+            auto get_opt_str = [&](StringView key, Optional<String>& out) -> bool {
+                if (!arguments.has(key) || arguments.get(key)->is_null())
+                    return true;
+                auto val = arguments.get_string(key);
+                if (!val.has_value())
+                    return false;
+                out = *val;
+                return true;
+            };
+            Optional<String> username_ref;
+            Optional<String> username_selector;
+            Optional<String> password_ref;
+            Optional<String> password_selector;
+            Optional<String> totp_ref;
+            Optional<String> totp_selector;
+            Optional<String> submit_ref;
+            Optional<String> submit_selector;
+            if (!get_opt_str("username_ref"sv, username_ref)
+                || !get_opt_str("username_selector"sv, username_selector)
+                || !get_opt_str("password_ref"sv, password_ref)
+                || !get_opt_str("password_selector"sv, password_selector)
+                || !get_opt_str("totp_ref"sv, totp_ref)
+                || !get_opt_str("totp_selector"sv, totp_selector)
+                || !get_opt_str("submit_ref"sv, submit_ref)
+                || !get_opt_str("submit_selector"sv, submit_selector)) {
+                return fail_invalid_params("Ref/selector parameters must be strings"sv);
+            }
+            bool wait_for_navigation = arguments.get_bool("wait_for_navigation"sv).value_or(true);
+            delegate.login_with_credential_tool(
+                *tab_id,
+                *credential_id,
+                move(username_ref),
+                move(username_selector),
+                move(password_ref),
+                move(password_selector),
+                move(totp_ref),
+                move(totp_selector),
+                move(submit_ref),
+                move(submit_selector),
+                wait_for_navigation,
+                move(complete));
             return;
         }
 
