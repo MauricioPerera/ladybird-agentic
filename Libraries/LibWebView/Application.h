@@ -738,6 +738,7 @@ private:
     OwnPtr<FontServiceHost> m_font_service_host;
     JsonValue m_site_compatibility_data;
     Optional<Core::AnonymousBuffer> m_content_blocker_list_buffer;
+    Optional<Core::AnonymousBuffer> m_private_content_blocker_list_buffer;
     RefPtr<Core::Timer> m_content_blocker_list_update_timer;
     ByteString m_instance_data_directory;
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)

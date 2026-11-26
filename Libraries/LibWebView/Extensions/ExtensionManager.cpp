@@ -90,32 +90,39 @@ void ExtensionManager::sync_bundled_flows()
             continue;
 
         Vector<String> new_flow_ids;
+        auto prev_owned = m_registered_flows_by_ext.get(ext.manifest.id);
         for (auto const& rel_path : ext.manifest.ladybird_flow_files) {
             auto raw = read_extension_text_file(ext.root_path, rel_path);
             if (raw.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading bundled flow '{}': {}", rel_path, raw.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading bundled flow '{}': {}", rel_path, raw.error())), false);
                 continue;
             }
             auto json = JsonValue::from_string(raw.value());
             if (json.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid JSON in bundled flow '{}': {}", rel_path, json.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid JSON in bundled flow '{}': {}", rel_path, json.error())), false);
                 continue;
             }
             auto parsed = parse_flow_definition(json.value());
             if (parsed.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid flow '{}': {}", rel_path, parsed.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid flow '{}': {}", rel_path, parsed.error())), false);
                 continue;
             }
-            auto saved = m_flow_store.save_flow(parsed.release_value());
+            auto parsed_flow = parsed.release_value();
+            bool owned_by_ext = prev_owned.has_value() && prev_owned->contains_slow(parsed_flow.id);
+            if (!owned_by_ext && m_flow_store.get_flow(parsed_flow.id).has_value()) {
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Bundled flow '{}' collides with existing flow id '{}'", rel_path, parsed_flow.id)), false);
+                continue;
+            }
+            auto saved = m_flow_store.save_flow(move(parsed_flow));
             if (saved.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed saving bundled flow '{}': {}", rel_path, saved.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed saving bundled flow '{}': {}", rel_path, saved.error())), false);
                 continue;
             }
             new_flow_ids.append(saved.value().id);
         }
 
-        if (auto prev = m_registered_flows_by_ext.get(ext.manifest.id); prev.has_value()) {
-            for (auto const& old_id : *prev) {
+        if (prev_owned.has_value()) {
+            for (auto const& old_id : *prev_owned) {
                 if (!new_flow_ids.contains_slow(old_id))
                     (void)m_flow_store.delete_flow(old_id);
             }
@@ -129,17 +136,19 @@ void ExtensionManager::sync_bundled_flows()
     m_application.refresh_content_blockers_for_extensions();
 }
 
-String ExtensionManager::collect_combined_filter_rules() const
+String ExtensionManager::collect_combined_filter_rules(IsPrivate is_private) const
 {
     StringBuilder combined;
     for (auto const& ext : m_store.list_extensions()) {
         if (!ext.enabled)
             continue;
+        if (is_private == IsPrivate::Yes && !ext.allow_in_private)
+            continue;
 
         for (auto const& filter_rel : ext.manifest.ladybird_filter_lists) {
             auto text = read_extension_text_file(ext.root_path, filter_rel);
             if (text.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading filter list '{}': {}", filter_rel, text.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading filter list '{}': {}", filter_rel, text.error())), false);
                 continue;
             }
             combined.append(text.value());
@@ -152,17 +161,17 @@ String ExtensionManager::collect_combined_filter_rules() const
                 continue;
             auto raw = read_extension_text_file(ext.root_path, ruleset.path);
             if (raw.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading DNR ruleset '{}': {}", ruleset.path, raw.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading DNR ruleset '{}': {}", ruleset.path, raw.error())), false);
                 continue;
             }
             auto json = JsonValue::from_string(raw.value());
             if (json.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid JSON in DNR ruleset '{}': {}", ruleset.path, json.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid JSON in DNR ruleset '{}': {}", ruleset.path, json.error())), false);
                 continue;
             }
             auto translated = translate_dnr_ruleset_to_adblock_rules(json.value());
             if (translated.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid DNR ruleset '{}': {}", ruleset.path, translated.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Invalid DNR ruleset '{}': {}", ruleset.path, translated.error())), false);
                 continue;
             }
             combined.append(translated.value());
@@ -251,7 +260,7 @@ size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ex
         for (auto const& css_rel : cs.css) {
             auto text = read_extension_text_file(ext.root_path, css_rel);
             if (text.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading CSS '{}': {}", css_rel, text.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading CSS '{}': {}", css_rel, text.error())), false);
                 read_ok = false;
                 break;
             }
@@ -263,7 +272,7 @@ size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ex
         for (auto const& js_rel : cs.js) {
             auto text = read_extension_text_file(ext.root_path, js_rel);
             if (text.is_error()) {
-                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading JS '{}': {}", js_rel, text.error())));
+                m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Failed reading JS '{}': {}", js_rel, text.error())), false);
                 read_ok = false;
                 break;
             }
@@ -281,7 +290,7 @@ size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ex
             if (!weak_self)
                 return;
             if (response.is_error()) {
-                weak_self->m_store.set_last_error(ext_id, MUST(String::formatted("Injection WebDriver error: {}", response.error().message)));
+                weak_self->m_store.set_last_error(ext_id, MUST(String::formatted("Injection WebDriver error: {}", response.error().message)), false);
                 return;
             }
             if (response.value().is_object()) {
@@ -289,7 +298,7 @@ size_t ExtensionManager::inject_extension_into_view(InstalledExtension const& ex
                 if (!obj.get_bool("ok"sv).value_or(true)) {
                     auto errors = obj.get_array("errors"sv);
                     if (errors.has_value() && !errors->is_empty()) {
-                        weak_self->m_store.set_last_error(ext_id, errors->at(0).as_string());
+                        weak_self->m_store.set_last_error(ext_id, errors->at(0).as_string(), false);
                         return;
                     }
                 }

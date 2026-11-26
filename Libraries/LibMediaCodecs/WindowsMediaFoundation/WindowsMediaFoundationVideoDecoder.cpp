@@ -83,6 +83,7 @@ private:
     bool m_caller_is_waiting_for_output { false };
     bool m_should_exit { false };
     u64 m_generation { 0 };
+    mutable Mutex m_callback_mutex;
     Function<void(DecodeCompletion)> m_decode_completed_callback;
 };
 
@@ -464,7 +465,7 @@ bool WindowsMediaFoundationVideoDecoder::has_any_decode_in_progress() const
 
 void WindowsMediaFoundationVideoDecoder::ThreadData::set_decode_completed_callback(Function<void(DecodeCompletion)> callback)
 {
-    MutexLocker locker { m_mutex };
+    MutexLocker locker { m_callback_mutex };
     m_decode_completed_callback = move(callback);
 }
 
@@ -502,24 +503,31 @@ void WindowsMediaFoundationVideoDecoder::ThreadData::complete_outputs_until_exit
         if (output.sample)
             decoded = wait_until_decoded(*output.sample.Get());
 
-        MutexLocker locker { m_mutex };
-        if (m_should_exit)
-            return;
-        m_output_is_completing = false;
         auto completion = DecodeCompletion::ProducedNothing;
-        if (output.generation == m_generation) {
-            if (!output.sample)
-                m_completed_end_of_stream = true;
-            else if (decoded.is_error())
-                m_decode_failure = decoded.release_error();
-            else
-                m_completed.append(move(output));
-            completion = DecodeCompletion::ProducedOutput;
+        bool should_notify = false;
+        {
+            MutexLocker locker { m_mutex };
+            if (m_should_exit)
+                return;
+            m_output_is_completing = false;
+            if (output.generation == m_generation) {
+                if (!output.sample)
+                    m_completed_end_of_stream = true;
+                else if (decoded.is_error())
+                    m_decode_failure = decoded.release_error();
+                else
+                    m_completed.append(move(output));
+                completion = DecodeCompletion::ProducedOutput;
+            }
+            auto caller_needs_waking = completion == DecodeCompletion::ProducedOutput || m_awaiting_completion.is_empty();
+            should_notify = caller_needs_waking && !m_caller_is_waiting_for_output;
+            m_condition.broadcast();
         }
-        auto caller_needs_waking = completion == DecodeCompletion::ProducedOutput || m_awaiting_completion.is_empty();
-        if (caller_needs_waking && !m_caller_is_waiting_for_output && m_decode_completed_callback)
-            m_decode_completed_callback(completion);
-        m_condition.broadcast();
+        if (should_notify) {
+            MutexLocker callback_locker { m_callback_mutex };
+            if (m_decode_completed_callback)
+                m_decode_completed_callback(completion);
+        }
     }
 }
 

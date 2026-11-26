@@ -372,6 +372,33 @@ ErrorOr<ExtensionManifest> parse_extension_manifest(JsonValue const& value, Stri
     return manifest;
 }
 
+static bool is_safe_dnr_domain(StringView domain)
+{
+    if (domain.is_empty() || domain.length() > 253)
+        return false;
+    if (domain.starts_with('.') || domain.ends_with('.') || domain.starts_with('-') || domain.ends_with('-'))
+        return false;
+    for (auto ch : domain) {
+        bool is_alnum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        if (!is_alnum && ch != '.' && ch != '-')
+            return false;
+    }
+    return true;
+}
+
+static bool is_safe_dnr_url_filter(StringView filter)
+{
+    if (filter.is_empty())
+        return false;
+    if (filter.starts_with('!') || filter.starts_with('['))
+        return false;
+    if (filter.contains('\r') || filter.contains('\n') || filter.contains('\0'))
+        return false;
+    if (filter.contains('$') || filter.contains("##"sv) || filter.contains("#@#"sv) || filter.contains("#?#"sv))
+        return false;
+    return true;
+}
+
 static Optional<StringView> map_dnr_resource_type(StringView type)
 {
     if (type == "script"sv || type == "stylesheet"sv || type == "image"sv
@@ -417,13 +444,13 @@ ErrorOr<String> translate_dnr_ruleset_to_adblock_rules(JsonValue const& ruleset_
         Vector<String> domain_parts;
         if (auto initiators = condition->get_array("initiatorDomains"sv); initiators.has_value()) {
             for (auto const& d : initiators->values()) {
-                if (d.is_string() && !d.as_string().is_empty())
+                if (d.is_string() && is_safe_dnr_domain(d.as_string()))
                     domain_parts.append(d.as_string());
             }
         }
         if (auto excluded = condition->get_array("excludedInitiatorDomains"sv); excluded.has_value()) {
             for (auto const& d : excluded->values()) {
-                if (d.is_string() && !d.as_string().is_empty())
+                if (d.is_string() && is_safe_dnr_domain(d.as_string()))
                     domain_parts.append(MUST(String::formatted("~{}", d.as_string())));
             }
         }
@@ -449,13 +476,15 @@ ErrorOr<String> translate_dnr_ruleset_to_adblock_rules(JsonValue const& ruleset_
         }
 
         if (auto url_filter = condition->get_string("urlFilter"sv); url_filter.has_value() && !url_filter->is_empty()) {
+            if (!is_safe_dnr_url_filter(*url_filter))
+                continue;
             out.append(prefix);
             out.append(*url_filter);
             out.append(opts_suffix.string_view());
             out.append('\n');
         } else if (auto req_domains = condition->get_array("requestDomains"sv); req_domains.has_value()) {
             for (auto const& dom : req_domains->values()) {
-                if (!dom.is_string() || dom.as_string().is_empty())
+                if (!dom.is_string() || !is_safe_dnr_domain(dom.as_string()))
                     continue;
                 out.append(prefix);
                 out.append("||"sv);

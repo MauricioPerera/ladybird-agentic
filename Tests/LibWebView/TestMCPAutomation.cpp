@@ -541,7 +541,7 @@ struct HttpResponse {
     String body;
 };
 
-HttpResponse send_mcp_http(u16 port, Optional<StringView> bearer_token, StringView body, Optional<StringView> origin_header = {})
+HttpResponse send_mcp_http(u16 port, Optional<StringView> bearer_token, StringView body, Optional<StringView> origin_header = {}, Optional<StringView> session_id_header = {})
 {
     auto socket = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
 
@@ -553,6 +553,8 @@ HttpResponse send_mcp_http(u16 port, Optional<StringView> bearer_token, StringVi
         req.appendff("Authorization: Bearer {}\r\n", *bearer_token);
     if (origin_header.has_value())
         req.appendff("Origin: {}\r\n", *origin_header);
+    if (session_id_header.has_value())
+        req.appendff("Mcp-Session-Id: {}\r\n", *session_id_header);
     req.appendff("Content-Length: {}\r\n", body.length());
     req.append("Connection: close\r\n\r\n"sv);
     req.append(body);
@@ -685,6 +687,38 @@ TEST_CASE(mcp_auth_and_origin_guards)
 
     auto bad_origin = send_mcp_http(*port, "secret-token-123"sv, "{}"sv, "https://evil.example"sv);
     EXPECT_EQ(bad_origin.status_code, 403);
+
+    JsonObject init_rpc;
+    init_rpc.set("jsonrpc"sv, "2.0"sv);
+    init_rpc.set("id"sv, 1);
+    init_rpc.set("method"sv, "initialize"sv);
+    init_rpc.set("params"sv, JsonObject {});
+    auto init_http = send_mcp_http(*port, "secret-token-123"sv, JsonValue { move(init_rpc) }.serialized());
+    EXPECT_EQ(init_http.status_code, 200);
+    EXPECT(!init_http.session_id.is_empty());
+
+    // Invalid Mcp-Session-Id is rejected with 404, valid one is accepted.
+    auto bad_session = send_mcp_http(*port, "secret-token-123"sv, R"({"jsonrpc":"2.0","id":2,"method":"ping"})"sv, {}, "stale-session-id"sv);
+    EXPECT_EQ(bad_session.status_code, 404);
+    auto good_session = send_mcp_http(*port, "secret-token-123"sv, R"({"jsonrpc":"2.0","id":3,"method":"ping"})"sv, {}, init_http.session_id);
+    EXPECT_EQ(good_session.status_code, 200);
+
+    // Request bodies > 64 KiB (up to 4 MiB) must be accepted by HttpRequest + MCPServer.
+    StringBuilder large_comment;
+    for (size_t i = 0; i < 80 * 1024; ++i)
+        large_comment.append('a');
+    JsonObject large_rpc;
+    large_rpc.set("jsonrpc"sv, "2.0"sv);
+    large_rpc.set("id"sv, 4);
+    large_rpc.set("method"sv, "tools/call"sv);
+    JsonObject large_params;
+    large_params.set("name"sv, "list_tabs"sv);
+    JsonObject large_args;
+    large_args.set("padding"sv, MUST(large_comment.to_string()));
+    large_params.set("arguments"sv, move(large_args));
+    large_rpc.set("params"sv, move(large_params));
+    auto large_http = send_mcp_http(*port, "secret-token-123"sv, JsonValue { move(large_rpc) }.serialized());
+    EXPECT_EQ(large_http.status_code, 200);
 }
 
 TEST_CASE(mcp_initialize_and_tools_list_schemas)

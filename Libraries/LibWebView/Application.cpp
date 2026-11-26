@@ -947,52 +947,62 @@ void Application::rebuild_content_blocker_list_paths()
 ErrorOr<bool> Application::load_content_blocker_lists()
 {
     auto custom_filters = m_settings->custom_content_blocker_filters();
-    auto extension_filters = m_extension_manager ? m_extension_manager->collect_combined_filter_rules() : String {};
-    if (m_browser_options.content_blocker_list_paths.is_empty() && custom_filters.is_empty() && extension_filters.is_empty()) {
-        if (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() == 0)
-            return false;
-        m_content_blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(0));
-        return true;
-    }
 
-    Checked<size_t> total_size = 0;
-    for (auto const& path : m_browser_options.content_blocker_list_paths) {
-        auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
-        total_size += TRY(file->size());
+    auto build_blocker_buffer = [&](StringView extension_filters) -> ErrorOr<Core::AnonymousBuffer> {
+        if (m_browser_options.content_blocker_list_paths.is_empty() && custom_filters.is_empty() && extension_filters.is_empty())
+            return Core::AnonymousBuffer::create_with_size(0);
+
+        Checked<size_t> total_size = 0;
+        for (auto const& path : m_browser_options.content_blocker_list_paths) {
+            auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
+            total_size += TRY(file->size());
+            total_size += 1;
+        }
+        total_size += custom_filters.bytes().size();
         total_size += 1;
-    }
-    total_size += custom_filters.bytes().size();
-    total_size += 1;
-    total_size += extension_filters.bytes().size();
-    total_size += 1;
+        total_size += extension_filters.bytes().size();
+        total_size += 1;
 
-    if (total_size.has_overflow() || total_size.value() > maximum_combined_content_blocker_list_size)
-        return Error::from_string_literal("Content blocker lists are too large");
+        if (total_size.has_overflow() || total_size.value() > maximum_combined_content_blocker_list_size)
+            return Error::from_string_literal("Content blocker lists are too large");
 
-    auto blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(total_size.value()));
-    auto bytes = Bytes { blocker_list_buffer.data<u8>(), blocker_list_buffer.size() };
-    size_t offset = 0;
+        auto blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(total_size.value()));
+        auto bytes = Bytes { blocker_list_buffer.data<u8>(), blocker_list_buffer.size() };
+        size_t offset = 0;
 
-    for (auto const& path : m_browser_options.content_blocker_list_paths) {
-        auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
-        auto file_size = TRY(file->size());
-        TRY(file->read_until_filled(bytes.slice(offset, file_size)));
-        offset += file_size;
+        for (auto const& path : m_browser_options.content_blocker_list_paths) {
+            auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
+            auto file_size = TRY(file->size());
+            TRY(file->read_until_filled(bytes.slice(offset, file_size)));
+            offset += file_size;
+            bytes[offset++] = '\n';
+        }
+        custom_filters.bytes().copy_to(bytes.slice(offset));
+        offset += custom_filters.bytes().size();
         bytes[offset++] = '\n';
+        extension_filters.bytes().copy_to(bytes.slice(offset));
+        offset += extension_filters.bytes().size();
+        bytes[offset++] = '\n';
+        VERIFY(offset == bytes.size());
+        return blocker_list_buffer;
+    };
+
+    auto normal_extension_filters = m_extension_manager ? m_extension_manager->collect_combined_filter_rules(IsPrivate::No) : String {};
+    auto private_extension_filters = m_extension_manager ? m_extension_manager->collect_combined_filter_rules(IsPrivate::Yes) : String {};
+
+    auto normal_buffer = TRY(build_blocker_buffer(normal_extension_filters));
+    auto private_buffer = TRY(build_blocker_buffer(private_extension_filters));
+
+    bool changed = false;
+    if (!m_content_blocker_list_buffer.has_value() || m_content_blocker_list_buffer->bytes() != normal_buffer.bytes()) {
+        m_content_blocker_list_buffer = move(normal_buffer);
+        changed = true;
     }
-    custom_filters.bytes().copy_to(bytes.slice(offset));
-    offset += custom_filters.bytes().size();
-    bytes[offset++] = '\n';
-    extension_filters.bytes().copy_to(bytes.slice(offset));
-    offset += extension_filters.bytes().size();
-    bytes[offset++] = '\n';
-    VERIFY(offset == bytes.size());
-
-    if (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->bytes() == blocker_list_buffer.bytes())
-        return false;
-
-    m_content_blocker_list_buffer = move(blocker_list_buffer);
-    return true;
+    if (!m_private_content_blocker_list_buffer.has_value() || m_private_content_blocker_list_buffer->bytes() != private_buffer.bytes()) {
+        m_private_content_blocker_list_buffer = move(private_buffer);
+        changed = true;
+    }
+    return changed;
 }
 
 void Application::start_content_blocker_list_update(ContentBlockerListUpdateTrigger trigger, Optional<StringView> requested_identifier)
@@ -1264,8 +1274,9 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(
     if (auto* webdriver_bidi = WebDriverBiDi::the(); webdriver_bidi && webdriver_bidi->session_state().is_active)
         webdriver_bidi->push_session_state_for_client(*client);
 
-    if (m_content_blocker_list_buffer.has_value())
-        client->async_set_content_blockers(*m_content_blocker_list_buffer);
+    auto const& blocker_buffer = client->is_private() == IsPrivate::Yes ? m_private_content_blocker_list_buffer : m_content_blocker_list_buffer;
+    if (blocker_buffer.has_value())
+        client->async_set_content_blockers(*blocker_buffer);
 
     m_web_content_clients.set(client);
     return client;
@@ -3319,7 +3330,8 @@ bool Application::content_blocking_enabled() const
 
 bool Application::has_content_blocking_rules() const
 {
-    return m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() > 0;
+    return (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() > 0)
+        || (m_private_content_blocker_list_buffer.has_value() && m_private_content_blocker_list_buffer->size() > 0);
 }
 
 void Application::apply_content_blocking_policy(WebContentPage& page)
@@ -3353,8 +3365,11 @@ void Application::apply_content_blocker_settings()
             client.async_set_content_blocking_policy(page.id(), enabled, disabled_sites);
             return IterationDecision::Continue;
         });
-        if (rules_changed)
-            client.async_set_content_blockers(*m_content_blocker_list_buffer);
+        if (rules_changed) {
+            auto const& blocker_buffer = client.is_private() == IsPrivate::Yes ? m_private_content_blocker_list_buffer : m_content_blocker_list_buffer;
+            if (blocker_buffer.has_value())
+                client.async_set_content_blockers(*blocker_buffer);
+        }
         return IterationDecision::Continue;
     });
     ViewImplementation::for_each_view([](ViewImplementation& view) {

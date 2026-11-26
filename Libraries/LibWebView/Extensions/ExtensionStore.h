@@ -42,7 +42,7 @@ public:
     ErrorOr<InstalledExtension> set_allow_in_private(StringView id, bool allow);
     ErrorOr<void> remove_extension(StringView id);
 
-    void set_last_error(StringView id, Optional<String> error);
+    void set_last_error(StringView id, Optional<String> error, bool notify_observers = true);
     void set_registered_flow_ids(StringView id, Vector<String> flow_ids);
 
     JsonObject get_storage(StringView id) const;

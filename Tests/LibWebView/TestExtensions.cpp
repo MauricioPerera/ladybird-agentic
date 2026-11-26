@@ -307,3 +307,64 @@ TEST_CASE(extension_path_rejects_symlinks_and_escapes)
         EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "leak.js"sv).is_error());
 #endif
 }
+
+TEST_CASE(extension_p1_dnr_sanitization_and_store_guards)
+{
+    auto temp_dir = make_temp_extensions_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    auto store_dir = LexicalPath::join(temp_dir, "store"sv).string();
+    auto dir_a = LexicalPath::join(temp_dir, "ext-a"sv).string();
+    auto dir_b = LexicalPath::join(temp_dir, "ext-b"sv).string();
+
+    write_text_file(LexicalPath::join(dir_a, "manifest.json"sv).string(), R"JSON({
+        "manifest_version": 3,
+        "id": "collision-ext",
+        "name": "Collision A",
+        "version": "1.0.0"
+    })JSON"sv);
+    write_text_file(LexicalPath::join(dir_b, "manifest.json"sv).string(), R"JSON({
+        "manifest_version": 3,
+        "id": "collision-ext",
+        "name": "Collision B",
+        "version": "1.0.0"
+    })JSON"sv);
+
+    WebView::ExtensionStore store(store_dir);
+    struct CountingObserver final : public WebView::ExtensionStoreObserver {
+        size_t notifications { 0 };
+        virtual void extensions_changed() override { ++notifications; }
+    } observer;
+    store.add_observer(observer);
+    ScopeGuard remove_obs = [&] { store.remove_observer(observer); };
+
+    MUST(store.install_unpacked(dir_a));
+    size_t count_after_install = observer.notifications;
+
+    // Installing another directory with the same manifest.id must fail cleanly.
+    EXPECT(store.install_unpacked(dir_b).is_error());
+
+    // Setting last_error with notify_observers=false must not re-fire observers.
+    store.set_last_error("collision-ext"sv, "non-reentrant error"_string, false);
+    EXPECT_EQ(observer.notifications, count_after_install);
+    auto ext = store.get_extension("collision-ext"sv);
+    EXPECT(ext.has_value());
+    EXPECT_EQ(ext->last_error, Optional<String> { "non-reentrant error"_string });
+
+    // DNR translation must drop unsafe filters containing newlines, $, cosmetic rules, or bad domains.
+    auto dnr_json = MUST(JsonValue::from_string(R"JSON([
+        { "id": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||bad.example^\n||extra.example^", "resourceTypes": ["script"] } },
+        { "id": 2, "action": { "type": "block" }, "condition": { "urlFilter": "||bad.example^$important" } },
+        { "id": 3, "action": { "type": "block" }, "condition": { "urlFilter": "example.com##.banner" } },
+        { "id": 4, "action": { "type": "block" }, "condition": { "requestDomains": ["evil.example", "bad domain!"], "initiatorDomains": ["good.example", "-bad.example"] } }
+    ])JSON"sv));
+    auto translated = MUST(WebView::translate_dnr_ruleset_to_adblock_rules(dnr_json));
+    EXPECT(!translated.contains("extra.example"sv));
+    EXPECT(!translated.contains("$important"sv));
+    EXPECT(!translated.contains("##.banner"sv));
+    EXPECT(!translated.contains("bad domain!"sv));
+    EXPECT(!translated.contains("-bad.example"sv));
+    EXPECT(translated.contains("||evil.example^$domain=good.example\n"sv));
+}

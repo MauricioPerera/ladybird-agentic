@@ -489,17 +489,27 @@ DecoderErrorOr<void> WindowsMediaFoundationVideoEncoder::drain(Vector<EncodedVid
 
 DecoderErrorOr<void> WindowsMediaFoundationVideoEncoder::collect_outputs(Vector<EncodedVideoPacket>& out_packets)
 {
+    size_t stream_change_attempts = 0;
+    constexpr size_t max_stream_change_attempts = 4;
+
     while (true) {
         auto processed = TRY(process_output(*m_state->transform.Get(), m_state->output_info));
         if (processed.has<NeedsMoreInput>())
             return {};
         if (processed.has<OutputTypeNeeded>()) {
-            auto refreshed_info = output_stream_info(*m_state->transform.Get());
-            if (!refreshed_info.is_error()) {
-                m_state->output_info = refreshed_info.release_value();
-                if (!m_state->output_info.transform_provides_samples && m_state->output_info.sample_byte_count == 0)
-                    m_state->output_info.sample_byte_count = max<u32>(256u * 1024u, m_state->config.width * m_state->config.height);
+            if (++stream_change_attempts > max_stream_change_attempts)
+                return DecoderError::with_description(DecoderErrorCategory::Corrupted, "Video encoder exceeded output type renegotiation limit"sv);
+
+            ComPtr<IMFMediaType> negotiated_type;
+            if (SUCCEEDED(m_state->transform->GetOutputAvailableType(0, 0, &negotiated_type)) && negotiated_type) {
+                auto hr = m_state->transform->SetOutputType(0, negotiated_type.Get(), 0);
+                if (FAILED(hr))
+                    return DecoderError::format(DecoderErrorCategory::Invalid, "Video encoder failed to renegotiate output type: {:#x}", static_cast<u32>(hr));
             }
+
+            m_state->output_info = TRY(output_stream_info(*m_state->transform.Get()));
+            if (!m_state->output_info.transform_provides_samples && m_state->output_info.sample_byte_count == 0)
+                m_state->output_info.sample_byte_count = max<u32>(256u * 1024u, m_state->config.width * m_state->config.height);
             continue;
         }
 

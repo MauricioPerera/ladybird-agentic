@@ -6,6 +6,7 @@
 
 #include <AK/Atomic.h>
 #include <AK/ByteString.h>
+#include <AK/Checked.h>
 #include <AK/HashMap.h>
 #include <AK/Mutex.h>
 #include <AK/NeverDestroyed.h>
@@ -174,9 +175,11 @@ Optional<Gfx::DecodedImageFrame> convert_sample_to_frame(
     auto bitmap = bitmap_or_err.release_value();
 
     if (subtype == MFVideoFormat_RGB32 || subtype == MFVideoFormat_ARGB32) {
-        i32 stride = default_stride != 0 ? default_stride : static_cast<i32>(width * 4);
+        i64 stride = default_stride != 0 ? static_cast<i64>(default_stride) : static_cast<i64>(width) * 4;
         size_t abs_stride = static_cast<size_t>(stride < 0 ? -stride : stride);
-        if (abs_stride < static_cast<size_t>(width) * 4 || data.size() < abs_stride * height)
+        Checked<size_t> required_bytes = abs_stride;
+        required_bytes *= height;
+        if (abs_stride < static_cast<size_t>(width) * 4 || required_bytes.has_overflow() || data.size() < required_bytes.value())
             return {};
 
         u8 const* src_base = data.data();
@@ -190,10 +193,17 @@ Optional<Gfx::DecodedImageFrame> convert_sample_to_frame(
         }
     } else if (subtype == MFVideoFormat_NV12) {
         size_t stride = default_stride > 0 ? static_cast<size_t>(default_stride) : static_cast<size_t>(width);
-        if (stride < width || data.size() < stride * height + (stride * height) / 2)
+        size_t uv_rows = (static_cast<size_t>(height) + 1) / 2;
+        size_t min_uv_row_bytes = ((static_cast<size_t>(width) + 1) / 2) * 2;
+        Checked<size_t> y_bytes = stride;
+        y_bytes *= height;
+        Checked<size_t> uv_bytes = stride;
+        uv_bytes *= uv_rows;
+        Checked<size_t> required_bytes = y_bytes + uv_bytes;
+        if (stride < width || stride < min_uv_row_bytes || y_bytes.has_overflow() || uv_bytes.has_overflow() || required_bytes.has_overflow() || data.size() < required_bytes.value())
             return {};
         u8 const* y_plane = data.data();
-        u8 const* uv_plane = y_plane + stride * height;
+        u8 const* uv_plane = y_plane + y_bytes.value();
         for (u32 row = 0; row < height; ++row) {
             u8 const* y_row = y_plane + static_cast<size_t>(row) * stride;
             u8 const* uv_row = uv_plane + static_cast<size_t>(row / 2) * stride;
@@ -205,7 +215,9 @@ Optional<Gfx::DecodedImageFrame> convert_sample_to_frame(
         }
     } else if (subtype == MFVideoFormat_YUY2) {
         size_t stride = default_stride > 0 ? static_cast<size_t>(default_stride) : static_cast<size_t>(width) * 2;
-        if (stride < static_cast<size_t>(width) * 2 || data.size() < stride * height)
+        Checked<size_t> required_bytes = stride;
+        required_bytes *= height;
+        if (stride < static_cast<size_t>(width) * 2 || required_bytes.has_overflow() || data.size() < required_bytes.value())
             return {};
         for (u32 row = 0; row < height; ++row) {
             u8 const* src = data.data() + static_cast<size_t>(row) * stride;

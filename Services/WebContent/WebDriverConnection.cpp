@@ -1952,13 +1952,17 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
                 auto path = paths[index].to_byte_string();
 
                 Web::FileRequest file_request(path, [connection, self, paths = move(paths), index, selected_files = move(selected_files), path](ErrorOr<i32> file_descriptor_or_error) mutable {
+                    static constexpr size_t max_webdriver_upload_file_size = 128 * 1024 * 1024;
                     auto contents_or_error = [&]() -> ErrorOr<ByteBuffer> {
                         auto opened_file = TRY(Core::File::adopt_fd(TRY(file_descriptor_or_error), Core::File::OpenMode::Read));
+                        auto file_size = TRY(opened_file->size());
+                        if (file_size > max_webdriver_upload_file_size)
+                            return Error::from_string_literal("File exceeds maximum upload size (128 MiB)");
                         return opened_file->read_until_eof();
                     }();
 
                     if (contents_or_error.is_error()) {
-                        connection->driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("'{}' does not exist", path))));
+                        connection->driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("Failed to read '{}': {}", path, contents_or_error.error()))));
                         return;
                     }
 

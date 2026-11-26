@@ -113,6 +113,7 @@ private:
     void enqueue_video_frame(QImage);
     void run_video_worker(u32 width, u32 height, u32 fps, bool record_audio);
     void run_audio_worker();
+    void handle_worker_failure(Error);
 
     String batch_mp4_filename(u32 part_index) const;
     String batch_mp4_path(u32 part_index) const;
@@ -154,6 +155,7 @@ private:
     Vector<QueuedVideoFrame> m_video_queue;
     bool m_stop_requested { false };
     Atomic<bool> m_audio_worker_stop { false };
+    Atomic<bool> m_worker_failed { false };
     Atomic<u32> m_current_batch_index { 0 };
     Vector<CompletedBatch> m_completed_batches;
 

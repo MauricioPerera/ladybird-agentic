@@ -199,6 +199,8 @@ ErrorOr<InstalledExtension> ExtensionStore::install_unpacked(ByteString director
     auto now = UnixDateTime::now().milliseconds_since_epoch();
     InstalledExtension ext;
     if (auto existing = m_extensions.get(manifest.id); existing.has_value()) {
+        if (existing->root_path != normalized)
+            return Error::from_string_literal("An extension with this id is already installed from another directory");
         ext.enabled = existing->enabled;
         ext.allow_in_private = existing->allow_in_private;
         ext.installed_at_ms = existing->installed_at_ms;
@@ -304,7 +306,7 @@ ErrorOr<void> ExtensionStore::remove_extension(StringView id)
     return {};
 }
 
-void ExtensionStore::set_last_error(StringView id, Optional<String> error)
+void ExtensionStore::set_last_error(StringView id, Optional<String> error, bool notify_observers)
 {
     auto existing = m_extensions.get(id);
     if (!existing.has_value())
@@ -316,7 +318,8 @@ void ExtensionStore::set_last_error(StringView id, Optional<String> error)
     updated.last_error = move(error);
     m_extensions.set(updated.manifest.id, move(updated));
     (void)save_registry();
-    notify_extensions_changed();
+    if (notify_observers)
+        notify_extensions_changed();
 }
 
 void ExtensionStore::set_registered_flow_ids(StringView id, Vector<String> flow_ids)

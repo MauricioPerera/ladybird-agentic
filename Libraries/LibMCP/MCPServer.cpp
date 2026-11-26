@@ -25,6 +25,7 @@
 namespace MCP {
 
 static constexpr size_t MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+static constexpr size_t MAX_ACTIVE_CONNECTIONS = 64;
 
 static bool is_ascii_digits(StringView view)
 {
@@ -831,7 +832,7 @@ private:
                     close_later();
                 return {};
             case HTTP::HttpRequest::ParseError::RequestTooLarge:
-                send_http_text_error(413, "Request body or header too large (max 64 KiB)"sv);
+                send_http_text_error(413, "Request body or header too large (max 4 MiB body / 64 KiB header)"sv);
                 return {};
             case HTTP::HttpRequest::ParseError::UnsupportedMethod:
                 send_http_text_error(405, "Method Not Allowed"sv, "Allow: POST, DELETE\r\n"sv);
@@ -888,6 +889,14 @@ private:
         if (request.resource() != "/mcp"sv) {
             send_http_text_error(404, "Not Found"sv);
             return;
+        }
+
+        if (auto session_header = find_header(request, "Mcp-Session-Id"sv); session_header.has_value()) {
+            auto trimmed_session = session_header->trim_whitespace();
+            if (!constant_time_equals(trimmed_session.bytes(), m_server->session_id().bytes())) {
+                send_http_text_error(404, "Invalid or expired Mcp-Session-Id"sv);
+                return;
+            }
         }
 
         if (request.method() == HTTP::HttpRequest::Method::DELETE) {
@@ -1612,6 +1621,11 @@ Optional<u16> MCPServer::local_port() const
 ErrorOr<void> MCPServer::on_new_client()
 {
     auto client = TRY(m_server->accept());
+    if (m_connections.size() >= MAX_ACTIVE_CONNECTIONS) {
+        (void)client->write_until_depleted("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 24\r\n\r\nToo many MCP connections"sv.bytes());
+        client->close();
+        return {};
+    }
     auto connection = TRY(Connection::create(*this, move(client)));
     m_connections.set(move(connection));
     return {};

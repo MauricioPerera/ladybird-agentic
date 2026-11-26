@@ -15,6 +15,7 @@
 #include <AK/kmalloc.h>
 #include <LibURL/URL.h>
 #include <LibWebView/Automation/FlowStore.h>
+#include <LibWebView/BrowsingSession.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Forward.h>
 
@@ -32,7 +33,7 @@ public:
     virtual ~ExtensionManager() override;
 
     void sync_bundled_flows();
-    String collect_combined_filter_rules() const;
+    String collect_combined_filter_rules(IsPrivate is_private = IsPrivate::No) const;
     void did_start_load(ViewImplementation&, URL::URL const&);
     void did_finish_load(ViewImplementation&, URL::URL const&);
     ErrorOr<size_t> inject_extension_into_view(StringView extension_id, ViewImplementation&);

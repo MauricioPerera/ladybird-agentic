@@ -87,9 +87,12 @@ ErrorOr<HttpRequest, HttpRequest::ParseError> HttpRequest::from_raw_request(Read
         state = new_state;
     };
 
+    static constexpr size_t MAX_HEADER_ELEMENT_BYTES = 65536;
+    static constexpr size_t MAX_BODY_BYTES = 4 * 1024 * 1024;
+
     while (index < raw_request.size()) {
         // FIXME: Figure out what the appropriate limitations should be.
-        if (buffer.size() > 65536)
+        if (state != State::InBody && buffer.size() > MAX_HEADER_ELEMENT_BYTES)
             return ParseError::RequestTooLarge;
         switch (state) {
         case State::InMethod:
@@ -141,27 +144,34 @@ ErrorOr<HttpRequest, HttpRequest::ParseError> HttpRequest::from_raw_request(Read
 
                 commit_and_advance_to(current_header.value, next_state);
 
-                if (current_header.name.equals_ignoring_ascii_case("Content-Length"sv))
+                if (current_header.name.equals_ignoring_ascii_case("Content-Length"sv)) {
                     content_length = current_header.value.to_number<unsigned>();
+                    if (content_length.has_value() && *content_length > MAX_BODY_BYTES)
+                        return ParseError::RequestTooLarge;
+                }
 
                 headers->append({ move(current_header.name), move(current_header.value) });
                 break;
             }
             buffer.append(consume());
             break;
-        case State::InBody:
-            buffer.append(consume());
-            if (index == raw_request.size()) {
-                // End of data, so store the body
-                auto maybe_body = ByteBuffer::copy(buffer);
-                if (maybe_body.is_error()) {
-                    VERIFY(maybe_body.error().code() == ENOMEM);
-                    return ParseError::OutOfMemory;
-                }
-                body = maybe_body.release_value();
-                buffer.clear();
+        case State::InBody: {
+            auto remaining = raw_request.slice(index);
+            if (remaining.size() > MAX_BODY_BYTES || (content_length.has_value() && *content_length > MAX_BODY_BYTES))
+                return ParseError::RequestTooLarge;
+            if (content_length.has_value() && remaining.size() < *content_length)
+                return ParseError::RequestIncomplete;
+
+            auto body_slice = content_length.has_value() ? remaining.slice(0, *content_length) : remaining;
+            auto maybe_body = ByteBuffer::copy(body_slice);
+            if (maybe_body.is_error()) {
+                VERIFY(maybe_body.error().code() == ENOMEM);
+                return ParseError::OutOfMemory;
             }
+            body = maybe_body.release_value();
+            index = raw_request.size();
             break;
+        }
         }
     }
 
