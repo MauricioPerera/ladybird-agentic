@@ -483,7 +483,21 @@
                 }
             });
 
-            ladybird.sendMessage("loadState", {});
+            let initialLoadSent = false;
+            function requestInitialState() {
+                if (initialLoadSent || typeof ladybird === "undefined") return;
+                initialLoadSent = true;
+                ladybird.sendMessage("loadState", {});
+            }
+
+            document.addEventListener("WebUILoaded", requestInitialState);
+            requestInitialState();
+
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden && typeof ladybird !== "undefined") {
+                    ladybird.sendMessage("loadState", {});
+                }
+            });
         </script>
     </body>
 </html>
