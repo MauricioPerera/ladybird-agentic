@@ -275,3 +275,35 @@ TEST_CASE(extension_store_validates_dnr_and_filter_files)
     EXPECT_EQ(serialized.get_array("declarative_net_request_rulesets"sv)->size(), 1u);
     EXPECT_EQ(serialized.get_array("filter_lists"sv)->size(), 1u);
 }
+
+TEST_CASE(extension_path_rejects_symlinks_and_escapes)
+{
+    auto temp_dir = make_temp_extensions_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    auto ext_root = LexicalPath::join(temp_dir, "ext-root"sv).string();
+    auto sub_dir = LexicalPath::join(ext_root, "sub"sv).string();
+    MUST(Core::Directory::create(sub_dir, Core::Directory::CreateDirectories::Yes));
+
+    auto script_path = LexicalPath::join(sub_dir, "script.js"sv).string();
+    auto outside_path = LexicalPath::join(temp_dir, "outside.txt"sv).string();
+    write_text_file(script_path, "console.log(1);"sv);
+    write_text_file(outside_path, "secret"sv);
+
+    auto ok = WebView::resolve_safe_extension_file_path(ext_root, "sub/script.js"sv);
+    EXPECT(!ok.is_error());
+
+    EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "../outside.txt"sv).is_error());
+    EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "sub"sv).is_error());
+    EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "missing.js"sv).is_error());
+    EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "/abs.js"sv).is_error());
+    EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "sub\\script.js"sv).is_error());
+
+#if !defined(AK_OS_WINDOWS)
+    auto link_path = LexicalPath::join(ext_root, "leak.js"sv).string();
+    if (!Core::System::symlink(outside_path, link_path).is_error())
+        EXPECT(WebView::resolve_safe_extension_file_path(ext_root, "leak.js"sv).is_error());
+#endif
+}

@@ -17,9 +17,7 @@ namespace WebView {
 
 static ErrorOr<String> read_extension_text_file(ByteString const& root_path, StringView rel_path)
 {
-    if (!is_safe_relative_extension_path(rel_path))
-        return Error::from_string_literal("Unsafe relative extension path");
-    auto full_path = LexicalPath::join(root_path, rel_path).string();
+    auto full_path = TRY(resolve_safe_extension_file_path(root_path, rel_path));
     auto file = TRY(Core::File::open(full_path, Core::File::OpenMode::Read));
     auto bytes = TRY(file->read_until_eof());
     return String::from_utf8(bytes);

@@ -16,6 +16,7 @@
 #include <LibCore/EventLoop.h>
 #include <LibCore/Socket.h>
 #include <LibCore/TCPServer.h>
+#include <LibCore/Timer.h>
 #include <LibHTTP/HttpRequest.h>
 #include <LibHTTP/Status.h>
 #include <LibMCP/MCPDelegate.h>
@@ -750,6 +751,10 @@ public:
         if (m_closed)
             return;
         m_closed = true;
+        if (m_read_timeout_timer) {
+            m_read_timeout_timer->stop();
+            m_read_timeout_timer.clear();
+        }
         m_socket->on_ready_to_read = {};
         m_socket->close();
     }
@@ -759,6 +764,13 @@ private:
         : m_server(server.make_weak_ptr())
         , m_socket(move(socket))
     {
+        m_read_timeout_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(30), [weak_self = make_weak_ptr()] {
+            if (!weak_self || weak_self->m_closed || weak_self->m_request_handled)
+                return;
+            weak_self->send_http_text_error(408, "Request Timeout"sv);
+        });
+        m_read_timeout_timer->start();
+
         m_socket->on_ready_to_read = [this] {
             if (auto result = on_ready_to_read(); result.is_error()) {
                 warnln("MCP connection error: {}", result.error());
@@ -834,6 +846,10 @@ private:
 
         m_remaining_request.clear();
         m_request_handled = true;
+        if (m_read_timeout_timer) {
+            m_read_timeout_timer->stop();
+            m_read_timeout_timer.clear();
+        }
         handle_http_request(parsed_request.release_value());
         return {};
     }
@@ -1547,6 +1563,7 @@ private:
 
     WeakPtr<MCPServer> m_server;
     NonnullOwnPtr<Core::BufferedTCPSocket> m_socket;
+    RefPtr<Core::Timer> m_read_timeout_timer;
     StringBuilder m_remaining_request;
     bool m_request_handled { false };
     bool m_closed { false };

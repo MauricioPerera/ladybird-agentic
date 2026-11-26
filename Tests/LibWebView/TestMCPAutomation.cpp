@@ -25,6 +25,7 @@
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
+#include <LibWebView/Utilities.h>
 
 namespace {
 
@@ -1263,4 +1264,49 @@ TEST_CASE(mcp_agentic_tools_roundtrip)
         EXPECT(payload.get_bool("ok"sv).value_or(false));
         EXPECT(payload.get_bool("confirmed"sv).value_or(false));
     }
+}
+
+TEST_CASE(mcp_upload_path_security_guards)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    auto write_dummy = [](ByteString const& path) {
+        auto parent = LexicalPath::dirname(path);
+        MUST(Core::Directory::create(parent, Core::Directory::CreateDirectories::Yes));
+        auto file = MUST(Core::File::open(path, Core::File::OpenMode::Write));
+        MUST(file->write_until_depleted("data"sv));
+    };
+
+    auto allowed_dir = LexicalPath::join(temp_dir, "allowed"sv).string();
+    auto photo_path = LexicalPath::join(allowed_dir, "photo.png"sv).string();
+    auto outside_path = LexicalPath::join(temp_dir, "outside.txt"sv).string();
+    auto ssh_key = LexicalPath::join(temp_dir, ".ssh"sv, "id_rsa"sv).string();
+    auto env_file = LexicalPath::join(temp_dir, ".env"sv).string();
+    auto cookies_file = LexicalPath::join(temp_dir, "Cookies"sv).string();
+    auto profile_db = LexicalPath::join(temp_dir, "Ladybird"sv, "Profiles"sv, "developer"sv, "Cookies.sqlite"sv).string();
+
+    write_dummy(photo_path);
+    write_dummy(outside_path);
+    write_dummy(ssh_key);
+    write_dummy(env_file);
+    write_dummy(cookies_file);
+    write_dummy(profile_db);
+
+    EXPECT(WebView::validate_mcp_upload_path("photo.png"sv).is_error());
+    auto traversal = ByteString::formatted("{}/../outside.txt", allowed_dir);
+    EXPECT(WebView::validate_mcp_upload_path(traversal).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(allowed_dir).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(LexicalPath::join(allowed_dir, "missing.png"sv).string()).is_error());
+
+    EXPECT(WebView::validate_mcp_upload_path(ssh_key).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(env_file).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(cookies_file).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(profile_db).is_error());
+
+    EXPECT(!WebView::validate_mcp_upload_path(photo_path).is_error());
+    EXPECT(!WebView::validate_mcp_upload_path(photo_path, allowed_dir).is_error());
+    EXPECT(WebView::validate_mcp_upload_path(outside_path, allowed_dir).is_error());
 }

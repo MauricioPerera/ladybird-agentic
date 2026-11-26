@@ -68,6 +68,7 @@ struct WEBVIEW_API InstalledExtension {
 WEBVIEW_API bool is_valid_extension_id(StringView id);
 WEBVIEW_API String sanitize_extension_id_from_name(StringView raw);
 WEBVIEW_API bool is_safe_relative_extension_path(StringView rel_path);
+WEBVIEW_API ErrorOr<ByteString> resolve_safe_extension_file_path(ByteString const& root_path, StringView rel_path);
 WEBVIEW_API bool url_matches_extension_pattern(URL::URL const& url, StringView pattern);
 WEBVIEW_API ErrorOr<ExtensionManifest> parse_extension_manifest(JsonValue const& value, StringView fallback_id = {});
 WEBVIEW_API ErrorOr<String> translate_dnr_ruleset_to_adblock_rules(JsonValue const& ruleset_json);

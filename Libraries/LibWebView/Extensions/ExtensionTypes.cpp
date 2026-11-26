@@ -5,7 +5,9 @@
  */
 
 #include <AK/JsonArray.h>
+#include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
 
 namespace WebView {
@@ -118,6 +120,51 @@ bool is_safe_relative_extension_path(StringView rel_path)
             return false;
     }
     return true;
+}
+
+ErrorOr<ByteString> resolve_safe_extension_file_path(ByteString const& root_path, StringView rel_path)
+{
+    if (!is_safe_relative_extension_path(rel_path))
+        return Error::from_string_literal("Unsafe relative extension path");
+    if (root_path.is_empty() || !FileSystem::is_directory(root_path))
+        return Error::from_string_literal("Extension root path is not an existing directory");
+
+    ByteString current = root_path;
+    for (auto segment : rel_path.split_view('/', SplitBehavior::Nothing)) {
+        current = LexicalPath::join(current, segment).string();
+        if (FileSystem::is_link(current))
+            return Error::from_string_literal("Symbolic links are not allowed inside extensions");
+    }
+
+    if (!FileSystem::exists(current))
+        return Error::from_string_literal("Referenced extension file does not exist");
+
+    auto canonical_root = TRY(FileSystem::real_path(root_path));
+    auto canonical_full = TRY(FileSystem::real_path(current));
+
+    auto normalize_slashes = [](ByteString const& path) {
+        auto normalized = LexicalPath::canonicalized_path(path).replace("\\"sv, "/"sv, ReplaceMode::All);
+        while (normalized.length() > 1 && normalized.ends_with('/'))
+            normalized = normalized.substring(0, normalized.length() - 1);
+        return normalized;
+    };
+
+    auto norm_root = normalize_slashes(canonical_root);
+    auto norm_full = normalize_slashes(canonical_full);
+    auto prefix = norm_root == "/"sv ? ByteString { "/" } : ByteString::formatted("{}/", norm_root);
+
+#if defined(AK_OS_WINDOWS)
+    bool inside = norm_full.to_lowercase().starts_with(prefix.to_lowercase());
+#else
+    bool inside = norm_full.starts_with(prefix);
+#endif
+    if (!inside)
+        return Error::from_string_literal("Resolved extension path escapes extension root directory");
+
+    if (!FileSystem::is_regular_file(canonical_full))
+        return Error::from_string_literal("Referenced extension file does not exist or is not a regular file");
+
+    return canonical_full;
 }
 
 bool url_matches_extension_pattern(URL::URL const& url, StringView pattern)

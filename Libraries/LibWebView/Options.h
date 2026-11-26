@@ -112,6 +112,8 @@ struct BrowserOptions {
     Optional<u16> devtools_port;
     Optional<u16> mcp_port;
     Optional<String> mcp_token;
+    Optional<ByteString> mcp_upload_root {};
+    bool mcp_allow_extension_install { false };
     EnableContentBlocker enable_content_blocker { EnableContentBlocker::Yes };
     DisableSandbox disable_sandbox { DisableSandbox::No };
     ForceVideoDecoderServer force_video_decoder_server { ForceVideoDecoderServer::No };

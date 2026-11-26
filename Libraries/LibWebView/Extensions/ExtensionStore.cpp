@@ -29,11 +29,7 @@ static ErrorOr<JsonObject> read_strict_json_object(ByteString const& path)
 static ErrorOr<void> verify_manifest_files_exist(ByteString const& root_path, ExtensionManifest const& manifest)
 {
     auto check_path = [&](StringView rel_path) -> ErrorOr<void> {
-        if (!is_safe_relative_extension_path(rel_path))
-            return Error::from_string_literal("Unsafe relative path in extension manifest");
-        auto full_path = LexicalPath::join(root_path, rel_path).string();
-        if (!FileSystem::exists(full_path) || FileSystem::is_directory(full_path))
-            return Error::from_string_literal("Referenced extension file does not exist");
+        TRY(resolve_safe_extension_file_path(root_path, rel_path));
         return {};
     };
 

@@ -361,6 +361,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     Optional<u16> devtools_port;
     Optional<u16> mcp_port;
     Optional<StringView> mcp_token;
+    Optional<StringView> mcp_upload_dir;
+    bool mcp_allow_extension_install = false;
     Vector<StringView> debug_processes;
     Optional<StringView> profile_process;
     Optional<StringView> profile_tool;
@@ -572,6 +574,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         },
     });
     args_parser.add_option(mcp_token, "Authentication token for the embedded MCP server", "mcp-token", 0, "token");
+    args_parser.add_option(mcp_upload_dir, "Restrict MCP upload_file tool to files inside this directory", "mcp-upload-dir", 0, "directory");
+    args_parser.add_option(mcp_allow_extension_install, "Allow installing unpacked extensions via the MCP server", "mcp-allow-extension-install", 0);
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -637,6 +641,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .devtools_port = devtools_port,
         .mcp_port = mcp_port,
         .mcp_token = mcp_token.has_value() ? Optional<String> { TRY(String::from_utf8(*mcp_token)) } : OptionalNone {},
+        .mcp_upload_root = mcp_upload_dir.has_value() ? Optional<ByteString> { ByteString { *mcp_upload_dir } } : OptionalNone {},
+        .mcp_allow_extension_install = mcp_allow_extension_install,
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
         .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
         .force_video_decoder_server = force_video_decoder_server ? ForceVideoDecoderServer::Yes : ForceVideoDecoderServer::No,
@@ -4595,6 +4601,10 @@ void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
             queue.in_flight_timer->stop();
             queue.in_flight_timer.clear();
         }
+        if (queue.in_flight_command_id.has_value()) {
+            m_mcp_command_to_view.remove(*queue.in_flight_command_id);
+            queue.in_flight_command_id.clear();
+        }
         if (auto callback = move(queue.in_flight_callback))
             callback(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, String::from_utf8_without_validation(message.bytes())));
         auto queued = move(queue.queued);
@@ -5418,13 +5428,21 @@ const resolveTarget = (cfg) => {
 
 static constexpr auto mcp_webmcp_shim_js = R"WEBMCP(
 if (!window.__ladybirdWebMCP) {
+  const _Map = Map;
+  const _Set = Set;
+  const _ArrayFrom = Array.from;
+  const _defineProperty = Object.defineProperty;
+  const _hasOwn = Object.prototype.hasOwnProperty;
+  const _jsonParse = JSON.parse;
+  const _jsonStringify = JSON.stringify;
+
   const isSecure = Boolean(window.isSecureContext)
     || location.protocol === 'https:'
     || location.hostname === 'localhost'
     || location.hostname === '127.0.0.1'
     || location.hostname === '[::1]';
 
-  const registry = new Map();
+  const registry = new _Map();
 
   const normalizeAnnotations = (raw, defaults = {}) => {
     const src = (raw && typeof raw === 'object') ? raw : {};
@@ -5443,7 +5461,7 @@ if (!window.__ladybirdWebMCP) {
   const normalizeSchema = (schema) => {
     if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
       try {
-        return JSON.parse(JSON.stringify(schema));
+        return _jsonParse(_jsonStringify(schema));
       } catch (e) {}
     }
     return { type: 'object', properties: {} };
@@ -5452,7 +5470,7 @@ if (!window.__ladybirdWebMCP) {
   const safeJsonClone = (val) => {
     if (val === undefined) return null;
     try {
-      const cloned = JSON.parse(JSON.stringify(val));
+      const cloned = _jsonParse(_jsonStringify(val));
       return cloned === undefined ? null : cloned;
     } catch (e) {
       return { text: String(val) };
@@ -5519,7 +5537,7 @@ if (!window.__ladybirdWebMCP) {
   if (isSecure) {
     try {
       if (!document.modelContext) {
-        Object.defineProperty(document, 'modelContext', {
+        _defineProperty(document, 'modelContext', {
           value: modelContext,
           configurable: true,
           enumerable: true,
@@ -5529,7 +5547,7 @@ if (!window.__ladybirdWebMCP) {
     } catch (e) {}
     try {
       if (!navigator.modelContext) {
-        Object.defineProperty(navigator, 'modelContext', {
+        _defineProperty(navigator, 'modelContext', {
           value: modelContext,
           configurable: true,
           enumerable: true,
@@ -5581,7 +5599,7 @@ if (!window.__ladybirdWebMCP) {
       || ('Submit form ' + name);
     const properties = {};
     const required = [];
-    const controls = Array.from(form.elements || []);
+    const controls = _ArrayFrom(form.elements || []);
     for (const ctrl of controls) {
       if (ctrl.disabled) continue;
       const tag = (ctrl.tagName || '').toLowerCase();
@@ -5593,7 +5611,7 @@ if (!window.__ladybirdWebMCP) {
 
       let prop;
       if (tag === 'select') {
-        const enumVals = Array.from(ctrl.options || [])
+        const enumVals = _ArrayFrom(ctrl.options || [])
           .filter((o) => !o.disabled)
           .map((o) => String(o.value));
         prop = { type: 'string' };
@@ -5636,7 +5654,7 @@ if (!window.__ladybirdWebMCP) {
     listTools: (opts = {}) => {
       const includeDeclarative = opts.includeDeclarative !== false;
       const tools = [];
-      const seenNames = new Set();
+      const seenNames = new _Set();
 
       for (const entry of registry.values()) {
         seenNames.add(entry.name);
@@ -5730,17 +5748,17 @@ if (!window.__ladybirdWebMCP) {
 
       const payload = (args && typeof args === 'object') ? args : {};
       const filledFields = [];
-      const controls = Array.from(desc.form.elements || []);
+      const controls = _ArrayFrom(desc.form.elements || []);
       for (const ctrl of controls) {
         if (ctrl.disabled) continue;
         const key = (ctrl.getAttribute('name') || ctrl.id || '').trim();
-        if (!key || !Object.prototype.hasOwnProperty.call(payload, key))
+        if (!key || !_hasOwn.call(payload, key))
           continue;
         const val = payload[key];
         const tag = (ctrl.tagName || '').toLowerCase();
         const type = (ctrl.getAttribute('type') || '').toLowerCase();
         if (tag === 'select') {
-          const optsList = Array.from(ctrl.options || []);
+          const optsList = _ArrayFrom(ctrl.options || []);
           const idx = optsList.findIndex((o) => o.value === String(val));
           if (idx >= 0) ctrl.selectedIndex = idx;
           else ctrl.value = String(val);
@@ -5780,7 +5798,7 @@ if (!window.__ladybirdWebMCP) {
     },
   };
 
-  Object.defineProperty(window, '__ladybirdWebMCP', {
+  _defineProperty(window, '__ladybirdWebMCP', {
     value: api,
     configurable: false,
     enumerable: false,
@@ -6380,8 +6398,94 @@ return { sx, sy, ex, ey };
     });
 }
 
+ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteString> const& allowed_root)
+{
+    if (raw_path.is_empty() || raw_path.contains('\0'))
+        return Error::from_string_literal("File path must not be empty or contain NUL bytes");
+
+    for (auto slash_part : raw_path.split_view('/', SplitBehavior::Nothing)) {
+        for (auto seg : slash_part.split_view('\\', SplitBehavior::Nothing)) {
+            if (seg == ".."sv)
+                return Error::from_string_literal("Path traversal ('..') is not allowed in MCP upload paths");
+        }
+    }
+
+    ByteString byte_path = raw_path;
+    if (!LexicalPath::is_absolute_path(byte_path))
+        return Error::from_string_literal("File path must be absolute");
+    if (!FileSystem::exists(byte_path))
+        return Error::from_string_literal("File does not exist");
+    if (FileSystem::is_link(byte_path))
+        return Error::from_string_literal("Uploading symbolic links or reparse points via MCP is not allowed");
+    if (FileSystem::is_directory(byte_path))
+        return Error::from_string_literal("Path must be a file, not a directory");
+    if (!FileSystem::is_regular_file(byte_path))
+        return Error::from_string_literal("Path must be a regular file");
+
+    auto real_or_err = FileSystem::real_path(byte_path);
+    ByteString canonical = real_or_err.is_error() ? LexicalPath::canonicalized_path(byte_path) : real_or_err.release_value();
+
+    auto norm_lower = canonical.replace("\\"sv, "/"sv, ReplaceMode::All).to_lowercase();
+    for (auto seg : norm_lower.split_view('/', SplitBehavior::Nothing)) {
+        if (seg.is_one_of(".ssh"sv, ".gnupg"sv, ".aws"sv, ".kube"sv, ".azure"sv))
+            return Error::from_string_literal("Uploading sensitive credential or browser profile files via MCP is denied");
+    }
+    if (norm_lower.contains("/.config/gcloud/"sv) || norm_lower.contains("/ladybird/profiles/"sv))
+        return Error::from_string_literal("Uploading sensitive credential or browser profile files via MCP is denied");
+
+    auto basename_lower = LexicalPath::basename(canonical).to_lowercase();
+    auto base_sv = basename_lower.view();
+    if (base_sv == ".env"sv || base_sv.starts_with(".env."sv)
+        || base_sv.is_one_of("id_rsa"sv, "id_ed25519"sv, "id_ecdsa"sv, "id_dsa"sv, ".netrc"sv, ".npmrc"sv, ".pypirc"sv, ".git-credentials"sv)
+        || base_sv.is_one_of("cookies"sv, "cookies.sqlite"sv, "login data"sv, "web data"sv, "sam"sv, "ntuser.dat"sv)) {
+        return Error::from_string_literal("Uploading sensitive credential or browser profile files via MCP is denied");
+    }
+
+    if (allowed_root.has_value() && !allowed_root->is_empty()) {
+        if (!FileSystem::is_directory(*allowed_root))
+            return Error::from_string_literal("Configured MCP upload directory does not exist");
+
+        auto root_real_or_err = FileSystem::real_path(*allowed_root);
+        ByteString canonical_root = root_real_or_err.is_error() ? LexicalPath::canonicalized_path(*allowed_root) : root_real_or_err.release_value();
+
+        auto normalize_dir = [](ByteString path) {
+            auto s = LexicalPath::canonicalized_path(path).replace("\\"sv, "/"sv, ReplaceMode::All);
+            while (s.length() > 1 && s.ends_with('/'))
+                s = s.substring(0, s.length() - 1);
+            return s;
+        };
+
+        auto norm_root = normalize_dir(canonical_root);
+        auto norm_canonical = canonical.replace("\\"sv, "/"sv, ReplaceMode::All);
+        auto prefix = norm_root == "/"sv ? ByteString { "/" } : ByteString::formatted("{}/", norm_root);
+
+#if defined(AK_OS_WINDOWS)
+        bool inside = norm_canonical.to_lowercase().starts_with(prefix.to_lowercase());
+#else
+        bool inside = norm_canonical.starts_with(prefix);
+#endif
+        if (!inside)
+            return Error::from_string_literal("File path is outside the allowed MCP upload directory");
+
+        auto relative_part = norm_canonical.substring_view(prefix.length());
+        ByteString walk = canonical_root;
+        for (auto segment : relative_part.split_view('/', SplitBehavior::Nothing)) {
+            walk = LexicalPath::join(walk, segment).string();
+            if (FileSystem::is_link(walk))
+                return Error::from_string_literal("Uploading symbolic links or reparse points via MCP is not allowed");
+        }
+    }
+
+    return canonical;
+}
+
 void Application::upload_file(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, MCP::OnToolCallComplete on_complete)
 {
+    if (!find_allowed_mcp_view(tab_id).has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
     if (file_paths.is_empty()) {
         on_complete(mcp_error_result("At least one local file path must be provided"sv));
         return;
@@ -6390,23 +6494,16 @@ void Application::upload_file(u64 tab_id, Optional<String> ref, Optional<String>
     StringBuilder joined;
     JsonArray paths_array;
     for (auto const& path : file_paths) {
-        auto byte_path = path.to_byte_string();
-        if (!LexicalPath::is_absolute_path(byte_path)) {
-            on_complete(mcp_error_result(MUST(String::formatted("File path must be absolute: {}", path))));
+        auto validated = validate_mcp_upload_path(path, m_browser_options.mcp_upload_root);
+        if (validated.is_error()) {
+            on_complete(mcp_error_result(MUST(String::formatted("{}: {}", validated.error(), path))));
             return;
         }
-        if (!FileSystem::exists(byte_path)) {
-            on_complete(mcp_error_result(MUST(String::formatted("File does not exist: {}", path))));
-            return;
-        }
-        if (FileSystem::is_directory(byte_path)) {
-            on_complete(mcp_error_result(MUST(String::formatted("Path must be a file, not a directory: {}", path))));
-            return;
-        }
+        auto safe_path = MUST(String::from_utf8(validated.value().bytes()));
         if (!joined.is_empty())
             joined.append('\n');
-        joined.append(path);
-        paths_array.must_append(path);
+        joined.append(safe_path);
+        paths_array.must_append(safe_path);
     }
 
     auto joined_paths = MUST(joined.to_string());
@@ -6937,6 +7034,11 @@ void Application::list_extensions(MCP::OnToolCallComplete on_complete)
 
 void Application::install_unpacked_extension(String path, MCP::OnToolCallComplete on_complete)
 {
+    if (!m_browser_options.mcp_allow_extension_install) {
+        on_complete(mcp_error_result("Installing unpacked extensions via MCP is disabled by default for security. Install via about:extensions or launch Ladybird with --mcp-allow-extension-install"sv));
+        return;
+    }
+
     (void)extension_manager();
     auto installed = extension_store().install_unpacked(path.to_byte_string());
     if (installed.is_error()) {
@@ -7023,7 +7125,7 @@ void Application::inject_extension(String extension_id, Optional<u64> tab_id, MC
 
 void Application::inject_webmcp_shim_if_needed(ViewImplementation& view, URL::URL const& url)
 {
-    if (!m_mcp || view.owner_view_id().has_value() || view.is_private() == IsPrivate::Yes)
+    if (!m_mcp || view.owner_view_id().has_value() || view.is_private() == IsPrivate::Yes || !view.is_mcp_access_allowed())
         return;
     if (!url.scheme().is_one_of("http"sv, "https"sv))
         return;
