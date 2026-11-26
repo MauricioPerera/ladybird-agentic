@@ -4696,9 +4696,14 @@ void Application::dispatch_next_mcp_content_command(u64 view_id)
             auto& q = *entry.value();
             if (q.in_flight_command_id != command_id)
                 return;
+            m_mcp_command_to_view.remove(command_id);
             q.in_flight_timer.clear();
+            q.in_flight_command_id.clear();
             if (auto cb = move(q.in_flight_callback))
                 cb(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "MCP command timed out"sv));
+            Core::deferred_invoke([this, view_id] {
+                dispatch_next_mcp_content_command(view_id);
+            });
         });
         queue.in_flight_timer->start();
 
@@ -5810,6 +5815,18 @@ return { hovered: true, tag: (el.tagName || '').toLowerCase() };
 
 void Application::drag(u64 tab_id, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String> to_ref, Optional<String> to_selector, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, MCP::OnToolCallComplete on_complete)
 {
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    auto active_view = active_web_view();
+    bool is_active = active_view.has_value() && active_view->view_id() == tab_id;
+    if (!is_active || view->viewport_size().is_empty()) {
+        on_complete(mcp_error_result("Cannot perform pointer drag on an inactive or hidden tab; call switch_tab first to activate it"sv));
+        return;
+    }
+
     auto clamped_steps = max(1u, min(steps, 60u));
     auto clamped_duration_ms = min(duration_ms, 5000u);
 
