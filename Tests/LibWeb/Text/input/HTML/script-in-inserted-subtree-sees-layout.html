@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<style>
+    .hidden-children .inner {
+        display: none;
+    }
+    #flex-wrap {
+        display: flex;
+        width: 600px;
+        height: 64px;
+    }
+    #left {
+        width: 150px;
+        height: 64px;
+    }
+    #right {
+        flex: 1 1 100%;
+        height: 64px;
+    }
+</style>
+<body></body>
+<script>
+    test(() => {
+        void document.body.offsetWidth;
+
+        const wrap = document.createElement("div");
+        const header = document.createElement("div");
+        header.id = "header";
+        header.className = "hidden-children";
+
+        const flexWrap = document.createElement("div");
+        flexWrap.id = "flex-wrap";
+        flexWrap.className = "inner";
+
+        const left = document.createElement("div");
+        left.id = "left";
+
+        const right = document.createElement("div");
+        right.id = "right";
+
+        flexWrap.appendChild(left);
+        flexWrap.appendChild(right);
+        header.appendChild(flexWrap);
+        wrap.appendChild(header);
+
+        const script = document.createElement("script");
+        script.textContent = `
+            const h = document.getElementById("header");
+            h.classList.remove("hidden-children");
+            window.__measured = [
+                h.offsetHeight,
+                document.getElementById("left").offsetWidth,
+                document.getElementById("right").offsetWidth,
+            ];
+        `;
+        wrap.appendChild(script);
+
+        document.body.appendChild(wrap);
+
+        println("during: " + window.__measured.join(" "));
+        println("after: " + [header.offsetHeight, left.offsetWidth, right.offsetWidth].join(" "));
+    });
+</script>
