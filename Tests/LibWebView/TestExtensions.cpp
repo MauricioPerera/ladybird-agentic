@@ -134,6 +134,9 @@ TEST_CASE(extension_store_unpacked_storage_and_example)
     WebView::ExtensionStore store(store_dir);
     CountingExtensionObserver observer;
     store.add_observer(observer);
+    ScopeGuard remove_observer = [&] {
+        store.remove_observer(observer);
+    };
 
     auto installed = MUST(store.install_unpacked(unpacked_dir));
     EXPECT_EQ(installed.manifest.id, "custom-helper"_string);

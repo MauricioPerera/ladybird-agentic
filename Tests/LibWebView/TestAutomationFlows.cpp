@@ -114,7 +114,8 @@ TEST_CASE(locator_action_script_escapes_special_characters)
 
     auto script = WebView::build_locator_action_script("fill"sv, locator, params);
     EXPECT(script.bytes_as_string_view().starts_with("return (function(cfg)"sv));
-    EXPECT(script.contains("</script>"sv) || script.contains("\\u003c/script>"sv) || script.contains("a'\\\"</script>"sv));
+    EXPECT(script.contains(R"("value":"button[data-label=\"a'\\\"</script>\\n\"]")"sv));
+    EXPECT(script.contains(R"("text":"line1\nline2 'quotes' \"double\"")"sv));
     EXPECT(script.contains("\"operation\":\"fill\""sv));
 }
 
@@ -128,6 +129,9 @@ TEST_CASE(flow_store_persistence_and_observers)
     WebView::FlowStore store(temp_dir);
     CountingObserver observer;
     store.add_observer(observer);
+    ScopeGuard remove_observer = [&] {
+        store.remove_observer(observer);
+    };
 
     auto example = WebView::make_example_flow();
     auto saved = MUST(store.save_flow(example));
@@ -162,8 +166,6 @@ TEST_CASE(flow_store_persistence_and_observers)
     EXPECT_EQ(observer.flows_notifications, 2u);
     EXPECT(!store.get_flow("example-smoke"sv).has_value());
     EXPECT(store.delete_flow("example-smoke"sv).is_error());
-
-    store.remove_observer(observer);
 }
 
 TEST_CASE(flow_store_prunes_evicted_runs_from_disk)

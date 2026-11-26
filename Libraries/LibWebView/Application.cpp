@@ -332,9 +332,9 @@ void Application::set_cpu_profiler_process(Core::Process process, OwnPtr<Core::F
 #endif
 }
 
-ErrorOr<NonnullRefPtr<Requests::RequestClient>> Application::request_server_client(IsPrivate is_private)
+ErrorOr<NonnullRefPtr<Requests::RequestClient>> Application::request_server_client(IsPrivate is_private, StringView container_id)
 {
-    auto instance = TRY(request_server_manager().browser_instance(session_for_new_view(is_private)));
+    auto instance = TRY(request_server_manager().browser_instance(session_for_new_view(is_private, container_id)));
     return instance->ui_client();
 }
 
@@ -4690,12 +4690,24 @@ static MCP::ToolCallResult mcp_ok_json(JsonValue const& value)
 static constexpr auto mcp_denied_message = "Tab not found or MCP access denied"sv;
 static constexpr auto mcp_webdriver_element_key = "element-6066-11e4-a52e-4f735466cecf"sv;
 
+static bool is_privileged_mcp_url(URL::URL const& url)
+{
+    if (url.scheme() == "resource"sv)
+        return true;
+    return url.scheme() == "about"sv && url != URL::about_blank();
+}
+
 static Optional<ViewImplementation&> find_allowed_mcp_view(u64 tab_id)
 {
     auto view = ViewImplementation::find_view_by_id(tab_id);
     if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes || !view->is_mcp_access_allowed())
         return {};
-    if (!mcp_container_is_allowed_by_policy(view->container_id(), Application::the().mcp_security_policy()))
+    if (is_privileged_mcp_url(view->url()))
+        return {};
+    auto const& policy = Application::the().mcp_security_policy();
+    if (!mcp_container_is_allowed_by_policy(view->container_id(), policy))
+        return {};
+    if (mcp_validate_url_against_policy(view->url(), policy).is_error())
         return {};
     return view;
 }
@@ -5216,17 +5228,31 @@ Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool
     if (!view.has_value() || view->owner_view_id().has_value() || view->is_private() == IsPrivate::Yes)
         return {};
     if (require_mcp_permission) {
-        if (!view->is_mcp_access_allowed())
+        if (!view->is_mcp_access_allowed() || is_privileged_mcp_url(view->url()))
             return {};
-        if (!mcp_container_is_allowed_by_policy(view->container_id(), mcp_security_policy()))
+        auto const& policy = mcp_security_policy();
+        if (!mcp_container_is_allowed_by_policy(view->container_id(), policy))
+            return {};
+        if (mcp_validate_url_against_policy(view->url(), policy).is_error())
             return {};
     }
     return view;
 }
 
-Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::ActivateTab activate_tab) const
+Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::ActivateTab activate_tab, bool require_mcp_permission) const
 {
-    auto view = open_mcp_new_tab(activate_tab);
+    String resolved_container;
+    if (require_mcp_permission) {
+        auto const& policy = mcp_security_policy();
+        if (list_allowed_tabs().size() >= policy.max_tabs)
+            return {};
+        auto container_or_error = mcp_resolve_container_against_policy(OptionalNone {}, policy);
+        if (container_or_error.is_error())
+            return {};
+        resolved_container = container_or_error.release_value();
+    }
+
+    auto view = open_mcp_new_tab(activate_tab, move(resolved_container));
     if (!view.has_value() || view->is_private() == IsPrivate::Yes)
         return {};
     view->set_mcp_access_allowed(true);
@@ -5310,7 +5336,7 @@ void Application::finish_mcp_tree_wait(u64 wait_id, MCP::ToolCallResult result)
     }
 
     if (auto callback = move(wait.value()->on_complete))
-        callback(move(result));
+        callback(scrub_mcp_tool_result(move(result)));
 }
 
 Vector<MCP::TabInfo> Application::list_allowed_tabs() const
@@ -5321,7 +5347,11 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 
     Vector<MCP::TabInfo> tabs;
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (!view.owner_view_id().has_value() && view.is_private() == IsPrivate::No && view.is_mcp_access_allowed() && mcp_container_is_allowed_by_policy(view.container_id(), policy)) {
+        if (!view.owner_view_id().has_value()
+            && view.is_private() == IsPrivate::No
+            && view.is_mcp_access_allowed()
+            && !is_privileged_mcp_url(view.url())
+            && mcp_container_is_allowed_by_policy(view.container_id(), policy)) {
             auto info = view_to_mcp_tab_info(view, active_id);
             info.matching_skills = matching_skill_hints_for_url(view.url());
             info.matching_credentials = matching_credential_hints_for_view(view.url(), view.container_id());
@@ -5335,7 +5365,11 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
 Optional<MCP::TabInfo> Application::active_allowed_tab() const
 {
     auto active_view = active_web_view();
-    if (!active_view.has_value() || active_view->owner_view_id().has_value() || active_view->is_private() == IsPrivate::Yes || !active_view->is_mcp_access_allowed())
+    if (!active_view.has_value()
+        || active_view->owner_view_id().has_value()
+        || active_view->is_private() == IsPrivate::Yes
+        || !active_view->is_mcp_access_allowed()
+        || is_privileged_mcp_url(active_view->url()))
         return {};
     if (!mcp_container_is_allowed_by_policy(active_view->container_id(), mcp_security_policy()))
         return {};
@@ -5537,11 +5571,17 @@ void Application::go_forward(u64 tab_id, MCP::OnToolCallComplete on_complete)
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
+static constexpr auto mcp_vault_quarantine_message = "Blocked by credential vault quarantine: read/eval tools are disabled on this tab until navigation commits to a new document."sv;
+
 void Application::get_accessibility_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
     auto view = find_allowed_mcp_view(tab_id);
     if (!view.has_value()) {
         on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
         return;
     }
 
@@ -5563,8 +5603,6 @@ void Application::get_accessibility_tree(u64 tab_id, MCP::OnToolCallComplete on_
     };
     view->inspect_accessibility_tree();
 }
-
-static constexpr auto mcp_vault_quarantine_message = "Blocked by credential vault quarantine: read/eval tools are disabled on this tab until navigation commits to a new document."sv;
 
 void Application::get_dom_tree(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
@@ -6427,6 +6465,15 @@ return { typed: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : (
 
 void Application::get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete on_complete)
 {
+    if (!find_allowed_mcp_view(tab_id).has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
+
     JsonObject cfg;
     cfg.set("max_elements"sv, static_cast<u64>(min(max_elements, 500uz)));
     cfg.set("include_text"sv, include_text);
@@ -7176,6 +7223,10 @@ void Application::poll_mcp_condition_wait(u64 wait_id)
         finish_mcp_condition_wait(wait_id, mcp_error_result(mcp_denied_message));
         return;
     }
+    if (is_view_mcp_secret_tainted(wait.view_id) && wait.text.has_value() && !wait.text->is_empty()) {
+        finish_mcp_condition_wait(wait_id, mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
 
     JsonObject cfg;
     if (wait.ref.has_value() && !wait.ref->is_empty())
@@ -7529,6 +7580,8 @@ void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_
         MCP::ToolCallResult result;
         result.is_error = record.status != "passed"sv;
         result.text = JsonValue { serialize_flow_run(record) }.serialized();
+        if (Application::is_initialized())
+            result = Application::the().scrub_mcp_tool_result(move(result));
         shared->callback(move(result));
     };
 
@@ -7547,7 +7600,7 @@ void Application::list_flow_runs(Optional<String> flow_id, size_t limit, MCP::On
 
     JsonObject result;
     result.set("runs"sv, move(array));
-    on_complete(mcp_ok_json(JsonValue { move(result) }));
+    on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
 }
 
 void Application::get_flow_run(String run_id, MCP::OnToolCallComplete on_complete)
@@ -7557,7 +7610,7 @@ void Application::get_flow_run(String run_id, MCP::OnToolCallComplete on_complet
         on_complete(mcp_error_result("Flow run not found"sv));
         return;
     }
-    on_complete(mcp_ok_json(JsonValue { serialize_flow_run(*run) }));
+    on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { serialize_flow_run(*run) })));
 }
 
 void Application::cancel_flow_run(String run_id, MCP::OnToolCallComplete on_complete)
@@ -7710,6 +7763,14 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         on_complete(mcp_error_result(mcp_denied_message));
         return;
     }
+    if (mcp_security_policy().disable_eval_js) {
+        on_complete(mcp_error_result("call_page_tool is disabled by --mcp-disable-eval-js policy"sv));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
 
     JsonObject cfg;
     cfg.set("tab_id"sv, tab_id);
@@ -7739,23 +7800,23 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
     payload.set("script"sv, MUST(js.to_string()));
     payload.set("args"sv, move(args));
 
-    enqueue_mcp_webdriver_command(tab_id, "execute_async_script"_string, move(payload), {}, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+    enqueue_mcp_webdriver_command(tab_id, "execute_async_script"_string, move(payload), {}, [this, on_complete = move(on_complete)](Web::WebDriver::Response response) {
         if (response.is_error()) {
-            on_complete(format_mcp_webdriver_error(response.error()));
+            on_complete(scrub_mcp_tool_result(format_mcp_webdriver_error(response.error())));
             return;
         }
         if (response.value().is_object()) {
             auto const& obj = response.value().as_object();
             if (auto err = obj.get_string("error"sv); err.has_value()) {
                 if (obj.get_bool("requires_confirmation"sv).value_or(false)) {
-                    on_complete({ .is_error = true, .text = response.value().serialized() });
+                    on_complete(scrub_mcp_tool_result({ .is_error = true, .text = response.value().serialized() }));
                     return;
                 }
-                on_complete(mcp_error_result(*err));
+                on_complete(scrub_mcp_tool_result(mcp_error_result(*err)));
                 return;
             }
         }
-        on_complete(mcp_ok_json(response.value()));
+        on_complete(scrub_mcp_tool_result(mcp_ok_json(response.value())));
     });
 }
 
@@ -8094,10 +8155,10 @@ const isVisibleInput = (el) => {
   return r.width > 0 && r.height > 0;
 };
 const isSameOriginElement = (el, expectedOrigin) => {
-  if (!expectedOrigin) return true;
+  if (!expectedOrigin) return false;
   try {
     const loc = el && el.ownerDocument && el.ownerDocument.location;
-    return !loc || loc.origin === expectedOrigin;
+    return Boolean(loc) && loc.origin === expectedOrigin;
   } catch (e) {
     return false;
   }
@@ -8134,20 +8195,37 @@ const resolveFieldTarget = (kind, ref, selector, expectedOrigin = window.locatio
   });
   return user ? { el: user } : { error: 'No visible username/email <input> found' };
 };
-const validateFormAction = (el, allowedOrigins) => {
+const validateFormAction = (el, allowedOrigins, submitEl = null) => {
   const form = el.form || (el.closest && el.closest('form'));
-  if (!form) return { ok: true };
-  const rawAction = form.getAttribute('action');
-  if (!rawAction || !rawAction.trim()) return { ok: true };
-  try {
-    const baseHref = (el.ownerDocument && el.ownerDocument.location && el.ownerDocument.location.href) || window.location.href;
-    const actionUrl = new URL(rawAction, baseHref);
-    if (!allowedOrigins.includes(actionUrl.origin))
-      return { error: 'Form action origin "' + actionUrl.origin + '" is not in credential allowed_origins' };
-    return { ok: true };
-  } catch (e) {
-    return { error: 'Invalid form action URL' };
+  const baseHref = (el.ownerDocument && el.ownerDocument.baseURI)
+    || (el.ownerDocument && el.ownerDocument.location && el.ownerDocument.location.href)
+    || window.location.href;
+  const checkActionUrl = (raw) => {
+    if (!raw || !raw.trim()) return { ok: true };
+    try {
+      const actionUrl = new URL(raw, baseHref);
+      if (!allowedOrigins.includes(actionUrl.origin))
+        return { error: 'Form action origin "' + actionUrl.origin + '" is not in credential allowed_origins' };
+      return { ok: true };
+    } catch (e) {
+      return { error: 'Invalid form action URL' };
+    }
+  };
+  if (submitEl && submitEl.getAttribute) {
+    const formActionRes = checkActionUrl(submitEl.getAttribute('formaction'));
+    if (formActionRes.error) return formActionRes;
   }
+  if (!form) return { ok: true };
+  const actionRes = checkActionUrl(form.getAttribute('action'));
+  if (actionRes.error) return actionRes;
+  if (!submitEl && form.querySelector) {
+    const defaultSubmit = form.querySelector('button[formaction], input[type="submit"][formaction], input[type="image"][formaction]');
+    if (defaultSubmit) {
+      const defaultSubmitRes = checkActionUrl(defaultSubmit.getAttribute('formaction'));
+      if (defaultSubmitRes.error) return defaultSubmitRes;
+    }
+  }
+  return { ok: true };
 };
 const setNativeInputValue = (el, value) => {
   if (typeof el.focus === 'function') el.focus();
@@ -8207,7 +8285,7 @@ void Application::fill_credential_tool(u64 tab_id, String credential_id, String 
     js.append(R"JS(
 if (window.location.origin !== cfg.expected_origin)
   return { error: 'Page origin changed unexpectedly before blind fill' };
-const resolved = resolveFieldTarget(cfg.field, cfg.ref, cfg.selector);
+const resolved = resolveFieldTarget(cfg.field, cfg.ref, cfg.selector, cfg.expected_origin);
 if (resolved.error) return { error: resolved.error };
 const el = resolved.el;
 if (cfg.field === 'password' && (el.type || '').toLowerCase() !== 'password')
@@ -8340,7 +8418,7 @@ if (window.location.origin !== cfg.expected_origin)
 const filled = [];
 let submitAnchor = null;
 if (cfg.username !== undefined) {
-  const uRes = resolveFieldTarget('username', cfg.username_ref, cfg.username_selector);
+  const uRes = resolveFieldTarget('username', cfg.username_ref, cfg.username_selector, cfg.expected_origin);
   if (!uRes.error) {
     const check = validateFormAction(uRes.el, cfg.allowed_origins || []);
     if (check.error) return { error: check.error };
@@ -8352,7 +8430,7 @@ if (cfg.username !== undefined) {
   }
 }
 if (cfg.password !== undefined) {
-  const pRes = resolveFieldTarget('password', cfg.password_ref, cfg.password_selector);
+  const pRes = resolveFieldTarget('password', cfg.password_ref, cfg.password_selector, cfg.expected_origin);
   if (!pRes.error) {
     if ((pRes.el.type || '').toLowerCase() !== 'password')
       return { error: 'Refusing to inject password into non-password input' };
@@ -8366,7 +8444,7 @@ if (cfg.password !== undefined) {
   }
 }
 if (cfg.totp !== undefined && (cfg.totp_ref || cfg.totp_selector || filled.length === 0)) {
-  const tRes = resolveFieldTarget('totp', cfg.totp_ref, cfg.totp_selector);
+  const tRes = resolveFieldTarget('totp', cfg.totp_ref, cfg.totp_selector, cfg.expected_origin);
   if (!tRes.error) {
     const check = validateFormAction(tRes.el, cfg.allowed_origins || []);
     if (check.error) return { error: check.error };
@@ -8382,7 +8460,9 @@ if (filled.length === 0)
 if (cfg.submit_ref || cfg.submit_selector) {
   const sRes = resolveTarget({ ref: cfg.submit_ref, selector: cfg.submit_selector });
   if (sRes.error) return { error: sRes.error };
-  const check = validateFormAction(sRes.el, cfg.allowed_origins || []);
+  if (!isSameOriginElement(sRes.el, cfg.expected_origin))
+    return { error: 'Submit target origin does not match expected credential origin' };
+  const check = validateFormAction(sRes.el, cfg.allowed_origins || [], sRes.el);
   if (check.error) return { error: check.error };
   sRes.el.click();
 } else if (submitAnchor && submitAnchor.form) {

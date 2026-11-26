@@ -64,6 +64,7 @@ public:
 
         u64 id { 0 };
         IsPrivate is_private { IsPrivate::No };
+        String container_id;
         URL::URL url;
         LexicalPath destination;
         DownloadStatus status { DownloadStatus::InProgress };
@@ -89,11 +90,11 @@ public:
         Yes,
     };
 
-    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No);
+    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No, String container_id = {});
     using ResponseFinished = Function<void(u64 decoded_body_size, Requests::RequestTimingInfo const*,
         Optional<StringView> error)>;
-    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, HTTP::Cookie::SameSiteContext, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data = {}, ResponseFinished = {});
-    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No);
+    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, HTTP::Cookie::SameSiteContext, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data = {}, ResponseFinished = {}, String container_id = {});
+    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No, String container_id = {});
     bool has_active_downloads() const;
     bool has_unresumable_downloads() const;
     void set_cancel_callback(u64 id, Function<void()>);

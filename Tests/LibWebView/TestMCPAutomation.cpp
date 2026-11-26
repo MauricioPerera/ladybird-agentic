@@ -1748,7 +1748,18 @@ TEST_CASE(mcp_skills_store_and_url_matching)
     EXPECT(!WebView::is_safe_skill_relative_path("../secret.txt"sv));
     EXPECT(!WebView::is_safe_skill_relative_path("/abs/path.md"sv));
     EXPECT(!WebView::is_safe_skill_relative_path("a\\b.md"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("CON"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("NUL.txt"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("sub/aux"sv));
+    EXPECT(!WebView::is_safe_skill_relative_path("sub/trailing."sv));
     EXPECT(WebView::is_safe_skill_relative_path("references/checklist.md"sv));
+
+    // Case-insensitive SKILL.md collision and frontmatter injection rejection
+    Vector<WebView::SkillSupportingFile> parsed_supporting;
+    auto collision_json = MUST(JsonValue::from_string(R"JSON({"name":"demo-skill","description":"desc","supportingFiles":[{"path":"skill.md","content":"x"}]})JSON"sv));
+    EXPECT(WebView::parse_skill_json(collision_json, parsed_supporting).is_error());
+    auto injected_key_json = MUST(JsonValue::from_string(R"JSON({"name":"demo-skill","description":"desc","extraFrontmatter":{"x: 1\nmatch_urls":"evil"}})JSON"sv));
+    EXPECT(WebView::parse_skill_json(injected_key_json, parsed_supporting).is_error());
 
     auto skills_dir = LexicalPath::join(temp_dir, "skills"sv).string();
     WebView::SkillStore store(skills_dir);
@@ -1995,7 +2006,7 @@ TEST_CASE(mcp_vault_crypto_totp_and_origin_pinning)
 
     // 1. AES-256-GCM encrypt/decrypt + tamper detection
     auto salt = ByteBuffer::copy("0123456789abcdef"sv.bytes()).release_value();
-    auto key = MUST(WebView::vault_derive_key_pbkdf2("correct horse battery staple"sv, salt.bytes(), 1000));
+    auto key = MUST(WebView::vault_derive_key_pbkdf2("correct horse battery staple"sv, salt.bytes(), 100'000));
     auto aad = "ladybird-vault-v1"sv.bytes();
     auto secret_msg = "{\"password\":\"SuperSecret#2026!\"}"sv;
     auto blob = MUST(WebView::vault_encrypt_aes_256_gcm(key.bytes(), secret_msg.bytes(), aad));
@@ -2059,11 +2070,20 @@ TEST_CASE(mcp_vault_crypto_totp_and_origin_pinning)
     auto totp_now = MUST(reloaded.resolve_field_value("github-agent"sv, "totp"sv, good_url, "agent"sv));
     EXPECT_EQ(totp_now.bytes().size(), 6uz);
 
-    // 5. Secret scrubbing (plain, URL-encoded, base64)
+    // 5. Secret scrubbing (plain, URL-encoded, base64) + non-UTF-8 input safety + PBKDF2 bounds
     Array<String, 1> secrets { "TopSecretPass!99"_string };
     auto scrubbed = WebView::scrub_secrets_from_string("leak=TopSecretPass%2199&raw=TopSecretPass!99"sv, secrets);
     EXPECT(!scrubbed.contains("TopSecretPass"sv));
     EXPECT(scrubbed.contains("[REDACTED_VAULT_SECRET]"sv));
+
+    static constexpr u8 non_utf8_bytes[] = { 0xff, 0xfe, ' ', 'T', 'o', 'p', 'S', 'e', 'c', 'r', 'e', 't', 'P', 'a', 's', 's', '!', '9', '9' };
+    auto scrubbed_binary = WebView::scrub_secrets_from_string(StringView { non_utf8_bytes, sizeof(non_utf8_bytes) }, secrets);
+    EXPECT(!scrubbed_binary.contains("TopSecretPass"sv));
+    EXPECT(scrubbed_binary.contains("[REDACTED_VAULT_SECRET]"sv));
+
+    Array<u8, 16> bad_iter_salt {};
+    EXPECT(WebView::vault_derive_key_pbkdf2("passphrase"sv, bad_iter_salt.span(), 1000).is_error());
+    EXPECT(WebView::vault_derive_key_pbkdf2("passphrase"sv, bad_iter_salt.span(), 100'000'000).is_error());
 
     // 6. Audit file never contains secrets
     auto audit_path = LexicalPath::join(vault_dir, "audit.jsonl"sv).string();
@@ -2210,6 +2230,7 @@ TEST_CASE(mcp_security_policy_guards)
     auto yt_studio = URL::Parser::basic_parse("https://studio.youtube.com/"sv).value();
     auto evil = URL::Parser::basic_parse("https://evil.com/"sv).value();
     auto bank = URL::Parser::basic_parse("https://bank.com/"sv).value();
+    auto bank_fqdn = URL::Parser::basic_parse("https://bank.com./"sv).value();
     auto g_acct = URL::Parser::basic_parse("https://accounts.google.com/"sv).value();
 
     EXPECT(!WebView::mcp_validate_url_against_policy(yt_watch, policy).is_error());
@@ -2217,6 +2238,7 @@ TEST_CASE(mcp_security_policy_guards)
     EXPECT(!WebView::mcp_validate_url_against_policy(URL::about_blank(), policy).is_error());
     EXPECT(WebView::mcp_validate_url_against_policy(evil, policy).is_error());
     EXPECT(WebView::mcp_validate_url_against_policy(bank, policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(bank_fqdn, policy).is_error());
     EXPECT(WebView::mcp_validate_url_against_policy(g_acct, policy).is_error());
 
     EXPECT_EQ(MUST(WebView::mcp_resolve_container_against_policy(OptionalNone {}, policy)), "agent"sv);

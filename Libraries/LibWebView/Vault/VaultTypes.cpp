@@ -239,7 +239,7 @@ ErrorOr<ByteBuffer> vault_decrypt_aes_256_gcm(ReadonlyBytes key_32, ReadonlyByte
 
 ErrorOr<ByteBuffer> vault_derive_key_pbkdf2(StringView passphrase, ReadonlyBytes salt_16, u32 iterations)
 {
-    if (passphrase.is_empty() || salt_16.is_empty() || iterations == 0)
+    if (passphrase.is_empty() || salt_16.is_empty() || iterations < 100'000 || iterations > 10'000'000)
         return Error::from_string_literal("Invalid PBKDF2 parameters");
 
     auto key = TRY(ByteBuffer::create_uninitialized(32));
@@ -261,18 +261,18 @@ ErrorOr<ByteBuffer> vault_derive_key_pbkdf2(StringView passphrase, ReadonlyBytes
 static String replace_all_occurrences(StringView input, StringView needle, StringView replacement)
 {
     if (needle.is_empty() || input.is_empty() || !input.contains(needle))
-        return MUST(String::from_utf8(input));
+        return String::from_utf8_with_replacement_character(input, String::WithBOMHandling::No);
     auto bs = ByteString { input }.replace(needle, replacement, ReplaceMode::All);
-    return MUST(String::from_utf8(bs.view()));
+    return String::from_utf8_with_replacement_character(bs.view(), String::WithBOMHandling::No);
 }
 
 String scrub_secrets_from_string(StringView input, ReadonlySpan<String> secrets)
 {
     if (input.is_empty() || secrets.is_empty())
-        return MUST(String::from_utf8(input));
+        return String::from_utf8_with_replacement_character(input, String::WithBOMHandling::No);
 
     static constexpr auto redaction = "[REDACTED_VAULT_SECRET]"sv;
-    String current = MUST(String::from_utf8(input));
+    String current = String::from_utf8_with_replacement_character(input, String::WithBOMHandling::No);
     for (auto const& secret : secrets) {
         if (secret.bytes().size() < 4)
             continue;
@@ -295,6 +295,10 @@ String scrub_secrets_from_string(StringView input, ReadonlySpan<String> secrets)
 bool mcp_domain_matches_pattern(StringView host, StringView pattern)
 {
     auto pat = pattern.trim(" \t\r\n"sv);
+    while (pat.ends_with('.'))
+        pat = pat.substring_view(0, pat.length() - 1);
+    while (host.ends_with('.'))
+        host = host.substring_view(0, host.length() - 1);
     if (pat.is_empty() || host.is_empty())
         return false;
     if (pat == "*"sv)

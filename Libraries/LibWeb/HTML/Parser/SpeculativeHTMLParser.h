@@ -45,6 +45,7 @@ private:
     RustFfiPreloadScanner* m_scanner { nullptr };
     URL::URL m_base_url;
     URL::URL m_document_base_url;
+    bool m_has_seen_base_url { false };
     bool m_stopped { false };
 };
 

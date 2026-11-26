@@ -100,9 +100,13 @@ static ErrorOr<void> collect_skill_files_recursive(
         if (FileSystem::is_link(full_path))
             return IterationDecision::Continue;
 
+        auto entry_name = String::from_utf8(entry.name.view());
+        if (entry_name.is_error())
+            return IterationDecision::Continue;
+
         auto rel_path = rel_prefix.is_empty()
-            ? MUST(String::from_utf8(entry.name.view()))
-            : MUST(String::formatted("{}/{}", rel_prefix, entry.name));
+            ? entry_name.release_value()
+            : MUST(String::formatted("{}/{}", rel_prefix, entry_name.value()));
 
         if (!is_safe_skill_relative_path(rel_path))
             return IterationDecision::Continue;
@@ -366,9 +370,13 @@ ErrorOr<Vector<SkillDirectoryEntry>> SkillStore::read_skill_directory(StringView
         if (FileSystem::is_link(full_entry_path))
             return IterationDecision::Continue;
 
+        auto entry_name = String::from_utf8(entry.name.view());
+        if (entry_name.is_error())
+            return IterationDecision::Continue;
+
         auto child_rel = parsed->relative_path.is_empty()
-            ? MUST(String::from_utf8(entry.name.view()))
-            : MUST(String::formatted("{}/{}", parsed->relative_path, entry.name));
+            ? entry_name.value()
+            : MUST(String::formatted("{}/{}", parsed->relative_path, entry_name.value()));
 
         if (!is_safe_skill_relative_path(child_rel))
             return IterationDecision::Continue;
@@ -376,13 +384,13 @@ ErrorOr<Vector<SkillDirectoryEntry>> SkillStore::read_skill_directory(StringView
         if (entry.type == Core::DirectoryEntry::Type::Directory) {
             entries.append({
                 .uri = skill_uri(skill->name, child_rel),
-                .name = MUST(String::from_utf8(entry.name.view())),
+                .name = entry_name.release_value(),
                 .mime_type = "inode/directory"_string,
             });
         } else if (entry.type == Core::DirectoryEntry::Type::File) {
             entries.append({
                 .uri = skill_uri(skill->name, child_rel),
-                .name = MUST(String::from_utf8(entry.name.view())),
+                .name = entry_name.release_value(),
                 .mime_type = guess_skill_mime_type(child_rel),
             });
         }
@@ -412,23 +420,34 @@ ErrorOr<SkillDefinition> SkillStore::save_skill(SkillDefinition skill, Optional<
     if (supporting_files.has_value()) {
         if (supporting_files->size() + 1 > MAX_SKILL_FILES)
             return Error::from_string_literal("Too many files in skill (max 512)");
+        Vector<String> seen_lower_paths;
         for (auto const& f : *supporting_files) {
-            if (!is_safe_skill_relative_path(f.relative_path) || f.relative_path == "SKILL.md"sv)
+            if (!is_safe_skill_relative_path(f.relative_path) || f.relative_path.equals_ignoring_ascii_case("SKILL.md"sv))
                 return Error::from_string_literal("Invalid supporting file relative path");
+            auto lower_path = TRY(f.relative_path.to_lowercase());
+            if (seen_lower_paths.contains_slow(lower_path))
+                return Error::from_string_literal("Duplicate supporting file path (case-insensitive collision)");
+            seen_lower_paths.append(move(lower_path));
         }
     }
 
     auto dir_path = skill_directory_path(skill.name);
+    if (FileSystem::is_link(m_storage_directory) || FileSystem::is_link(dir_path))
+        return Error::from_string_literal("Symbolic links are not allowed as skill directories");
     TRY(Core::Directory::create(dir_path, Core::Directory::CreateDirectories::Yes));
+    auto canonical_skills_root = TRY(FileSystem::real_path(m_storage_directory));
+    auto canonical_skill_dir = TRY(FileSystem::real_path(dir_path));
+    if (!is_path_inside_root(canonical_skills_root, canonical_skill_dir))
+        return Error::from_string_literal("Skill directory escapes skills root");
 
     if (supporting_files.has_value()) {
         if (auto existing = m_skills.get(skill.name); existing.has_value()) {
             for (auto const& old_res : existing->resources) {
-                if (old_res.relative_path == "SKILL.md"sv)
+                if (old_res.relative_path.equals_ignoring_ascii_case("SKILL.md"sv))
                     continue;
                 bool kept = false;
                 for (auto const& next_f : *supporting_files) {
-                    if (next_f.relative_path == old_res.relative_path) {
+                    if (next_f.relative_path.equals_ignoring_ascii_case(old_res.relative_path)) {
                         kept = true;
                         break;
                     }
@@ -442,14 +461,26 @@ ErrorOr<SkillDefinition> SkillStore::save_skill(SkillDefinition skill, Optional<
 
         for (auto const& f : *supporting_files) {
             ByteString dest = dir_path;
-            for (auto seg : f.relative_path.bytes_as_string_view().split_view('/', SplitBehavior::Nothing))
+            for (auto seg : f.relative_path.bytes_as_string_view().split_view('/', SplitBehavior::Nothing)) {
                 dest = LexicalPath::join(dest, seg).string();
+                if (FileSystem::is_link(dest))
+                    return Error::from_string_literal("Symbolic links are not allowed inside skills");
+            }
+            auto parent_dir = LexicalPath { dest }.parent();
+            TRY(Core::Directory::create(parent_dir, Core::Directory::CreateDirectories::Yes));
+            auto canonical_parent = TRY(FileSystem::real_path(parent_dir.string()));
+            if (!is_path_inside_root(canonical_skill_dir, canonical_parent))
+                return Error::from_string_literal("Skill supporting file escapes skill directory");
+            if (FileSystem::is_link(dest))
+                return Error::from_string_literal("Symbolic links are not allowed inside skills");
             TRY(write_utf8_file(dest, f.content));
         }
     }
 
     auto rendered_md = render_skill_markdown(skill);
     auto skill_md_path = LexicalPath::join(dir_path, "SKILL.md"sv).string();
+    if (FileSystem::is_link(skill_md_path))
+        return Error::from_string_literal("Symbolic links are not allowed inside skills");
     TRY(write_utf8_file(skill_md_path, rendered_md));
 
     auto reloaded = load_skill_from_directory(skill.name);

@@ -293,7 +293,10 @@ GC::Ptr<DOM::Document> Location::relevant_document() const
     // A Location object has an associated relevant Document, which is this Location object's
     // relevant global object's browsing context's active document, if this Location object's
     // relevant global object's browsing context is non-null, and null otherwise.
-    auto browsing_context = window()->browsing_context();
+    auto win = window();
+    if (!win)
+        return nullptr;
+    auto browsing_context = win->browsing_context();
     return browsing_context ? browsing_context->active_document() : nullptr;
 }
 
@@ -810,15 +813,16 @@ WebIDL::ExceptionOr<void> Location::assign(Utf16String const& url)
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-location-ancestororigins
 WebIDL::ExceptionOr<GC::Ref<DOMStringList>> Location::ancestor_origins()
 {
+    if (remote_window())
+        return WebIDL::SecurityError::create("Location's relevant document is not same origin-domain with the entry settings object's origin"_utf16);
+
     auto const relevant_document = this->relevant_document();
     if (relevant_document && !relevant_document->origin().is_same_origin_domain(entry_settings_object().origin()))
         return WebIDL::SecurityError::create("Location's relevant document is not same origin-domain with the entry settings object's origin"_utf16);
 
     if (!m_ancestor_origins) {
         Vector<Utf16String> origins;
-        GC::Ptr<Navigable> navigable = relevant_document
-            ? GC::Ptr<Navigable> { relevant_document->navigable() }
-            : (remote_window() ? GC::Ptr<Navigable> { remote_window()->navigable() } : nullptr);
+        GC::Ptr<Navigable> navigable = relevant_document ? GC::Ptr<Navigable> { relevant_document->navigable() } : nullptr;
         if (navigable) {
             for (auto parent = navigable->parent(); parent; parent = parent->parent()) {
                 if (auto origin = parent->active_document_origin(); origin.has_value()) {

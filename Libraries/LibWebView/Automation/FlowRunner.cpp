@@ -16,6 +16,7 @@
 #include <LibWebCommon/HTML/ActivateTab.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
+#include <LibWebView/Vault/VaultTypes.h>
 #include <LibWebView/ViewImplementation.h>
 
 namespace WebView {
@@ -98,9 +99,9 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
             return Error::from_string_literal("Cannot run automation flow inside an internal about: page; select a web tab or open a new tab");
         resolved_tab_id = view->view_id();
     } else if (request.open_new_tab) {
-        auto view = m_application.open_automation_tab(Web::HTML::ActivateTab::Yes);
+        auto view = m_application.open_automation_tab(Web::HTML::ActivateTab::Yes, request.require_mcp_permission);
         if (!view.has_value())
-            return Error::from_string_literal("UI unavailable to open a new automation tab");
+            return Error::from_string_literal("UI unavailable, tab limit reached, or policy denied opening a new automation tab");
         resolved_tab_id = view->view_id();
         opened_tab = true;
     } else {
@@ -220,6 +221,12 @@ void FlowRunner::run_next_step(String const& run_id)
             return;
         }
         auto url = parsed.release_value();
+        if (run.require_mcp_permission) {
+            if (auto policy_check = mcp_validate_url_against_policy(url, m_application.mcp_security_policy()); policy_check.is_error()) {
+                fail_run(run_id, MUST(String::formatted("{}", policy_check.error())));
+                return;
+            }
+        }
         if (step.wait_for_load && url != URL::about_blank()) {
             run.nav_wait_id = m_application.start_automation_navigation_wait(run.tab_id, timeout_ms, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission](ErrorOr<void> result) {
                 if (!weak_self)
@@ -311,6 +318,12 @@ void FlowRunner::run_next_step(String const& run_id)
     case FlowStep::Action::Fill:
     case FlowStep::Action::AssertText:
     case FlowStep::Action::Extract: {
+        if (run.require_mcp_permission
+            && (step.action == FlowStep::Action::Extract || step.action == FlowStep::Action::AssertText)
+            && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+            fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab until navigation commits to a new document"_string);
+            return;
+        }
         auto locator = interpolate_locator(*step.locator, run.runtime_vars);
         JsonObject params;
         if (step.action == FlowStep::Action::Fill) {
@@ -359,6 +372,16 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::Eval: {
+        if (run.require_mcp_permission) {
+            if (m_application.mcp_security_policy().disable_eval_js) {
+                fail_run(run_id, "Flow eval step is disabled by --mcp-disable-eval-js policy"_string);
+                return;
+            }
+            if (m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+                fail_run(run_id, "Blocked by credential vault quarantine: eval is disabled on this tab until navigation commits to a new document"_string);
+                return;
+            }
+        }
         JsonObject vars_json;
         for (auto const& [k, v] : run.runtime_vars)
             vars_json.set(k, v);
@@ -383,6 +406,10 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::Screenshot: {
+        if (run.require_mcp_permission && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+            fail_run(run_id, "Blocked by credential vault quarantine: screenshot is disabled on this tab until navigation commits to a new document"_string);
+            return;
+        }
         m_application.enqueue_automation_webdriver_command(run.tab_id, "take_screenshot"_string, JsonValue {}, {}, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx](Web::WebDriver::Response response) {
             if (!weak_self)
                 return;

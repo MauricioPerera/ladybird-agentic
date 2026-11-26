@@ -213,9 +213,9 @@ static String status_to_error_string(Optional<Requests::NetworkError> const& net
     return MUST(String::formatted("Received error response code {} while downloading file", *response_code));
 }
 
-u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination)
+u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination, String container_id)
 {
-    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination);
+    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination, move(container_id));
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -242,7 +242,7 @@ void FileDownloader::start_download_request(u64 download_id, URL::URL const& url
     auto request_headers = HTTP::HeaderList::create();
     request_headers->set({ "User-Agent"sv, Web::default_user_agent });
 
-    auto client = Application::request_server_client(download->is_private);
+    auto client = Application::request_server_client(download->is_private, download->container_id);
     if (client.is_error()) {
         fail_download(download_id, MUST(String::formatted("Unable to launch RequestServer: {}", client.error())));
         return;
@@ -287,14 +287,14 @@ void FileDownloader::follow_download_redirect(u64 download_id, HTTP::HeaderList 
 }
 
 u64 FileDownloader::adopt_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, HTTP::Cookie::SameSiteContext same_site_context, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data,
-    ResponseFinished on_response_finished)
+    ResponseFinished on_response_finished, String container_id)
 {
     ScopeGuard report_failure = [&] {
         if (on_response_finished)
             on_response_finished(0, nullptr,
                 "Unable to adopt the download response"sv);
     };
-    auto download_id = start_download(is_private, url, move(destination), total_size);
+    auto download_id = start_download(is_private, url, move(destination), total_size, MayReplaceDestination::No, move(container_id));
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -631,7 +631,7 @@ void FileDownloader::start_segment_request(u64 download_id, size_t segment_index
 
     segment.request_is_ranged = true;
 
-    auto client = Application::request_server_client(download->is_private);
+    auto client = Application::request_server_client(download->is_private, download->container_id);
     if (client.is_error()) {
         fail_download(download_id, MUST(String::formatted("Unable to launch RequestServer: {}", client.error())));
         return;
@@ -948,13 +948,14 @@ void FileDownloader::restart_download_from_zero(u64 download_id, String reason_i
     start_download_request(download_id, active->effective_url);
 }
 
-u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination)
+u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination, String container_id)
 {
     auto download_id = m_next_download_id++;
 
     m_downloads.append(Download {
         .id = download_id,
         .is_private = is_private,
+        .container_id = move(container_id),
         .url = url,
         .destination = move(destination),
         .total_size = total_size,
@@ -1479,6 +1480,7 @@ bool FileDownloader::restore_persisted_download(DownloadRecord& record)
     m_downloads.append(Download {
         .id = id,
         .is_private = IsPrivate::No,
+        .container_id = {},
         .url = url.release_value(),
         .destination = LexicalPath { record.destination.to_byte_string() },
         .status = DownloadStatus::Paused,

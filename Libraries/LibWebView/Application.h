@@ -142,7 +142,7 @@ public:
     static RequestServerManager& request_server_manager() { return *the().m_request_server_manager; }
     static ImageDecoderManager& image_decoder_manager() { return *the().m_image_decoder_manager; }
     // The UI process's own client of the session's RequestServer with no site.
-    static ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client(IsPrivate = IsPrivate::No);
+    static ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client(IsPrivate = IsPrivate::No, StringView container_id = {});
     // The control connection of the default session's RequestServer with no site.
     static Requests::RequestControlClient& request_server_control_client();
 
@@ -443,7 +443,7 @@ public:
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
-    Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab) const;
+    Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab, bool require_mcp_permission = false) const;
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
     u64 start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete);
     void cancel_automation_navigation_wait(u64 wait_id);

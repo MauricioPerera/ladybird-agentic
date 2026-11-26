@@ -9,11 +9,13 @@
 #include <AK/JsonObject.h>
 #include <AK/LexicalPath.h>
 #include <AK/QuickSort.h>
+#include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <LibCore/Directory.h>
 #include <LibCore/File.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibWebView/Vault/VaultStore.h>
+#include <cstring>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <stdlib.h>
@@ -33,8 +35,18 @@ static ErrorOr<void> write_bytes_file(ByteString const& path, ReadonlyBytes byte
 {
     auto parent = LexicalPath { path }.parent();
     TRY(Core::Directory::create(parent, Core::Directory::CreateDirectories::Yes));
-    auto file = TRY(Core::File::open(path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate, mode));
-    TRY(file->write_until_depleted(bytes));
+    auto tmp_path = ByteString::formatted("{}.tmp", path);
+    bool moved = false;
+    ScopeGuard cleanup_tmp = [&] {
+        if (!moved)
+            (void)FileSystem::remove(tmp_path, FileSystem::RecursionMode::Disallowed);
+    };
+    {
+        auto file = TRY(Core::File::open(tmp_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate, mode));
+        TRY(file->write_until_depleted(bytes));
+    }
+    TRY(FileSystem::move_file(path, tmp_path));
+    moved = true;
     return {};
 }
 
@@ -55,6 +67,7 @@ VaultStore::~VaultStore()
         OPENSSL_cleanse(m_master_key.data(), m_master_key.size());
     if (!m_kdf_salt.is_empty())
         OPENSSL_cleanse(m_kdf_salt.data(), m_kdf_salt.size());
+    m_passphrase.clear();
     for (auto& [_, cred] : m_credentials) {
         if (!cred.password.bytes().is_empty())
             cred.password = {};
@@ -196,6 +209,8 @@ ErrorOr<void> VaultStore::load_encrypted_vault()
             return Error::from_string_literal("Missing salt_b64 in passphrase-encrypted vault");
         m_kdf_salt = TRY(decode_base64(*salt_b64));
         u32 iterations = obj.get_integer<u32>("iterations"sv).value_or(VAULT_PBKDF2_ITERATIONS);
+        if (iterations < 100'000 || iterations > 10'000'000)
+            return Error::from_string_literal("Invalid PBKDF2 iteration count in vault");
         m_master_key = TRY(vault_derive_key_pbkdf2(*m_passphrase, m_kdf_salt.bytes(), iterations));
     } else {
         TRY(ensure_master_key_for_save());
@@ -485,10 +500,16 @@ ErrorOr<void> VaultStore::delete_credential(StringView id)
         return Error::from_string_literal("Vault is locked");
     if (!is_valid_vault_credential_id(id))
         return Error::from_string_literal("Invalid credential 'id'");
-    if (!m_credentials.remove(id))
+    auto existing_cred = m_credentials.get(id);
+    if (!existing_cred.has_value())
         return Error::from_string_literal("Credential not found");
+    auto backup = *existing_cred;
+    m_credentials.remove(id);
 
-    TRY(save_encrypted_vault());
+    if (auto save_res = save_encrypted_vault(); save_res.is_error()) {
+        m_credentials.set(backup.id, move(backup));
+        return save_res.release_error();
+    }
     record_audit("delete_credential"_string, MUST(String::from_utf8(id)), String {}, String {}, true, "Credential deleted"_string);
     notify_vault_changed();
     return {};

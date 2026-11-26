@@ -1746,7 +1746,8 @@ void CanonicalTraversable::did_activate_history_entry(HistoryOperation& operatio
 
     if (&navigable == this) {
         if (auto view = this->view(); view.has_value()) {
-            if (&navigable.active_document() != replaced_document)
+            bool const did_change_document = &navigable.active_document() != replaced_document;
+            if (did_change_document)
                 view->did_change_active_document({});
             // NB: The address bar can already show a pending navigation's URL while the old document
             //     is still visible. Only apply the destination's zoom after its document is activated.
@@ -1755,8 +1756,12 @@ void CanonicalTraversable::did_activate_history_entry(HistoryOperation& operatio
             view->m_external_url_request_policy.clear_page_request_allowance();
             if (view->on_top_level_navigation_commit)
                 view->on_top_level_navigation_commit();
-            if (Application::is_initialized() && target_entry.url.scheme().is_one_of("http"sv, "https"sv))
-                Application::the().did_start_load_for_extensions(*view, target_entry.url);
+            if (did_change_document) {
+                if (target_entry.url.scheme() == "about"sv && target_entry.url != URL::about_blank())
+                    view->set_mcp_access_allowed(false);
+                if (Application::is_initialized())
+                    Application::the().did_start_load_for_extensions(*view, target_entry.url);
+            }
         }
     }
 }

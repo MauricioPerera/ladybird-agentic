@@ -32,6 +32,42 @@ bool is_valid_skill_name(StringView name)
     return true;
 }
 
+static bool is_windows_reserved_filename(StringView segment)
+{
+    auto dot = segment.find('.');
+    auto stem = dot.has_value() ? segment.substring_view(0, *dot) : segment;
+    static constexpr Array reserved = {
+        "CON"sv, "PRN"sv, "AUX"sv, "NUL"sv,
+        "COM1"sv, "COM2"sv, "COM3"sv, "COM4"sv, "COM5"sv, "COM6"sv, "COM7"sv, "COM8"sv, "COM9"sv,
+        "LPT1"sv, "LPT2"sv, "LPT3"sv, "LPT4"sv, "LPT5"sv, "LPT6"sv, "LPT7"sv, "LPT8"sv, "LPT9"sv
+    };
+    for (auto candidate : reserved) {
+        if (stem.equals_ignoring_ascii_case(candidate))
+            return true;
+    }
+    return false;
+}
+
+static bool is_valid_skill_frontmatter_key(StringView key)
+{
+    if (key.is_empty() || key.length() > 64)
+        return false;
+    for (auto byte : key.bytes()) {
+        bool ok = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '-';
+        if (!ok)
+            return false;
+    }
+    static constexpr Array reserved_keys = {
+        "name"sv, "description"sv, "enabled"sv, "matches"sv,
+        "license"sv, "compatibility"sv, "metadata"sv, "allowed-tools"sv, "match_urls"sv
+    };
+    for (auto reserved : reserved_keys) {
+        if (key.equals_ignoring_ascii_case(reserved))
+            return false;
+    }
+    return true;
+}
+
 bool is_safe_skill_relative_path(StringView path)
 {
     if (path.is_empty() || path.starts_with('/') || path.ends_with('/'))
@@ -44,6 +80,8 @@ bool is_safe_skill_relative_path(StringView path)
     }
     for (auto segment : path.split_view('/', SplitBehavior::KeepEmpty)) {
         if (segment.is_empty() || segment == "."sv || segment == ".."sv)
+            return false;
+        if (segment.ends_with('.') || segment.ends_with(' ') || is_windows_reserved_filename(segment))
             return false;
     }
     return true;
@@ -634,17 +672,30 @@ ErrorOr<SkillDefinition> parse_skill_json(JsonValue const& value, Vector<SkillSu
         }
     }
 
+    Optional<Error> frontmatter_error;
     if (auto extra = obj.get_object("extraFrontmatter"sv); extra.has_value()) {
         extra->for_each_member([&](String const& k, JsonValue const& v) {
-            if (k != "name"sv && k != "description"sv && k != "enabled"sv && k != "matches"sv)
-                skill.extra_frontmatter.set(k, v);
+            if (frontmatter_error.has_value())
+                return;
+            if (!is_valid_skill_frontmatter_key(k)) {
+                frontmatter_error = Error::from_string_literal("Invalid or reserved key in 'extraFrontmatter'");
+                return;
+            }
+            skill.extra_frontmatter.set(k, v);
         });
     } else if (auto extra_snake = obj.get_object("extra_frontmatter"sv); extra_snake.has_value()) {
         extra_snake->for_each_member([&](String const& k, JsonValue const& v) {
-            if (k != "name"sv && k != "description"sv && k != "enabled"sv && k != "matches"sv)
-                skill.extra_frontmatter.set(k, v);
+            if (frontmatter_error.has_value())
+                return;
+            if (!is_valid_skill_frontmatter_key(k)) {
+                frontmatter_error = Error::from_string_literal("Invalid or reserved key in 'extra_frontmatter'");
+                return;
+            }
+            skill.extra_frontmatter.set(k, v);
         });
     }
+    if (frontmatter_error.has_value())
+        return frontmatter_error.release_value();
 
     auto files_arr = obj.get_array("supportingFiles"sv);
 
@@ -652,6 +703,7 @@ ErrorOr<SkillDefinition> parse_skill_json(JsonValue const& value, Vector<SkillSu
         u64 total_bytes = skill.body.bytes().size() + 512;
         if (arr.size() + 1 > MAX_SKILL_FILES)
             return Error::from_string_literal("Too many files in skill (max 512)");
+        Vector<String> seen_lower_paths;
         for (auto const& entry : arr.values()) {
             if (!entry.is_object())
                 return Error::from_string_literal("Each supporting file must be an object with 'path' and 'content'");
@@ -659,8 +711,12 @@ ErrorOr<SkillDefinition> parse_skill_json(JsonValue const& value, Vector<SkillSu
             auto path = fobj.get_string("path"sv).copy();
             if (!path.has_value())
                 path = fobj.get_string("relative_path"sv).copy();
-            if (!path.has_value() || !is_safe_skill_relative_path(*path) || *path == "SKILL.md"sv)
+            if (!path.has_value() || !is_safe_skill_relative_path(*path) || path->equals_ignoring_ascii_case("SKILL.md"sv))
                 return Error::from_string_literal("Invalid supporting file relative path");
+            auto lower_path = TRY(path->to_lowercase());
+            if (seen_lower_paths.contains_slow(lower_path))
+                return Error::from_string_literal("Duplicate supporting file path (case-insensitive collision)");
+            seen_lower_paths.append(move(lower_path));
             auto content = fobj.get_string("content"sv).value_or(String {});
             total_bytes += content.bytes().size();
             if (total_bytes > MAX_SKILL_TOTAL_BYTES)

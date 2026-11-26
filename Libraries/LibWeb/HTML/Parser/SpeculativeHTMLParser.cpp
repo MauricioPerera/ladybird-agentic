@@ -77,8 +77,12 @@ void SpeculativeHTMLParser::take_unscanned_input(RustFfiTokenizerHandle* tokeniz
     m_document_base_url = base_url;
 
     // NB: A scan that starts over leaves behind any base element the last one found ahead of the parser.
-    if (!rust_html_preload_scanner_append_parser_input(m_scanner, tokenizer, start_over))
+    if (!rust_html_preload_scanner_append_parser_input(m_scanner, tokenizer, start_over)) {
         m_base_url = base_url;
+        m_has_seen_base_url = m_document->first_base_element_with_href_in_tree_order() != nullptr;
+    } else if (start_over) {
+        m_has_seen_base_url = m_document->first_base_element_with_href_in_tree_order() != nullptr;
+    }
 }
 
 void SpeculativeHTMLParser::run()
@@ -267,7 +271,8 @@ void issue_speculative_module_fetch(DOM::Document& document, URL::URL const& url
 void issue_speculative_modulepreload_fetch(DOM::Document& document, URL::URL const& url, RustFfiPreloadScannerEntry const& entry)
 {
     auto destination = destination_from_preload_scanner(entry.destination);
-    VERIFY(destination.has_value());
+    if (!destination.has_value())
+        return;
 
     // The link's script fetch options have parser metadata "not-parser-inserted".
     issue_speculative_module_fetch(document, url, entry, *destination, Fetch::Infrastructure::Request::ParserMetadata::NotParserInserted);
@@ -296,8 +301,13 @@ void SpeculativeHTMLParser::process_preload_scanner_entry(RustFfiPreloadScannerE
         // 1. If the speculative HTML parser encounters one of the following elements, then act as if that
         //    element is processed for the purpose of its effect on subsequent speculative fetches.
         //    - A base element.
-        if (auto parsed = m_document->encoding_parse_url(Utf16String::from_utf16(url_view)); parsed.has_value())
+        // Per HTML spec, only the first <base href> element establishes the document base URL.
+        if (m_has_seen_base_url)
+            return;
+        if (auto parsed = m_document->encoding_parse_url(Utf16String::from_utf16(url_view)); parsed.has_value()) {
             m_base_url = parsed.release_value();
+            m_has_seen_base_url = true;
+        }
         return;
 
     case RustFfiPreloadScannerAction::Fetch:

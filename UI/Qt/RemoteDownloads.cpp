@@ -21,6 +21,7 @@ static RemoteDownloads::Download download_from(Hub::DownloadState const& state)
     return {
         .id = state.id,
         .is_private = state.is_private,
+        .container_id = {},
         .url = state.url,
         .destination = LexicalPath { state.destination },
         .status = state.status,
