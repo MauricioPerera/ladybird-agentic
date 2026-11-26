@@ -592,6 +592,35 @@ void BrowserWindow::initialize_ladybird_menu()
     m_ladybird_menu->addAction(application.new_window_action());
     m_ladybird_menu->addAction(application.new_private_window_action());
     m_ladybird_menu->addAction(application.reopen_recently_closed_tab_action());
+    if (m_is_private == WebView::IsPrivate::No) {
+        auto* container_menu = m_ladybird_menu->addMenu("New Container Tab");
+        QObject::connect(container_menu, &QMenu::aboutToShow, this, [this, container_menu]() {
+            container_menu->clear();
+            auto& app = Application::the();
+            for (auto const& container : app.containers()) {
+                auto* action = container_menu->addAction(Application::container_dot_icon(container.color), qstring_from_ak_string(container.name));
+                QObject::connect(action, &QAction::triggered, this, [this, id = container.id]() {
+                    open_new_tab_in_container(id);
+                });
+            }
+            if (!app.containers().is_empty())
+                container_menu->addSeparator();
+            auto* create_action = container_menu->addAction("New Container...");
+            QObject::connect(create_action, &QAction::triggered, this, [this]() {
+                if (auto created = Application::the().prompt_create_container(this); created.has_value())
+                    open_new_tab_in_container(created->id);
+            });
+            if (!app.containers().is_empty()) {
+                auto* delete_menu = container_menu->addMenu("Delete Container");
+                for (auto const& container : app.containers()) {
+                    auto* del_action = delete_menu->addAction(Application::container_dot_icon(container.color), qstring_from_ak_string(container.name));
+                    QObject::connect(del_action, &QAction::triggered, this, [id = container.id]() {
+                        (void)Application::the().delete_container(id);
+                    });
+                }
+            }
+        });
+    }
     if (m_is_private == WebView::IsPrivate::Yes) {
         auto* restart_private_session_action = m_ladybird_menu->addAction("Start a Fresh Private Session…");
         QObject::connect(restart_private_session_action, &QAction::triggered, this, [this] {
@@ -760,9 +789,9 @@ void BrowserWindow::update_mcp_banner()
     m_mcp_banner->show();
 }
 
-Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab, TabLocation location)
+Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab, TabLocation location, String container_id)
 {
-    auto& tab = create_new_tab(activate_tab, location);
+    auto& tab = create_new_tab(activate_tab, location, AK::move(container_id));
     tab.navigate(url);
     return tab;
 }
@@ -773,6 +802,14 @@ void BrowserWindow::open_new_tab()
     //     is, rather than fading in again.
     auto focus_ring_transition = focus_is_in_location_edit_of(*this) ? Tab::FocusRingTransition::Immediate : Tab::FocusRingTransition::FadeIn;
     auto& tab = new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, TabLocation::end());
+    tab.set_url_is_hidden(true);
+    tab.focus_location_editor(focus_ring_transition);
+}
+
+void BrowserWindow::open_new_tab_in_container(String container_id)
+{
+    auto focus_ring_transition = focus_is_in_location_edit_of(*this) ? Tab::FocusRingTransition::Immediate : Tab::FocusRingTransition::FadeIn;
+    auto& tab = new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, TabLocation::end(), AK::move(container_id));
     tab.set_url_is_hidden(true);
     tab.focus_location_editor(focus_ring_transition);
 }
@@ -798,7 +835,7 @@ void BrowserWindow::duplicate_tab(Tab& source_tab, Web::HTML::ActivateTab activa
             fallback_url = WebView::display_url_for_session_history_entry(*top_level_entry);
     }
 
-    auto& duplicate = create_new_tab(activate_tab, TabLocation::after_tab(source_tab));
+    auto& duplicate = create_new_tab(activate_tab, TabLocation::after_tab(source_tab), source_tab.container_id());
     if (!history.has_value() || duplicate.view().restore_session_history_from_snapshot(history.release_value()).is_error())
         duplicate.navigate(fallback_url);
 }
@@ -848,6 +885,7 @@ Tab& BrowserWindow::create_restored_tab(RestoredSessionTab const& restored, int 
             .favicon = entry.has_value() && entry->favicon_png.has_value() ? favicon_from_png(entry->favicon_png->bytes(), TAB_ICON_SIZE) : QIcon {},
             .history = {},
             .discarded_tab_state_id = {},
+            .container_id = restored.container_id,
         };
         auto* tab = new Tab(this, AK::move(deferred_tab));
         tab->set_pinned(restored.pinned);
@@ -857,7 +895,7 @@ Tab& BrowserWindow::create_restored_tab(RestoredSessionTab const& restored, int 
         return *tab;
     }
 
-    auto* tab = new Tab(this);
+    auto* tab = new Tab(this, Optional<u64> {}, restored.container_id);
     // The tab already has a row, so initialize_tab() doesn't register a new one.
     tab->set_session_tab_id(restored.tab_id);
     tab->set_pinned(restored.pinned);
@@ -909,11 +947,11 @@ bool BrowserWindow::has_chrome_in_titlebar()
     return use_native_macos_window_controls() || uses_client_side_decorations();
 }
 
-Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation location)
+Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation location, String container_id)
 {
     cancel_window_close_preflight();
 
-    auto* tab = new Tab(this);
+    auto* tab = new Tab(this, Optional<u64> {}, AK::move(container_id));
 
     if (m_current_tab == nullptr) {
         set_current_tab(tab);
@@ -963,6 +1001,7 @@ void BrowserWindow::initialize_tab(Tab* tab)
             .initial_url = {},
             .insertion_index = insertion_index >= 0 ? Optional<i64> { insertion_index } : Optional<i64> {},
             .is_active = m_current_tab == tab ? SessionStore::IsActive::Yes : SessionStore::IsActive::No,
+            .container_id = tab->container_id(),
         };
         auto session_tab_id = session().tab_opened(AK::move(opened));
         if (session_tab_id.is_error())

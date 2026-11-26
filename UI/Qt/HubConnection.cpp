@@ -268,9 +268,9 @@ void HubConnection::view_request_dictionary_lookup(u64 view_id, WebView::Diction
         view->on_request_dictionary_lookup(lookup, position);
 }
 
-void HubConnection::app_open_url_in_new_tab(URL::URL url, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private)
+void HubConnection::app_open_url_in_new_tab(URL::URL url, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private, String container_id)
 {
-    Application::the().open_url_in_new_tab(url, activate_tab, source_view_id, is_private);
+    Application::the().open_url_in_new_tab(url, activate_tab, source_view_id, is_private, move(container_id));
 }
 
 void HubConnection::app_open_url_in_new_window(URL::URL url, WebView::IsPrivate is_private)
@@ -278,9 +278,9 @@ void HubConnection::app_open_url_in_new_window(URL::URL url, WebView::IsPrivate 
     Application::the().open_url_in_new_window(move(url), move(is_private));
 }
 
-void HubConnection::app_open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor navigation, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private)
+void HubConnection::app_open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor navigation, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private, String container_id)
 {
-    Application::the().open_navigation_in_new_tab(move(navigation), activate_tab, source_view_id, is_private);
+    Application::the().open_navigation_in_new_tab(move(navigation), activate_tab, source_view_id, is_private, move(container_id));
 }
 
 void HubConnection::app_open_navigation_in_new_window(Web::HTML::PreparedNavigationDescriptor navigation, WebView::IsPrivate is_private)
@@ -356,6 +356,11 @@ void HubConnection::app_open_view_in_new_tab(u64 view_id, Optional<u64> source_v
 void HubConnection::app_display_error_dialog(String message)
 {
     Application::the().display_error_dialog(message);
+}
+
+void HubConnection::containers_changed(Vector<Hub::TabContainerInfo> containers)
+{
+    Application::the().set_containers(move(containers));
 }
 
 void HubConnection::app_display_openssl_mismatch(String curl_openssl_version, String linked_openssl_version)

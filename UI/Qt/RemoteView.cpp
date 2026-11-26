@@ -43,6 +43,7 @@ RemoteView::RemoteView(Optional<u64> view_id, Hub::View::InitialState initial_st
     } else {
         auto view = HubConnection::the().create_view({
             .is_private = initial_state.is_private,
+            .container_id = initial_state.container_id,
             .device_pixel_ratio = initial_state.device_pixel_ratio,
             .maximum_frames_per_second = initial_state.maximum_frames_per_second,
             .display_id = initial_state.display_id,

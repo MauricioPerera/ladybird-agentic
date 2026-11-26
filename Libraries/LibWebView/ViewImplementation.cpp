@@ -123,9 +123,9 @@ void ViewImplementation::did_leave_owners_tab(Badge<PictureInPictureWindow>)
     });
 }
 
-ViewImplementation::ViewImplementation(IsPrivate is_private)
+ViewImplementation::ViewImplementation(IsPrivate is_private, String container_id)
     : m_is_private(is_private)
-    , m_session(Application::session_for_new_view(is_private))
+    , m_session(Application::session_for_new_view(is_private, container_id))
     , m_document_cookie_version_buffer(Core::create_shared_version_buffer())
     , m_view_id(s_view_count++)
 {
@@ -3757,7 +3757,7 @@ void ViewImplementation::initialize_tab(Web::HTML::VisibilityState system_visibi
 {
     if (!traversable.has_value()) {
         // FIXME: Fail to open the tab, rather than crashing the whole application if this fails.
-        auto page = MUST(Application::the().open_page_for_new_tab(m_is_private));
+        auto page = MUST(Application::the().open_page_for_new_tab(session()));
         traversable = page->traversable();
     }
     display_traversable(*traversable, system_visibility_state);

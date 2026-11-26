@@ -73,6 +73,7 @@ set(TEST_SOURCES
     TestAutomationFlows.cpp
     TestBackgroundNetworking.cpp
     TestCanonicalBrowsingContextGroup.cpp
+    TestContainers.cpp
     TestCookieJar.cpp
     TestCrashReportDiagnostics.cpp
     TestDownloadSegmentation.cpp

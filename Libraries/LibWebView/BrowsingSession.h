@@ -31,10 +31,12 @@ class WEBVIEW_API BrowsingSession
     : public RefCounted<BrowsingSession>
     , public Weakable<BrowsingSession> {
 public:
-    static NonnullRefPtr<BrowsingSession> create(IsPrivate);
+    static NonnullRefPtr<BrowsingSession> create(IsPrivate, String container_id = {});
     ~BrowsingSession();
 
     IsPrivate is_private() const { return m_is_private; }
+    String const& container_id() const { return m_container_id; }
+    bool is_container() const { return !m_container_id.is_empty(); }
 
     // No two sessions of the application share an ID.
     u64 id() const { return m_id; }
@@ -65,10 +67,11 @@ public:
     Vector<CertificateException> trusted_certificates;
 
 private:
-    explicit BrowsingSession(IsPrivate);
+    BrowsingSession(IsPrivate, String container_id);
 
     u64 m_id { 0 };
     IsPrivate m_is_private { IsPrivate::No };
+    String m_container_id;
 };
 
 }

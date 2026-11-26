@@ -72,7 +72,7 @@ private:
     public:
         using Cookies = HashMap<CookieStorageKey, HTTP::Cookie::Cookie>;
 
-        explicit TransientStorage(IsPrivate);
+        TransientStorage(CookieJar const* owner_jar);
 
         void set_cookies(Cookies);
         void set_cookie(CookieStorageKey, HTTP::Cookie::Cookie);
@@ -107,7 +107,7 @@ private:
         using CookieEntry = decltype(declval<Cookies>().take_all_matching(nullptr))::ValueType;
         void send_cookie_changed_notifications(ReadonlySpan<CookieEntry>, bool inform_web_view_about_changed_domains = true);
 
-        IsPrivate m_is_private { IsPrivate::No };
+        CookieJar const* m_owner_jar { nullptr };
         Cookies m_cookies;
         Cookies m_dirty_cookies;
     };
@@ -121,7 +121,7 @@ private:
         RefPtr<Core::Timer> synchronization_timer {};
     };
 
-    CookieJar(Optional<PersistedStorage>, IsPrivate);
+    CookieJar(Optional<PersistedStorage>);
 
     AK_MAKE_NONCOPYABLE(CookieJar);
     AK_MAKE_NONMOVABLE(CookieJar);

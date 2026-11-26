@@ -107,13 +107,18 @@
 
 #include <QAction>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileOpenEvent>
 #include <QFont>
+#include <QFormLayout>
 #include <QKeySequence>
+#include <QLineEdit>
 #include <QLocale>
 #include <QLoggingCategory>
 #include <QMenu>
@@ -121,12 +126,14 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMimeDatabase>
+#include <QPainter>
 #include <QPointer>
 #include <QSaveFile>
 #include <QScreen>
 #include <QShortcut>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QVBoxLayout>
 
 #if defined(AK_OS_MACOS)
 #    include <QUtiMimeConverter>
@@ -997,6 +1004,7 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
         .mcp_enabled = state.mcp_enabled,
     });
     RemoteDownloads::the().set_downloads(state.downloads);
+    set_containers(move(state.containers));
 
     create_platform_actions();
 
@@ -1319,6 +1327,12 @@ void Application::create_platform_actions()
     m_gpu_painting_enabled = hub.compositor_gpu_painting_enabled();
 
     RemoteDownloads::the().set_downloads(Hub::ConnectionFromUI::downloads());
+    {
+        Vector<Hub::TabContainerInfo> initial_containers;
+        for (auto const& container : WebView::Application::container_store().list_containers())
+            initial_containers.append({ .id = container.id, .name = container.name, .color = container.color });
+        set_containers(move(initial_containers));
+    }
 #endif
     if (auto* hub = HubConnection::the_if_connected())
         hub->set_settings_from_hub(m_settings->serialize_json());
@@ -1854,6 +1868,137 @@ WindowConfiguration Application::configuration_for_new_window() const
     return configuration;
 }
 
+void Application::set_containers(Vector<Hub::TabContainerInfo> containers)
+{
+    m_containers = move(containers);
+    update_tabs_display();
+}
+
+Optional<Hub::TabContainerInfo> Application::find_container(StringView id) const
+{
+    for (auto const& container : m_containers) {
+        if (container.id == id)
+            return container;
+    }
+    return {};
+}
+
+ErrorOr<Hub::TabContainerInfo> Application::create_container(String name, String color)
+{
+#ifdef LADYBIRD_HUB_IN_OWN_PROCESS
+    auto response = HubConnection::the().create_container(move(name), move(color));
+    if (response.error().has_value())
+        return Error::from_string_view(*response.error());
+    if (!response.container().has_value())
+        return Error::from_string_literal("Failed to create container");
+    auto created = response.container().release_value();
+    bool exists = any_of(m_containers, [&](auto const& existing) { return existing.id == created.id; });
+    if (!exists)
+        m_containers.append(created);
+    return created;
+#else
+    auto created = TRY(WebView::Application::container_store().create_container(move(name), move(color)));
+    Hub::TabContainerInfo info { .id = created.id, .name = created.name, .color = created.color };
+    Vector<Hub::TabContainerInfo> updated;
+    for (auto const& container : WebView::Application::container_store().list_containers())
+        updated.append({ .id = container.id, .name = container.name, .color = container.color });
+    set_containers(move(updated));
+    return info;
+#endif
+}
+
+ErrorOr<void> Application::delete_container(StringView id)
+{
+#ifdef LADYBIRD_HUB_IN_OWN_PROCESS
+    auto response = HubConnection::the().delete_container(TRY(String::from_utf8(id)));
+    if (response.has_value())
+        return Error::from_string_view(*response);
+    m_containers.remove_all_matching([&](auto const& container) { return container.id == id; });
+    update_tabs_display();
+    return {};
+#else
+    TRY(WebView::Application::the().delete_container(id));
+    Vector<Hub::TabContainerInfo> updated;
+    for (auto const& container : WebView::Application::container_store().list_containers())
+        updated.append({ .id = container.id, .name = container.name, .color = container.color });
+    set_containers(move(updated));
+    return {};
+#endif
+}
+
+QIcon Application::container_dot_icon(StringView hex_color)
+{
+    QPixmap pixmap(14, 14);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QColor color(qstring_from_ak_string(hex_color));
+    if (!color.isValid())
+        color = QColor(59, 130, 246);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    painter.drawEllipse(QRectF(2.0, 2.0, 10.0, 10.0));
+    return QIcon(pixmap);
+}
+
+Optional<Hub::TabContainerInfo> Application::prompt_create_container(QWidget* parent)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle("New Container");
+    dialog.setMinimumWidth(300);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout;
+    auto* name_edit = new QLineEdit(&dialog);
+    name_edit->setPlaceholderText("e.g. YouTube, Correo, Trabajo");
+    name_edit->setMaxLength(64);
+    form->addRow("Name:", name_edit);
+
+    struct PresetColor {
+        char const* label;
+        char const* hex;
+    };
+    static constexpr PresetColor presets[] = {
+        { "Blue", "#3b82f6" },
+        { "Orange", "#f97316" },
+        { "Green", "#10b981" },
+        { "Pink", "#ec4899" },
+        { "Purple", "#8b5cf6" },
+        { "Red", "#ef4444" },
+        { "Teal", "#14b8a6" },
+        { "Yellow", "#eab308" },
+    };
+
+    auto* color_combo = new QComboBox(&dialog);
+    for (auto const& preset : presets)
+        color_combo->addItem(container_dot_icon(StringView { preset.hex, strlen(preset.hex) }), preset.label, QString::fromUtf8(preset.hex));
+    form->addRow("Color:", color_combo);
+    layout->addLayout(form);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    auto* ok_button = buttons->button(QDialogButtonBox::Ok);
+    ok_button->setText("Create");
+    ok_button->setEnabled(false);
+    QObject::connect(name_edit, &QLineEdit::textChanged, &dialog, [ok_button](QString const& text) {
+        ok_button->setEnabled(!text.trimmed().isEmpty());
+    });
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted)
+        return {};
+
+    auto name = ak_string_from_qstring(name_edit->text().trimmed());
+    auto color = ak_string_from_qstring(color_combo->currentData().toString());
+    auto created = create_container(move(name), move(color));
+    if (created.is_error()) {
+        display_error_dialog(MUST(String::formatted("Could not create container: {}", created.error())));
+        return {};
+    }
+    return created.release_value();
+}
+
 void Application::open_new_tab()
 {
     if (!m_active_window) {
@@ -2009,7 +2154,7 @@ void Application::reopen_recently_closed_tab(BrowserWindow* target_window, Optio
     i64 restored_tab_index = 0;
     for (auto& closed_tab : unit.tabs) {
         auto location = next_insertion_index.has_value() ? BrowserWindow::TabLocation::at_index(*next_insertion_index) : BrowserWindow::TabLocation::end();
-        auto& tab = window->create_new_tab(Web::HTML::ActivateTab::No, location);
+        auto& tab = window->create_new_tab(Web::HTML::ActivateTab::No, location, closed_tab.container_id);
         if (next_insertion_index.has_value())
             ++*next_insertion_index;
 
@@ -2431,15 +2576,21 @@ void Application::open_view_in_new_tab(u64 view_id, Optional<u64> source_view_id
         new_window({}, configuration_for_new_window(), BrowserWindow::IsPopupWindow::No, is_private, view_id);
 }
 
-void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private) const
+void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private, String container_id) const
 {
     auto* window = window_for_new_tab(source_view_id, is_private);
     if (!window) {
-        const_cast<Application&>(*this).new_window({ url }, {}, BrowserWindow::IsPopupWindow::No, is_private);
+        auto& created = const_cast<Application&>(*this).new_window({}, {}, BrowserWindow::IsPopupWindow::No, is_private);
+        if (auto* initial_tab = created.current_tab(); initial_tab && is_private == WebView::IsPrivate::No && !container_id.is_empty()) {
+            created.new_tab_from_url(url, activate_tab, BrowserWindow::TabLocation::end(), move(container_id));
+            created.close_tab_without_keeping_it(created.tab_index(initial_tab));
+        } else if (initial_tab) {
+            initial_tab->navigate(url);
+        }
         return;
     }
 
-    window->new_tab_from_url(url, activate_tab, BrowserWindow::TabLocation::after_current_tab());
+    window->new_tab_from_url(url, activate_tab, BrowserWindow::TabLocation::after_current_tab(), move(container_id));
 }
 
 void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
@@ -2474,7 +2625,7 @@ void Application::open_url_in_new_window(URL::URL const& url, WebView::IsPrivate
     new_window({ url }, configuration_for_new_window(), BrowserWindow::IsPopupWindow::No, is_private);
 }
 
-void Application::open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor navigation, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private) const
+void Application::open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor navigation, Web::HTML::ActivateTab activate_tab, Optional<u64> source_view_id, WebView::IsPrivate is_private, String container_id) const
 {
     auto* window = window_for_new_tab(source_view_id, is_private);
     if (!window) {
@@ -2483,7 +2634,7 @@ void Application::open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescri
         return;
     }
 
-    auto& tab = window->create_new_tab(activate_tab, BrowserWindow::TabLocation::after_current_tab());
+    auto& tab = window->create_new_tab(activate_tab, BrowserWindow::TabLocation::after_current_tab(), move(container_id));
     tab.view().load(move(navigation));
 }
 

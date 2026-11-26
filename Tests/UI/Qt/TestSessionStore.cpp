@@ -73,7 +73,7 @@ static i64 count_entry_rows(Database::Database& database, i64 tab_id)
 
 static SessionTabId open_tab(SessionStore& store, SessionWindowId window, StringView url)
 {
-    return MUST(store.tab_opened({ .window_id = window, .initial_url = parse_url(url), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    return MUST(store.tab_opened({ .window_id = window, .initial_url = parse_url(url), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 }
 
 // Takes the schema back to SESSIONS_SCHEMA_DOCUMENT_POLICY_VERSION, so every migration after it runs again.
@@ -91,6 +91,7 @@ static void rewind_sessions_schema_to_version_4(Database::Database& database)
     MUST(database.execute_raw("ALTER TABLE Sessions DROP COLUMN restore_at_launch;"sv));
     MUST(database.execute_raw("ALTER TABLE Sessions DROP COLUMN activation_sequence;"sv));
     MUST(database.execute_raw("DROP TABLE SessionLifecycle;"sv));
+    MUST(database.execute_raw("ALTER TABLE SessionTabs DROP COLUMN container_id;"sv));
     MUST(database.execute_raw("ALTER TABLE SessionTabs DROP COLUMN pinned;"sv));
     MUST(database.execute_raw("UPDATE SchemaVersions SET version = 4 WHERE store = 'Sessions';"sv));
 }
@@ -112,7 +113,7 @@ TEST_CASE(fresh_database_migrates_to_the_latest_schema)
     for (auto table : { "Sessions"sv, "SessionTabs"sv, "SessionUsedSteps"sv, "SessionHistories"sv, "SessionNestedHistories"sv, "SessionEntries"sv, "SessionUpgradeInsecureNavigations"sv })
         EXPECT(TRY_OR_FAIL(database->table_exists(table)));
 
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 12u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 13u });
 }
 
 TEST_CASE(deleting_a_session_cascades_through_its_tabs)
@@ -159,7 +160,7 @@ TEST_CASE(version_4_database_migrates_to_the_latest_schema)
     rewind_sessions_schema_to_version_4(*database);
 
     EXPECT_EQ(TRY_OR_FAIL(SessionStore::migrate_schema(*database)), Database::MigrationOutcome::Success);
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 12u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 13u });
     EXPECT(TRY_OR_FAIL(database->table_exists("SessionUpgradeInsecureNavigations"sv)));
     EXPECT_EQ(select_i64(*database, "SELECT pinned FROM SessionTabs WHERE id = 2;"_string), 0);
     EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM Sessions WHERE id = 1 AND width IS NULL;"_string), 1);
@@ -172,7 +173,7 @@ TEST_CASE(pushed_tab_state_flushes_to_rows)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv, "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
     store->flush_dirty_state();
@@ -191,7 +192,7 @@ TEST_CASE(pushes_coalesce_and_clean_tabs_redirty_conservatively)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     TRY_OR_FAIL(database->execute_raw("CREATE TABLE Probe (x INTEGER);"sv));
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER ProbeTabWrites AFTER UPDATE ON SessionTabs BEGIN INSERT INTO Probe VALUES (1); END;"sv));
@@ -212,7 +213,7 @@ TEST_CASE(a_changed_user_agent_initiated_flag_alone_flushes)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     auto snapshot = make_snapshot({ "https://a.example/"sv });
     store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
@@ -231,7 +232,7 @@ TEST_CASE(a_changed_set_of_local_file_roots_alone_replaces_a_pending_push)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     auto snapshot = make_snapshot({ "file:///tmp/a.html"sv });
     store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("file:///tmp/a.html"sv) });
@@ -248,7 +249,7 @@ TEST_CASE(a_changed_insecure_requests_policy_alone_replaces_a_pending_push)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     auto snapshot = make_snapshot({ "https://a.example/"sv });
     snapshot.entries[0].document_state.history_policy_container = Web::HTML::SerializedPolicyContainer {};
@@ -275,7 +276,7 @@ TEST_CASE(unstorable_snapshot_flushes_url_only)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     auto snapshot = make_snapshot({ "https://a.example/"sv });
     snapshot.entries[0].classic_history_api_state = Web::HTML::StorageSerializationRecord { MUST(ByteBuffer::create_zeroed((8uz * 1024 * 1024) + 1)) };
 
@@ -292,7 +293,7 @@ TEST_CASE(oversized_active_url_reopens_as_about_blank)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto oversized_url = parse_url(MUST(String::formatted("data:,{}", MUST(String::repeated('a', (8uz * 1024 * 1024) + 1)))));
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = {}, .url = oversized_url });
 
     TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
@@ -312,7 +313,7 @@ TEST_CASE(oversized_active_url_survives_restart_as_about_blank)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto oversized_url = parse_url(MUST(String::formatted("data:,{}", MUST(String::repeated('a', (8uz * 1024 * 1024) + 1)))));
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = {}, .url = oversized_url });
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
     }
@@ -331,7 +332,7 @@ TEST_CASE(database_failure_keeps_previous_rows_and_retries)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     store->flush_dirty_state();
 
@@ -354,8 +355,8 @@ TEST_CASE(closing_a_tab_demotes_it)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = first, .history = make_snapshot({ "https://a.example/"sv, "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
     store->update_tab_state({ .tab_id = second, .history = make_snapshot({ "https://c.example/"sv }), .url = parse_url("https://c.example/"sv) });
 
@@ -567,9 +568,9 @@ TEST_CASE(closed_tab_placement_survives_restart)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         source_window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = source_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(store->tab_closed({ .tab_id = middle, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }));
     }
@@ -599,9 +600,9 @@ TEST_CASE(close_sequence_orders_actions_with_the_same_timestamp)
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto first_window = TRY_OR_FAIL(store->window_opened());
         auto second_window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://window.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto closed_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://tab.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://window.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto closed_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://tab.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(store->tab_closed({ .tab_id = closed_tab, .closed_at = closed_at }));
         TRY_OR_FAIL(store->window_closing({ .window_id = first_window, .active_tab_index = 0, .closed_at = closed_at }));
@@ -625,7 +626,7 @@ TEST_CASE(closing_a_clean_tab_keeps_its_flushed_rows)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv, "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
     store->flush_dirty_state();
 
@@ -643,7 +644,7 @@ TEST_CASE(closing_a_blank_tab_leaves_no_closed_unit)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
 
     EXPECT(!store->has_closed_units());
@@ -656,9 +657,9 @@ TEST_CASE(closing_a_window_demotes_all_member_tabs)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto blank = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto third = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto blank = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto third = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = first, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     store->update_tab_state({ .tab_id = third, .history = make_snapshot({ "https://c.example/"sv }), .url = parse_url("https://c.example/"sv) });
     (void)blank;
@@ -684,7 +685,7 @@ TEST_CASE(failed_demotion_retires_the_tab_and_retries_from_the_flush)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -709,9 +710,9 @@ TEST_CASE(recovery_keeps_a_window_with_a_never_navigated_tab)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto navigated = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto navigated = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = navigated, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = {}, .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = {}, .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->flush_dirty_state();
     }
 
@@ -731,8 +732,8 @@ TEST_CASE(closing_an_internal_page_keeps_it_reopenable)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto settings = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:settings"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto new_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:newtab"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto settings = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:settings"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto new_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:newtab"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     TRY_OR_FAIL(store->tab_closed({ .tab_id = settings, .closed_at = UnixDateTime::now() }));
     TRY_OR_FAIL(store->tab_closed({ .tab_id = new_tab, .closed_at = UnixDateTime::now() }));
@@ -750,7 +751,7 @@ TEST_CASE(failed_window_demotion_retires_the_window_and_retries_from_the_flush)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE UPDATE ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -781,7 +782,7 @@ TEST_CASE(destruction_suppresses_close_retry_notification)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE UPDATE ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -801,7 +802,7 @@ TEST_CASE(pending_tab_close_defers_its_windows_close)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -835,7 +836,7 @@ TEST_CASE(failed_clean_tab_close_retries_with_its_history)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     store->flush_dirty_state();
 
@@ -857,8 +858,8 @@ TEST_CASE(retried_closes_keep_reopen_order)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = first, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     store->update_tab_state({ .tab_id = second, .history = make_snapshot({ "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
 
@@ -885,7 +886,7 @@ TEST_CASE(any_recently_closed_unit_can_be_reopened)
     auto window = TRY_OR_FAIL(store->window_opened());
     Vector<StringView> urls { "https://a.example/"sv, "https://b.example/"sv, "https://c.example/"sv };
     for (size_t i = 0; i < urls.size(); ++i) {
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ urls[i] }), .url = parse_url(urls[i]) });
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::from_seconds_since_epoch(100 + static_cast<i64>(i)) }));
     }
@@ -917,9 +918,9 @@ TEST_CASE(crashed_pending_close_recovers_a_contiguous_window)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto last = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto last = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         (void)first;
         (void)last;
 
@@ -948,9 +949,9 @@ TEST_CASE(topology_barrier_gates_opens_after_a_failed_move)
 
     auto first_window = TRY_OR_FAIL(store->window_opened());
     auto second_window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     (void)first;
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE UPDATE OF session_id ON SessionTabs BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -958,10 +959,10 @@ TEST_CASE(topology_barrier_gates_opens_after_a_failed_move)
 
     // The persisted topology is stale until the drain succeeds, so dependent opens must not
     // commit a single window's metadata.
-    EXPECT(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }).is_error());
+    EXPECT(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }).is_error());
 
     TRY_OR_FAIL(database->execute_raw("DROP TRIGGER InjectedFailure;"sv));
-    (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     TRY_OR_FAIL(store->window_closing({ .window_id = second_window, .active_tab_index = 0, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }));
     TRY_OR_FAIL(store->window_closing({ .window_id = first_window, .active_tab_index = 0, .closed_at = UnixDateTime::from_seconds_since_epoch(200) }));
@@ -986,10 +987,10 @@ TEST_CASE(topology_barrier_gates_close_retries_after_a_failed_move)
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto first_window = TRY_OR_FAIL(store->window_opened());
         auto second_window = TRY_OR_FAIL(store->window_opened());
-        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto last = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto last = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
         EXPECT(store->tab_closed({ .tab_id = last, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }).is_error());
@@ -1025,10 +1026,10 @@ TEST_CASE(retired_window_topology_drains_after_a_failed_move)
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto first_window = TRY_OR_FAIL(store->window_opened());
         auto second_window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE UPDATE OF session_id ON SessionTabs BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
         store->tab_moved({ .tab_id = middle, .new_window_id = second_window, .ordinal = 1 });
@@ -1064,10 +1065,10 @@ TEST_CASE(aborted_quit_still_drains_a_retired_windows_topology)
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto first_window = TRY_OR_FAIL(store->window_opened());
         auto second_window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://d.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE UPDATE OF session_id ON SessionTabs BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
         store->tab_moved({ .tab_id = middle, .new_window_id = second_window, .ordinal = 1 });
@@ -1099,9 +1100,9 @@ TEST_CASE(detaching_a_tab_discards_its_rows)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         store->update_tab_state({ .tab_id = middle, .history = make_snapshot({ "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
         store->flush_dirty_state();
@@ -1158,7 +1159,7 @@ TEST_CASE(empty_window_detach_waits_for_a_pending_tab_close)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -1184,9 +1185,9 @@ TEST_CASE(failed_detach_retries_from_the_flush)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE DELETE ON SessionTabs BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
         store->tab_detached(middle);
@@ -1211,9 +1212,9 @@ TEST_CASE(tab_placement_and_activation_persist_with_registration)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         (void)first;
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = 0, .is_active = SessionStore::IsActive::Yes }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = 0, .is_active = SessionStore::IsActive::Yes, .container_id = {} }));
     }
 
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
@@ -1231,9 +1232,9 @@ TEST_CASE(closing_a_tab_commits_the_remaining_active_index)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->active_tab_changed(second);
         TRY_OR_FAIL(store->tab_closed({ .tab_id = first, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }));
     }
@@ -1253,9 +1254,9 @@ TEST_CASE(child_close_retries_against_its_retired_windows_unit)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        auto middle = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+        (void)TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
         EXPECT(store->tab_closed({ .tab_id = middle, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }).is_error());
@@ -1290,7 +1291,7 @@ TEST_CASE(clearing_history_keeps_a_tombstone_when_deletion_fails)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -1314,7 +1315,7 @@ TEST_CASE(clearing_persisted_history_retries_when_deletion_fails)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }));
 
         TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE DELETE ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -1322,7 +1323,7 @@ TEST_CASE(clearing_persisted_history_retries_when_deletion_fails)
         EXPECT(!store->has_closed_units());
         EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM Sessions WHERE kind = 1;"_string), 1);
 
-        auto newer_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto newer_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         TRY_OR_FAIL(store->tab_closed({ .tab_id = newer_tab, .closed_at = UnixDateTime::from_seconds_since_epoch(200) }));
 
         TRY_OR_FAIL(database->execute_raw("DROP TRIGGER InjectedFailure;"sv));
@@ -1344,7 +1345,7 @@ TEST_CASE(clearing_history_drops_pending_closes)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE INSERT ON Sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
@@ -1365,7 +1366,7 @@ TEST_CASE(quitting_flushes_without_demoting_and_recovery_restores)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv, "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
 
         store->application_quitting();
@@ -1394,7 +1395,7 @@ TEST_CASE(aborted_quit_resumes_demotion)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
 
     store->application_quitting();
@@ -2301,7 +2302,7 @@ TEST_CASE(retention_keeps_the_newest_closed_units)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     for (size_t i = 0; i < 27; ++i) {
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url(MUST(String::formatted("https://tab{}.example/", i))) });
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::from_seconds_since_epoch(static_cast<i64>(i + 1)) }));
     }
@@ -2309,7 +2310,7 @@ TEST_CASE(retention_keeps_the_newest_closed_units)
 
     for (size_t i = 0; i < 6; ++i) {
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
         TRY_OR_FAIL(store->window_closing({ .window_id = window, .active_tab_index = 0, .closed_at = UnixDateTime::from_seconds_since_epoch(static_cast<i64>(100 + i)) }));
     }
@@ -2324,7 +2325,7 @@ TEST_CASE(remove_entries_accessed_since_deletes_closed_units)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     for (i64 time : { 100, 200 }) {
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
         store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::from_seconds_since_epoch(time) }));
     }
@@ -2352,7 +2353,7 @@ TEST_CASE(transient_store_round_trips_in_memory)
     auto store = SessionStore::create();
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv, "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
     TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
 
@@ -2451,13 +2452,13 @@ TEST_CASE(tampered_oversized_active_url_skips_only_its_tab)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto earlier = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto earlier = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = earlier, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     TRY_OR_FAIL(store->tab_closed({ .tab_id = earlier, .closed_at = UnixDateTime::from_seconds_since_epoch(100) }));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tampered = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto sibling = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tampered = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto sibling = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tampered, .history = make_snapshot({ "https://b.example/"sv }), .url = parse_url("https://b.example/"sv) });
     store->update_tab_state({ .tab_id = sibling, .history = make_snapshot({ "https://c.example/"sv }), .url = parse_url("https://c.example/"sv) });
     TRY_OR_FAIL(store->window_closing({ .window_id = window, .active_tab_index = 1, .closed_at = UnixDateTime::from_seconds_since_epoch(200) }));
@@ -2485,7 +2486,7 @@ TEST_CASE(tampered_only_tab_retires_an_empty_closed_unit)
     auto database = create_session_database();
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ "https://a.example/"sv }), .url = parse_url("https://a.example/"sv) });
     TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
     TRY_OR_FAIL(database->execute_raw(ByteString::formatted("UPDATE SessionTabs SET active_url = 'http://[invalid' WHERE id = {};", tab)));
@@ -2501,9 +2502,9 @@ TEST_CASE(moving_a_tab_writes_both_windows_ordinals_at_once)
 
     auto first_window = TRY_OR_FAIL(store->window_opened());
     auto second_window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto third = TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = first_window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto third = TRY_OR_FAIL(store->tab_opened({ .window_id = second_window, .initial_url = parse_url("https://c.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     store->tab_moved({ .tab_id = first, .new_window_id = second_window, .ordinal = 0 });
 
@@ -2520,8 +2521,8 @@ TEST_CASE(moving_the_active_tab_within_its_window_keeps_it_active)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     (void)second;
 
     store->active_tab_changed(first);
@@ -2537,8 +2538,8 @@ TEST_CASE(window_metadata_flushes_order_and_active_tab)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     store->tab_order_changed({ .window_id = window, .ordered_tabs = { second, first } });
     store->active_tab_changed(first);
@@ -2555,8 +2556,8 @@ TEST_CASE(unchanged_window_metadata_does_not_flush)
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
 
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
-    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto first = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
+    auto second = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://b.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
     store->active_tab_changed(first);
     store->flush_dirty_state();
 
@@ -2599,7 +2600,7 @@ TEST_CASE(exhausted_id_close_discards_the_tab_instead_of_resurrecting_it)
     {
         auto store = TRY_OR_FAIL(SessionStore::create(*database));
         auto window = TRY_OR_FAIL(store->window_opened());
-        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
         TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }));
         EXPECT_EQ(select_i64(*database, MUST(String::formatted("SELECT COUNT(*) FROM SessionTabs WHERE id = {};", tab))), 0);
@@ -2622,7 +2623,7 @@ TEST_CASE(exhausted_id_close_queues_the_discard_when_the_write_fails)
 
     auto store = TRY_OR_FAIL(SessionStore::create(*database));
     auto window = TRY_OR_FAIL(store->window_opened());
-    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://a.example/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = {} }));
 
     TRY_OR_FAIL(database->execute_raw("CREATE TRIGGER InjectedFailure BEFORE DELETE ON SessionTabs BEGIN SELECT RAISE(ABORT, 'injected'); END;"sv));
     EXPECT(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::now() }).is_error());
@@ -2631,4 +2632,28 @@ TEST_CASE(exhausted_id_close_queues_the_discard_when_the_write_fails)
     TRY_OR_FAIL(database->execute_raw("DROP TRIGGER InjectedFailure;"sv));
     store->flush_dirty_state();
     EXPECT_EQ(select_i64(*database, MUST(String::formatted("SELECT COUNT(*) FROM SessionTabs WHERE id = {};", tab))), 0);
+}
+
+TEST_CASE(tab_container_id_persists_across_recovery_and_reopen)
+{
+    auto database = create_session_database();
+    {
+        auto store = TRY_OR_FAIL(SessionStore::create(*database));
+        auto window = TRY_OR_FAIL(store->window_opened());
+        auto personal_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://youtube.com/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::Yes, .container_id = "personal"_string }));
+        auto work_tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("https://mail.google.com/"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No, .container_id = "work"_string }));
+
+        TRY_OR_FAIL(store->tab_closed({ .tab_id = work_tab, .closed_at = UnixDateTime::now() }));
+        auto reopened = TRY_OR_FAIL(store->take_most_recently_closed());
+        EXPECT(reopened.has_value());
+        EXPECT_EQ(reopened->tabs.size(), 1uz);
+        EXPECT_EQ(reopened->tabs[0].container_id, "work"_string);
+        (void)personal_tab;
+    }
+
+    auto recovered_store = TRY_OR_FAIL(SessionStore::create(*database, Ladybird::SessionLaunchPolicy::Everything));
+    auto restored_windows = recovered_store->take_launch_plan();
+    EXPECT_EQ(restored_windows.size(), 1uz);
+    EXPECT_EQ(restored_windows[0].tabs.size(), 1uz);
+    EXPECT_EQ(restored_windows[0].tabs[0].container_id, "personal"_string);
 }

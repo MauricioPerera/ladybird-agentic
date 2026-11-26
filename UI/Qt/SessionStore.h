@@ -40,6 +40,7 @@ struct ClosedSessionTab {
     URL::URL active_url;
     Optional<WebView::SessionHistorySnapshot> history;
     bool pinned { false };
+    String container_id;
 };
 
 struct ClosedSessionUnit {
@@ -82,6 +83,7 @@ struct RestoredSessionTab {
     SessionTabId tab_id { 0 };
     URL::URL url;
     bool pinned { false };
+    String container_id;
 };
 
 // A window that startup recovery kept open for the frontend to show, with its tabs in order.
@@ -112,6 +114,7 @@ public:
         URL::URL initial_url;
         Optional<i64> insertion_index;
         IsActive is_active { IsActive::No };
+        String container_id;
     };
 
     struct TabStateUpdate {
@@ -282,6 +285,7 @@ private:
         Optional<WebView::SessionHistorySnapshot> history;
         bool dirty { false };
         bool pinned { false };
+        String container_id;
     };
 
     struct OpenWindow {
@@ -299,6 +303,7 @@ private:
         // Transient mode captures the snapshot at demotion; persisted mode loads it on reopen.
         Optional<WebView::SessionHistorySnapshot> history;
         bool pinned { false };
+        String container_id;
     };
 
     struct ClosedUnit {
@@ -329,6 +334,7 @@ private:
         SnapshotDisposition snapshot_disposition { SnapshotDisposition::Preserve };
         WebView::SessionHistorySnapshot const* snapshot { nullptr };
         bool pinned { false };
+        String container_id;
     };
 
     // Always the complete live-plus-pending order, so persisted units stay contiguous while failed
@@ -404,6 +410,7 @@ private:
         URL::URL url;
         size_t current_used_step_index { 0 };
         bool pinned { false };
+        String container_id;
     };
 
     struct RecoveredWindow {

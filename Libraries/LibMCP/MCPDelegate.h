@@ -20,6 +20,7 @@ struct TabInfo {
     u64 id { 0 };
     String title;
     String url;
+    String container_id;
     bool is_loading { false };
     bool is_active { false };
 };
@@ -39,7 +40,7 @@ public:
     virtual Vector<TabInfo> list_allowed_tabs() const = 0;
     virtual Optional<TabInfo> active_allowed_tab() const = 0;
 
-    virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, OnToolCallComplete) = 0;
+    virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, OnToolCallComplete) = 0;
     virtual void switch_tab(u64 tab_id, OnToolCallComplete) = 0;
     virtual void close_tab(u64 tab_id, OnToolCallComplete) = 0;
     virtual void navigate_tab(u64 tab_id, String url, bool wait_for_load, OnToolCallComplete) = 0;

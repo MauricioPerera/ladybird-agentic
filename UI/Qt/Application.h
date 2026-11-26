@@ -138,6 +138,14 @@ public:
 
     void open_new_tab();
     void open_new_window(WebView::IsPrivate);
+
+    Vector<Hub::TabContainerInfo> const& containers() const { return m_containers; }
+    void set_containers(Vector<Hub::TabContainerInfo>);
+    Optional<Hub::TabContainerInfo> find_container(StringView id) const;
+    ErrorOr<Hub::TabContainerInfo> create_container(String name, String color);
+    ErrorOr<void> delete_container(StringView id);
+    static QIcon container_dot_icon(StringView hex_color);
+    Optional<Hub::TabContainerInfo> prompt_create_container(QWidget* parent = nullptr);
     enum class ReopenClosedWindow {
         InNewWindow,
         InTargetWindow,
@@ -270,10 +278,10 @@ private:
     BrowserWindow* window_of_view(u64 view_id) const;
     BrowserWindow* window_for_new_tab(Optional<u64> source_view_id, WebView::IsPrivate) const;
     void open_view_in_new_tab(u64 view_id, Optional<u64> source_view_id, WebView::IsPrivate, Web::HTML::ActivateTab);
-    void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, Optional<u64> source_view_id, WebView::IsPrivate) const;
+    void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, Optional<u64> source_view_id, WebView::IsPrivate, String container_id = {}) const;
     void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
     void open_url_in_new_window(URL::URL const&, WebView::IsPrivate);
-    void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab, Optional<u64> source_view_id, WebView::IsPrivate) const;
+    void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab, Optional<u64> source_view_id, WebView::IsPrivate, String container_id = {}) const;
     void open_navigation_in_new_window(Web::HTML::PreparedNavigationDescriptor, WebView::IsPrivate);
 
     virtual void resolve_external_url_handler(URL::URL const&, WebView::ExternalURLHandlerCallback) const override;
@@ -383,6 +391,7 @@ private:
     OwnPtr<WebView::FaviconStore> m_favicon_store;
     OwnPtr<WebView::FaviconStore> m_private_favicon_store;
     OwnPtr<BookmarkStore> m_bookmark_store;
+    Vector<Hub::TabContainerInfo> m_containers;
     OwnPtr<WebView::HistoryStore> m_history_store;
     OwnPtr<WebView::AutocompleteService> m_autocomplete_service;
     bool m_should_remove_unreferenced_favicons { false };

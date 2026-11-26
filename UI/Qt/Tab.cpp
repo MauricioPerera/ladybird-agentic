@@ -170,10 +170,11 @@ public:
     Function<void()> on_reset;
 };
 
-Tab::Tab(BrowserWindow* window, Optional<u64> hub_view_id)
+Tab::Tab(BrowserWindow* window, Optional<u64> hub_view_id, String container_id)
     : QWidget(window)
     , WebView::SettingsObserver(Application::settings())
     , m_window(window)
+    , m_container_id(AK::move(container_id))
 {
     create_tab_shell();
     initialize(hub_view_id);
@@ -187,6 +188,7 @@ Tab::Tab(BrowserWindow* window, DeferredTab deferred_tab)
     , m_favicon(deferred_tab.favicon)
     , m_session_tab_id(deferred_tab.session_tab_id)
     , m_deferred_tab(AK::move(deferred_tab))
+    , m_container_id(m_deferred_tab->container_id)
 {
     create_tab_shell();
 }
@@ -206,6 +208,7 @@ void Tab::initialize(Optional<u64> hub_view_id)
 
     auto view_initial_state = WebContentViewInitialState {
         .is_private = m_window->is_private(),
+        .container_id = m_container_id,
         .maximum_frames_per_second = m_window->refresh_rate(),
         .display_id = m_window->display_id(),
         .screen_shows_high_dynamic_range = m_window->screen_shows_high_dynamic_range(),
@@ -214,6 +217,8 @@ void Tab::initialize(Optional<u64> hub_view_id)
     };
 
     m_view = new WebContentView(this, hub_view_id, AK::move(view_initial_state));
+    if (m_container_id.is_empty() && !m_view->container_id().is_empty())
+        m_container_id = m_view->container_id();
     // The window reports its geometry to its tabs as it is moved and resized, so a tab opened later has to be told
     // where the window stands now.
     m_view->set_window_position({ m_window->x(), m_window->y() });
@@ -982,6 +987,7 @@ void Tab::create_tab_context_menu()
 
     m_context_menu = new QMenu("Context menu", this);
     m_context_menu->addAction(new_tab_action);
+    auto* reopen_in_container_menu = m_context_menu->addMenu("Reopen in &Container");
     m_context_menu->addSeparator();
     m_context_menu->addAction(create_application_action(*this, application.reload_action(), IncludeActionIcon::No));
     m_context_menu->addAction(duplicate_tab_action);
@@ -998,10 +1004,38 @@ void Tab::create_tab_context_menu()
     m_context_menu->addSeparator();
     m_context_menu->addAction(Application::the().reopen_recently_closed_tab_action());
 
-    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, close_following_tabs_action, mute_tab_action, mcp_access_action, move_to_new_window_action]() {
+    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, reopen_in_container_menu, close_following_tabs_action, mute_tab_action, mcp_access_action, move_to_new_window_action]() {
         auto is_horizontal = m_window->tab_widget().tab_bar()->tab_layout() == TabLayout::Horizontal;
         new_tab_action->setText(is_horizontal ? "New Tab to the &Right" : "New Tab &Below");
         close_following_tabs_action->setText(is_horizontal ? "Close Tabs to the R&ight" : "Close Tabs B&elow");
+
+        bool is_non_private = m_window->is_private() == WebView::IsPrivate::No;
+        reopen_in_container_menu->menuAction()->setVisible(is_non_private);
+        if (is_non_private) {
+            reopen_in_container_menu->clear();
+            auto current_url = url();
+            if (!m_container_id.is_empty()) {
+                auto* default_action = reopen_in_container_menu->addAction("Default (No Container)");
+                QObject::connect(default_action, &QAction::triggered, this, [this, current_url] {
+                    m_window->new_tab_from_url(current_url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*this));
+                });
+                reopen_in_container_menu->addSeparator();
+            }
+            for (auto const& container : Application::the().containers()) {
+                if (container.id == m_container_id)
+                    continue;
+                auto* action = reopen_in_container_menu->addAction(Application::container_dot_icon(container.color), qstring_from_ak_string(container.name));
+                QObject::connect(action, &QAction::triggered, this, [this, current_url, container_id = container.id] {
+                    m_window->new_tab_from_url(current_url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*this), container_id);
+                });
+            }
+            reopen_in_container_menu->addSeparator();
+            auto* new_container_action = reopen_in_container_menu->addAction("New Container...");
+            QObject::connect(new_container_action, &QAction::triggered, this, [this, current_url] {
+                if (auto created = Application::the().prompt_create_container(m_window); created.has_value())
+                    m_window->new_tab_from_url(current_url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*this), created->id);
+            });
+        }
 
         // A tab that hasn't loaded has no page to mute yet.
         mute_tab_action->setEnabled(is_loaded());

@@ -122,7 +122,7 @@ private:
     void retire_idle_instances();
 
     ByteString sites_directory() const;
-    ByteString cache_path_for_site(Utf16String const& site) const;
+    ByteString cache_path_for_site(BrowsingSession const&, Utf16String const& site) const;
     ByteBuffer load_or_create_site_cache_key() const;
     bool is_live_cache_path(ByteString const&) const;
     Vector<ByteString> dormant_site_cache_paths();

@@ -84,7 +84,7 @@ public:
     virtual Vector<MCP::TabInfo> list_allowed_tabs() const override { return {}; }
     virtual Optional<MCP::TabInfo> active_allowed_tab() const override { return {}; }
 
-    virtual void open_tab(Optional<String>, bool, bool, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
+    virtual void open_tab(Optional<String>, bool, bool, Optional<String>, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void switch_tab(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void close_tab(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void navigate_tab(u64, String, bool, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
@@ -758,6 +758,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
+    Optional<JsonObject> open_tab_tool;
     Optional<JsonObject> click_tool;
     Optional<JsonObject> type_text_tool;
     Optional<JsonObject> list_page_tools_tool;
@@ -778,6 +779,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             save_flow_tool = tool;
         else if (name == "run_flow"sv)
             run_flow_tool = tool;
+        else if (name == "open_tab"sv)
+            open_tab_tool = tool;
         else if (name == "click"sv)
             click_tool = tool;
         else if (name == "type_text"sv)
@@ -808,6 +811,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
 
     EXPECT(save_flow_tool.has_value());
     EXPECT(run_flow_tool.has_value());
+    EXPECT(open_tab_tool.has_value());
+    EXPECT(open_tab_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("container_id"sv));
     EXPECT(click_tool.has_value());
     EXPECT(type_text_tool.has_value());
     EXPECT(list_page_tools_tool.has_value());

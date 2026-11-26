@@ -145,6 +145,7 @@ public:
     static Optional<ViewImplementation&> find_view_by_id(u64);
 
     IsPrivate is_private() const { return m_is_private; }
+    String const& container_id() const { return m_session->container_id(); }
     BrowsingSession& session() const { return *m_session; }
 
     // Asks the user, unless an identical prompt is already up, in which case its answer goes to every request for it.
@@ -868,7 +869,7 @@ protected:
     virtual Optional<ScreenRects> screen_rects() const { return {}; }
     void update_compositor_display_metadata(WebContentPage&);
 
-    explicit ViewImplementation(IsPrivate = IsPrivate::No);
+    explicit ViewImplementation(IsPrivate = IsPrivate::No, String container_id = {});
 
     void set_owner_view(ViewImplementation& owner_view);
 

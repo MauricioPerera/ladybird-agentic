@@ -144,7 +144,7 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     return view;
 }
 
-Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab) const
+Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab, String container_id) const
 {
     auto* ui = ConnectionFromUI::the();
     if (!ui)
@@ -163,6 +163,7 @@ Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::
         });
     }
     initial_state.is_private = WebView::IsPrivate::No;
+    initial_state.container_id = move(container_id);
     initial_state.owner_view_id = {};
     initial_state.is_tab = true;
 
@@ -182,14 +183,14 @@ Application::NewTabSource Application::new_tab_source(WebView::ViewImplementatio
         source_view = &*active_view;
     if (!source_view)
         return {};
-    return { source_view->view_id(), source_view->is_private() };
+    return { source_view->view_id(), source_view->is_private(), source_view->container_id() };
 }
 
 void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab, WebView::ViewImplementation const* source_view) const
 {
     if (auto* ui = ConnectionFromUI::the()) {
         auto source = new_tab_source(source_view);
-        ui->async_app_open_url_in_new_tab(url, activate_tab, source.view_id, source.is_private);
+        ui->async_app_open_url_in_new_tab(url, activate_tab, source.view_id, source.is_private, source.container_id);
     } else {
         WebView::Application::open_url_in_new_tab(url, activate_tab, source_view);
     }
@@ -225,7 +226,7 @@ void Application::open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescri
 {
     if (auto* ui = ConnectionFromUI::the()) {
         auto source = new_tab_source(source_view);
-        ui->async_app_open_navigation_in_new_tab(move(navigation), activate_tab, source.view_id, source.is_private);
+        ui->async_app_open_navigation_in_new_tab(move(navigation), activate_tab, source.view_id, source.is_private, source.container_id);
     } else {
         WebView::Application::open_navigation_in_new_tab(move(navigation), activate_tab, source_view);
     }

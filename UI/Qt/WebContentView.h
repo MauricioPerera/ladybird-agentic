@@ -111,6 +111,7 @@ struct WebCompatReportCapture {
 
 struct WebContentViewInitialState {
     WebView::IsPrivate is_private { WebView::IsPrivate::No };
+    String container_id {};
     double maximum_frames_per_second { 60.0 };
     Optional<u64> display_id;
     bool screen_shows_high_dynamic_range { false };

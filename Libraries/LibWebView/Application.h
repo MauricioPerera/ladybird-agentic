@@ -220,7 +220,9 @@ public:
 
     static BrowsingSession& default_session() { return *the().m_default_session; }
 
-    static NonnullRefPtr<BrowsingSession> session_for_new_view(IsPrivate);
+    static NonnullRefPtr<BrowsingSession> session_for_new_view(IsPrivate, StringView container_id = {});
+    static ContainerStore& container_store() { return *the().m_container_store; }
+    ErrorOr<void> delete_container(StringView container_id);
 
     // Whether the windows and tabs of this run are kept for the next one. A headless run, a browser that WebDriver drives,
     // and one that logs process statistics never join a browser already running on their profile, so they keep none.
@@ -254,14 +256,14 @@ public:
 
     TabProcesses tab_processes() const;
     bool tabs_may_share_processes() const;
-    ErrorOr<NonnullRefPtr<WebContentPage>> open_page_for_new_tab(IsPrivate);
+    ErrorOr<NonnullRefPtr<WebContentPage>> open_page_for_new_tab(BrowsingSession&);
     struct ChildFrameWebContentProcess {
         NonnullRefPtr<WebContentClient> client;
         Web::PageId page_id { 0 };
     };
     // For what may share a process with no page. It ends once nothing keeps it.
     ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process_without_page(BrowsingSession&);
-    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state);
+    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(BrowsingSession&, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state);
 
     MediaSessionCoordinator& media_session_coordinator() { return m_media_session_coordinator; }
     virtual OwnPtr<MediaSessionPlatformBackend> create_media_session_platform_backend();
@@ -324,7 +326,7 @@ public:
     virtual Optional<ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const { return {}; }
 
     virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, ViewImplementation const* = nullptr) const { return {}; }
-    virtual Optional<ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab) const { return {}; }
+    virtual Optional<ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab, String = {}) const { return {}; }
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, ViewImplementation const* source_view = nullptr) const;
     virtual void activate_or_open_tab_with_url(URL::URL const&) const;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
@@ -667,7 +669,7 @@ private:
     // ^MCP::MCPDelegate
     virtual Vector<MCP::TabInfo> list_allowed_tabs() const override;
     virtual Optional<MCP::TabInfo> active_allowed_tab() const override;
-    virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, MCP::OnToolCallComplete) override;
+    virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete) override;
     virtual void switch_tab(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void close_tab(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::OnToolCallComplete) override;
@@ -808,8 +810,10 @@ private:
     Web::HTML::CrossProcessIdAllocator m_ui_process_cross_process_id_allocator;
 
     OwnPtr<DownloadStore> m_download_store;
+    OwnPtr<ContainerStore> m_container_store;
     RefPtr<BrowsingSession> m_default_session;
     WeakPtr<BrowsingSession> m_private_session;
+    HashMap<String, NonnullRefPtr<BrowsingSession>> m_container_sessions;
     HashMap<int, WeakPtr<BrowsingSession>> m_request_server_client_sessions;
 
     // The RequestServer clients of the UI process itself, which may use the cookies of any site.

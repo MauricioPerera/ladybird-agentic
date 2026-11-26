@@ -15,17 +15,18 @@ namespace WebView {
 
 static u64 s_next_id { 1 };
 
-BrowsingSession::BrowsingSession(IsPrivate is_private)
+BrowsingSession::BrowsingSession(IsPrivate is_private, String container_id)
     : m_id(s_next_id++)
     , m_is_private(is_private)
+    , m_container_id(is_private == IsPrivate::No ? move(container_id) : String {})
 {
 }
 
 BrowsingSession::~BrowsingSession() = default;
 
-NonnullRefPtr<BrowsingSession> BrowsingSession::create(IsPrivate is_private)
+NonnullRefPtr<BrowsingSession> BrowsingSession::create(IsPrivate is_private, String container_id)
 {
-    auto session = adopt_ref(*new BrowsingSession(is_private));
+    auto session = adopt_ref(*new BrowsingSession(is_private, move(container_id)));
 
     if (is_private == IsPrivate::Yes) {
         session->cookie_jar = CookieJar::create(IsPrivate::Yes);

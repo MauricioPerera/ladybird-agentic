@@ -72,6 +72,7 @@ struct DeferredTab {
     // The history of a discarded tab, which it restores once it is selected, and the state the Hub keeps for it.
     Optional<WebView::SessionHistorySnapshot> history;
     Optional<u64> discarded_tab_state_id;
+    String container_id {};
 };
 
 class Popover;
@@ -85,9 +86,11 @@ class Tab final
 public:
     AK_ALLOC_WITH_KMALLOC;
 
-    Tab(BrowserWindow* window, Optional<u64> hub_view_id = {});
+    Tab(BrowserWindow* window, Optional<u64> hub_view_id = {}, String container_id = {});
     Tab(BrowserWindow* window, DeferredTab);
     virtual ~Tab() override;
+
+    String const& container_id() const { return m_container_id; }
 
     WebContentView& view()
     {
@@ -296,6 +299,7 @@ private:
 
     Optional<SessionTabId> m_session_tab_id;
     Optional<DeferredTab> m_deferred_tab;
+    String m_container_id;
 };
 
 }

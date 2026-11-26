@@ -95,7 +95,7 @@ private:
 };
 
 View::View(InitialState initial_state)
-    : ViewImplementation(initial_state.is_private)
+    : ViewImplementation(initial_state.is_private, move(initial_state.container_id))
     , m_system_theme(move(initial_state.system_theme))
     , m_screen_rects(move(initial_state.screen_rects))
     , m_websites_prefer_dark(initial_state.websites_prefer_dark)
@@ -125,6 +125,7 @@ View::InitialState View::initial_state_for_related_view() const
 {
     return {
         .is_private = is_private(),
+        .container_id = container_id(),
         .device_pixel_ratio = device_pixel_ratio(),
         .maximum_frames_per_second = maximum_frames_per_second(),
         .display_id = display_id(),
@@ -653,6 +654,7 @@ ViewState View::current_state() const
     state.displayed_url = displayed_url();
     state.title = title();
     state.handle = handle();
+    state.container_id = container_id();
     state.is_loading = is_loading();
     state.mcp_access_allowed = is_mcp_access_allowed();
     state.zoom_level = zoom_level();

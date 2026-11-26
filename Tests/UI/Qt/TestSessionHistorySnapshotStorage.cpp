@@ -595,6 +595,7 @@ TEST_CASE(snapshot_entries_that_held_local_file_content_load_without_a_root)
 
     // Take the database back to the schema before local file roots, with the entry marked as holding local file content.
     TRY_OR_FAIL(database->execute_raw(R"#(
+        ALTER TABLE SessionTabs DROP COLUMN container_id;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_scope;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_path;
         ALTER TABLE SessionEntries ADD COLUMN held_local_file_content INTEGER NOT NULL DEFAULT 0;
@@ -603,7 +604,7 @@ TEST_CASE(snapshot_entries_that_held_local_file_content_load_without_a_root)
     )#"sv));
 
     auto migrated_statements = prepare_snapshot_tables(*database);
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 12u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 13u });
 
     auto loaded = TRY_OR_FAIL(load_session_history_snapshot(*database, migrated_statements, 44, 0));
     EXPECT_EQ(loaded.entries.size(), 1uz);
@@ -630,6 +631,7 @@ TEST_CASE(snapshot_entries_saved_before_the_user_agent_initiated_column_load_as_
 
     // Take the database back to the baseline schema, keeping the entry's row.
     TRY_OR_FAIL(database->execute_raw(R"#(
+        ALTER TABLE SessionTabs DROP COLUMN container_id;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_scope;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_path;
         DROP TABLE SessionUpgradeInsecureNavigations;
@@ -652,7 +654,7 @@ TEST_CASE(snapshot_entries_saved_before_the_user_agent_initiated_column_load_as_
     )#"sv));
 
     auto migrated_statements = prepare_snapshot_tables(*database);
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 12u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 13u });
 
     auto loaded = TRY_OR_FAIL(load_session_history_snapshot(*database, migrated_statements, 42, 0));
     EXPECT_EQ(loaded.entries.size(), 1uz);
@@ -681,6 +683,7 @@ TEST_CASE(snapshot_policy_containers_saved_before_the_insecure_requests_policy_l
 
     // Take the database back to the schema before the insecure requests policy, keeping the container's row.
     TRY_OR_FAIL(database->execute_raw(R"#(
+        ALTER TABLE SessionTabs DROP COLUMN container_id;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_scope;
         ALTER TABLE SessionEntries DROP COLUMN local_file_root_path;
         DROP TABLE SessionUpgradeInsecureNavigations;
@@ -690,7 +693,7 @@ TEST_CASE(snapshot_policy_containers_saved_before_the_insecure_requests_policy_l
     )#"sv));
 
     auto migrated_statements = prepare_snapshot_tables(*database);
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 12u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 13u });
 
     auto loaded = TRY_OR_FAIL(load_session_history_snapshot(*database, migrated_statements, 27, 0));
     auto const* container = loaded.entries[0].document_state.history_policy_container.get_pointer<Web::HTML::SerializedPolicyContainer>();

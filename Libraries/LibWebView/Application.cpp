@@ -53,6 +53,7 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
 #include <LibWebView/Automation/FlowStore.h>
+#include <LibWebView/ContainerStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/Extensions/ExtensionManager.h>
@@ -1312,20 +1313,100 @@ Web::HTML::CrossProcessId Application::allocate_ui_process_cross_process_id()
     return m_ui_process_cross_process_id_allocator.allocate();
 }
 
-NonnullRefPtr<BrowsingSession> Application::session_for_new_view(IsPrivate is_private)
+NonnullRefPtr<BrowsingSession> Application::session_for_new_view(IsPrivate is_private, StringView container_id)
 {
-    if (is_private == IsPrivate::No)
+    if (is_private == IsPrivate::Yes) {
+        if (auto session = the().m_private_session.strong_ref())
+            return *session;
+
+        auto session = BrowsingSession::create(IsPrivate::Yes);
+        session->permission_manager = PermissionManager::create_for_private_session(*the().m_default_session->permission_manager);
+        session->permission_manager->register_observer(*the().m_permission_manager_observer);
+        session->permission_manager->on_deadlines_changed = [] { the().schedule_permission_expiry(); };
+        the().m_private_session = session;
+        return session;
+    }
+
+    if (container_id.is_empty() || !is_valid_container_id(container_id))
         return *the().m_default_session;
 
-    if (auto session = the().m_private_session.strong_ref())
-        return *session;
+    if (auto existing = the().m_container_sessions.get(container_id); existing.has_value())
+        return **existing;
 
-    auto session = BrowsingSession::create(IsPrivate::Yes);
-    session->permission_manager = PermissionManager::create_for_private_session(*the().m_default_session->permission_manager);
+    auto id = MUST(String::from_utf8(container_id));
+    auto session = BrowsingSession::create(IsPrivate::No, id);
+    auto container_data_dir = LexicalPath::join(profile().paths().data, "Containers"sv, container_id).string();
+
+    bool opened_persisted = false;
+    if (the().m_browser_options.disable_sql_database == DisableSQLDatabase::No) {
+        auto init_db = [&]() -> ErrorOr<void> {
+            TRY(Core::Directory::create(container_data_dir, Core::Directory::CreateDirectories::Yes));
+            auto database = TRY(Database::Database::create(container_data_dir, "Ladybird"sv));
+            auto cookies_outcome = TRY(CookieJar::migrate_schema(database, Database::MigrationMode::CheckOnly));
+            auto hsts_outcome = TRY(HSTSStore::migrate_schema(database, Database::MigrationMode::CheckOnly));
+            auto storage_outcome = TRY(StorageJar::migrate_schema(database, Database::MigrationMode::CheckOnly));
+
+            if (cookies_outcome == Database::MigrationOutcome::Success) {
+                cookies_outcome = TRY(CookieJar::migrate_schema(database));
+                hsts_outcome = cookies_outcome == Database::MigrationOutcome::Success
+                    ? TRY(HSTSStore::migrate_schema(database))
+                    : Database::MigrationOutcome::DatabaseTooNew;
+                storage_outcome = hsts_outcome == Database::MigrationOutcome::Success
+                    ? TRY(StorageJar::migrate_schema(database))
+                    : Database::MigrationOutcome::DatabaseTooNew;
+            }
+
+            if (cookies_outcome == Database::MigrationOutcome::Success
+                && hsts_outcome == Database::MigrationOutcome::Success
+                && storage_outcome == Database::MigrationOutcome::Success) {
+                session->cookie_jar = TRY(CookieJar::create(database));
+                session->hsts_store = TRY(HSTSStore::create(database));
+                session->storage_jar = TRY(StorageJar::create(database));
+                return {};
+            }
+            return Error::from_string_literal("Container database schema version mismatch");
+        };
+        if (auto res = init_db(); res.is_error()) {
+            warnln("Could not open persisted container storage for '{}': {}; falling back to in-memory storage", container_id, res.error());
+        } else {
+            opened_persisted = true;
+        }
+    }
+
+    if (!opened_persisted) {
+        session->cookie_jar = CookieJar::create();
+        session->hsts_store = HSTSStore::create();
+        session->storage_jar = StorageJar::create();
+    }
+
+    session->blob_url_store = make<BlobURLStore>();
+    session->permission_manager = PermissionManager::create_for_ordinary_session(LexicalPath::join(container_data_dir, "Permissions.json"sv).string());
     session->permission_manager->register_observer(*the().m_permission_manager_observer);
     session->permission_manager->on_deadlines_changed = [] { the().schedule_permission_expiry(); };
-    the().m_private_session = session;
+
+    the().m_container_sessions.set(id, session);
     return session;
+}
+
+ErrorOr<void> Application::delete_container(StringView container_id)
+{
+    TRY(m_container_store->delete_container(container_id));
+
+    if (auto taken = m_container_sessions.take(container_id); taken.has_value()) {
+        auto earliest = UnixDateTime::earliest();
+        if (taken.value()->cookie_jar)
+            taken.value()->cookie_jar->expire_cookies_accessed_since(earliest);
+        if (taken.value()->storage_jar)
+            taken.value()->storage_jar->remove_items_accessed_since(earliest);
+        if (taken.value()->hsts_store)
+            taken.value()->hsts_store->remove_policies_observed_since(earliest);
+    }
+
+    auto data_dir = LexicalPath::join(profile().paths().data, "Containers"sv, container_id).string();
+    (void)FileSystem::remove(data_dir, FileSystem::RecursionMode::Allowed);
+    auto cache_dir = LexicalPath::join(m_request_server_options.cache_path, "RequestServer"sv, "Containers"sv, container_id).string();
+    (void)FileSystem::remove(cache_dir, FileSystem::RecursionMode::Allowed);
+    return {};
 }
 
 void Application::did_connect_request_server_client(int client_id, BrowsingSession& session, RequestServer::SiteBinding site_binding)
@@ -1805,20 +1886,19 @@ bool Application::tabs_may_share_processes() const
         && tab_processes() != TabProcesses::PerTab;
 }
 
-ErrorOr<NonnullRefPtr<WebContentPage>> Application::open_page_for_new_tab(IsPrivate is_private)
+ErrorOr<NonnullRefPtr<WebContentPage>> Application::open_page_for_new_tab(BrowsingSession& session)
 {
     if (m_spare_web_content_process && !m_spare_web_content_process->is_open())
         m_spare_web_content_process = nullptr;
 
     RefPtr<WebContentClient> web_content_client;
-    if (is_private == IsPrivate::Yes) {
-        web_content_client = TRY(create_web_content_client(session_for_new_view(IsPrivate::Yes), allocate_page_id()));
-    } else if (m_spare_web_content_process) {
+    if (session.is_private() == IsPrivate::No && !session.is_container() && &session == m_default_session.ptr() && m_spare_web_content_process) {
         web_content_client = m_spare_web_content_process.release_nonnull();
         launch_spare_web_content_process();
     } else {
-        launch_spare_web_content_process();
-        web_content_client = TRY(create_web_content_client(default_session(), allocate_page_id()));
+        if (&session == m_default_session.ptr())
+            launch_spare_web_content_process();
+        web_content_client = TRY(create_web_content_client(session, allocate_page_id()));
     }
     return web_content_client->open_initial_page_for_new_top_level_traversable();
 }
@@ -1828,11 +1908,11 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process
     return create_web_content_client(session, allocate_page_id());
 }
 
-ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(IsPrivate is_private, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
+ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(BrowsingSession& session, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
 {
     auto page_id = allocate_page_id();
     auto initial_document_state_id = initial_history_entry.document_state.id;
-    auto client = TRY(create_web_content_client(session_for_new_view(is_private), page_id, root_navigable_id, initial_document_state_id, move(remote_navigables), move(initial_history_entry), system_visibility_state));
+    auto client = TRY(create_web_content_client(session, page_id, root_navigable_id, initial_document_state_id, move(remote_navigables), move(initial_history_entry), system_visibility_state));
     return ChildFrameWebContentProcess {
         .client = move(client),
         .page_id = page_id,
@@ -1929,6 +2009,7 @@ static void notify_devtools_of_storage_change(StorageJar& jar, StorageChange con
 
 ErrorOr<void> Application::launch_services()
 {
+    m_container_store = make<ContainerStore>(LexicalPath::join(profile().paths().config, "Containers.json"sv).string());
     m_default_session = BrowsingSession::create(IsPrivate::No);
     StorageAreaRegistry::the().on_change_for_devtools = [this](StorageJar& jar, WebView::StorageChange const& change) {
         // Only an attached DevTools has anyone to tell, and the lookup below isn't free on a page's write path.
@@ -2932,6 +3013,14 @@ NonnullRefPtr<Core::Promise<Application::BrowsingDataSizes>> Application::estima
         ->when_resolved([this, promise, since](Requests::CacheSizes cache_sizes) {
             auto cookie_sizes = m_default_session->cookie_jar->estimate_storage_size_accessed_since(since);
             auto storage_sizes = m_default_session->storage_jar->estimate_storage_size_accessed_since(since);
+            for (auto const& [_, container_session] : m_container_sessions) {
+                auto c_sizes = container_session->cookie_jar->estimate_storage_size_accessed_since(since);
+                auto s_sizes = container_session->storage_jar->estimate_storage_size_accessed_since(since);
+                cookie_sizes.total += c_sizes.total;
+                cookie_sizes.since_requested_time += c_sizes.since_requested_time;
+                storage_sizes.total += s_sizes.total;
+                storage_sizes.since_requested_time += s_sizes.since_requested_time;
+            }
 
             BrowsingDataSizes sizes;
 
@@ -2986,6 +3075,12 @@ NonnullRefPtr<Core::Promise<Empty>> Application::clear_browsing_data(ClearBrowsi
             private_session->cookie_jar->expire_cookies_accessed_since(options.since);
             private_session->storage_jar->remove_items_accessed_since(options.since);
             private_session->hsts_store->remove_policies_observed_since(options.since);
+        }
+
+        for (auto const& [_, container_session] : m_container_sessions) {
+            container_session->cookie_jar->expire_cookies_accessed_since(options.since);
+            container_session->storage_jar->remove_items_accessed_since(options.since);
+            container_session->hsts_store->remove_policies_observed_since(options.since);
         }
     }
 
@@ -3189,6 +3284,8 @@ void Application::schedule_permission_expiry()
     consider(*m_default_session->permission_manager);
     if (auto private_session = m_private_session.strong_ref())
         consider(*private_session->permission_manager);
+    for (auto const& [_, container_session] : m_container_sessions)
+        consider(*container_session->permission_manager);
 
     if (!deadline.has_value()) {
         if (m_permission_expiry_timer)
@@ -3202,6 +3299,8 @@ void Application::schedule_permission_expiry()
             m_default_session->permission_manager->run_expiry();
             if (auto private_session = m_private_session.strong_ref())
                 private_session->permission_manager->run_expiry();
+            for (auto const& [_, container_session] : m_container_sessions)
+                container_session->permission_manager->run_expiry();
             schedule_permission_expiry();
         });
     }
@@ -3218,6 +3317,8 @@ void Application::update_os_location_authorization()
 {
     auto denied = m_geolocation_provider && m_geolocation_provider->authorization() == Core::GeolocationAuthorization::Denied;
     m_default_session->permission_manager->set_os_denies_geolocation(denied);
+    for (auto const& [_, container_session] : m_container_sessions)
+        container_session->permission_manager->set_os_denies_geolocation(denied);
 }
 
 Core::GeolocationAuthorization Application::geolocation_authorization()
@@ -3247,6 +3348,8 @@ void Application::update_permission_defaults()
         }();
 
         m_default_session->permission_manager->set_global_default(name, state);
+        for (auto const& [_, container_session] : m_container_sessions)
+            container_session->permission_manager->set_global_default(name, state);
     }
 }
 
@@ -4525,6 +4628,7 @@ static MCP::TabInfo view_to_mcp_tab_info(ViewImplementation const& view, Optiona
         .id = view.view_id(),
         .title = view.title().to_well_formed_utf8(),
         .url = view.url().to_string(),
+        .container_id = view.container_id(),
         .is_loading = view.is_loading(),
         .is_active = active_view_id.has_value() && *active_view_id == view.view_id(),
     };
@@ -5016,7 +5120,7 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     return view_to_mcp_tab_info(*active_view, active_view->view_id());
 }
 
-void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, MCP::OnToolCallComplete on_complete)
+void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete on_complete)
 {
     Optional<URL::URL> parsed_url;
     if (url.has_value() && !url->is_empty()) {
@@ -5028,7 +5132,12 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         parsed_url = maybe_url.release_value();
     }
 
-    auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
+    if (container_id.has_value() && !container_id->is_empty() && !is_valid_container_id(*container_id)) {
+        on_complete(mcp_error_result("Invalid container_id (expected lowercase alphanumeric, '-' or '_')"sv));
+        return;
+    }
+
+    auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, container_id.value_or(String {}));
     if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
         on_complete(mcp_error_result("UI unavailable to open non-private tab"sv));
         return;
@@ -5041,6 +5150,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         result.set("tab_id"sv, view->view_id());
         result.set("url"sv, view->url().to_string());
         result.set("title"sv, view->title().to_well_formed_utf8());
+        result.set("container_id"sv, view->container_id());
         result.set("mcp_access_allowed"sv, true);
         on_complete(mcp_ok_json(JsonValue { move(result) }));
         return;
@@ -5056,6 +5166,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
     JsonObject result;
     result.set("tab_id"sv, view->view_id());
     result.set("url"sv, parsed_url->to_string());
+    result.set("container_id"sv, view->container_id());
     result.set("mcp_access_allowed"sv, true);
     result.set("is_loading"sv, true);
     on_complete(mcp_ok_json(JsonValue { move(result) }));

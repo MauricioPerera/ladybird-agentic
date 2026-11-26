@@ -1108,12 +1108,18 @@ Optional<ToolTipContent> TabBar::tooltip_at(QPoint position) const
 
     auto* tab = m_tab_widget ? m_tab_widget->tab(hovered_tab) : nullptr;
 
+    Optional<Hub::TabContainerInfo> container;
+    if (tab && !tab->container_id().is_empty())
+        container = Application::the().find_container(tab->container_id());
+
     // A title too long for its tab shows in full, with the site, in a tooltip.
-    if (tab && m_tabs_with_cut_titles.contains(tab)) {
+    if (tab && (m_tabs_with_cut_titles.contains(tab) || container.has_value())) {
         auto text = tabText(hovered_tab);
         // A URL without a host (about:blank, e.g.) has no site to show.
         if (auto url = tab->url(); url.host().has_value() && !url.serialized_host().is_empty())
             text = qformatted("{}\n{}", ak_string_from_qstring(text), url.serialized_host());
+        if (container.has_value())
+            text = qformatted("{}\nContainer: {}", ak_string_from_qstring(text), container->name);
         return ToolTipContent { .text = AK::move(text), .rect = visual_tab_rect(hovered_tab) };
     }
 
@@ -1299,6 +1305,28 @@ void TabBar::paintEvent(QPaintEvent*)
 
         auto icon = tabIcon(index);
         auto* tab_for_index = m_tab_widget ? m_tab_widget->tab(index) : nullptr;
+        if (tab_for_index && !tab_for_index->container_id().is_empty()) {
+            if (auto container = Application::the().find_container(tab_for_index->container_id()); container.has_value()) {
+                QColor accent(qstring_from_ak_string(container->color));
+                if (accent.isValid()) {
+                    painter.save();
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(accent);
+                    if (is_vertical) {
+                        QRectF stripe_rect(shape_rect.left() + 1.5, shape_rect.top() + 5.0, 3.0, max(0.0, shape_rect.height() - 10.0));
+                        painter.drawRoundedRect(stripe_rect, 1.5, 1.5);
+                    } else {
+                        auto stripe_left = horizontal_body_rect.left() + HORIZONTAL_SELECTED_TAB_RADIUS;
+                        auto stripe_width = max(0.0, horizontal_body_rect.width() - (2.0 * HORIZONTAL_SELECTED_TAB_RADIUS));
+                        if (stripe_width > 4.0) {
+                            QRectF stripe_rect(stripe_left, horizontal_body_rect.top() + 1.0, stripe_width, 2.5);
+                            painter.drawRoundedRect(stripe_rect, 1.25, 1.25);
+                        }
+                    }
+                    painter.restore();
+                }
+            }
+        }
         auto needs_attention = tab_for_index && tab_for_index->needs_attention() && !is_selected;
         auto favicon_shrink = tab_for_index ? tab_for_index->loading_favicon_shrink() : 0;
         auto favicon_opacity = tab_for_index && !tab_for_index->is_loaded() ? UNLOADED_TAB_FAVICON_OPACITY : 1.0;
@@ -3202,8 +3230,49 @@ TabWidget::TabWidget(WebView::IsPrivate is_private, QWidget* parent)
     m_new_tab_button->setObjectName("LadybirdNewTabButton");
     m_new_tab_button->setFixedSize(32, 32);
     m_new_tab_button->setFocusPolicy(Qt::NoFocus);
-    m_new_tab_button->setToolTip(qformatted("New Tab  {}", QKeySequence(QKeySequence::AddTab).toString(QKeySequence::NativeText)));
+    m_new_tab_button->setToolTip(is_private == WebView::IsPrivate::No
+            ? qformatted("New Tab  {} (Right-click for Containers)", QKeySequence(QKeySequence::AddTab).toString(QKeySequence::NativeText))
+            : qformatted("New Tab  {}", QKeySequence(QKeySequence::AddTab).toString(QKeySequence::NativeText)));
     m_new_tab_button->installEventFilter(this);
+    if (is_private == WebView::IsPrivate::No) {
+        m_new_tab_button->setContextMenuPolicy(Qt::CustomContextMenu);
+        QObject::connect(m_new_tab_button, &QWidget::customContextMenuRequested, this, [this](QPoint const& pos) {
+            auto* browser_window = qobject_cast<BrowserWindow*>(window());
+            if (!browser_window)
+                return;
+            QMenu menu(this);
+            auto* default_action = menu.addAction("Default (No Container)");
+            QObject::connect(default_action, &QAction::triggered, this, [browser_window]() {
+                browser_window->open_new_tab();
+            });
+            auto& app = Application::the();
+            if (!app.containers().is_empty()) {
+                menu.addSeparator();
+                for (auto const& container : app.containers()) {
+                    auto* action = menu.addAction(Application::container_dot_icon(container.color), qstring_from_ak_string(container.name));
+                    QObject::connect(action, &QAction::triggered, this, [browser_window, id = container.id]() {
+                        browser_window->open_new_tab_in_container(id);
+                    });
+                }
+            }
+            menu.addSeparator();
+            auto* create_action = menu.addAction("New Container...");
+            QObject::connect(create_action, &QAction::triggered, this, [browser_window]() {
+                if (auto created = Application::the().prompt_create_container(browser_window); created.has_value())
+                    browser_window->open_new_tab_in_container(created->id);
+            });
+            if (!app.containers().is_empty()) {
+                auto* delete_menu = menu.addMenu("Delete Container");
+                for (auto const& container : app.containers()) {
+                    auto* del_action = delete_menu->addAction(Application::container_dot_icon(container.color), qstring_from_ak_string(container.name));
+                    QObject::connect(del_action, &QAction::triggered, this, [id = container.id]() {
+                        (void)Application::the().delete_container(id);
+                    });
+                }
+            }
+            menu.exec(m_new_tab_button->mapToGlobal(pos));
+        });
+    }
 
     // The all-tabs button follows the sidebar's side, and sits beside the Ladybird button with horizontal tabs.
     auto* all_tabs_button = new ChromeHeaderButton(this);

@@ -52,6 +52,9 @@ ConnectionFromUI::ConnectionFromUI(NonnullOwnPtr<IPC::Transport> transport)
     auto& browser_process = Application::the().browser_process();
     browser_process.on_new_tab = [this](auto const& urls) { async_app_open_new_tab(urls); };
     browser_process.on_new_window = [this](auto const& urls) { async_app_open_new_window(urls); };
+
+    if (WebView::Application::is_initialized())
+        WebView::Application::container_store().add_observer(*this);
 }
 
 void ConnectionFromUI::detach_from_application()
@@ -64,6 +67,7 @@ void ConnectionFromUI::detach_from_application()
     if (auto* settings = WebView::Application::settings_if_initialized())
         settings->on_persist = nullptr;
     if (WebView::Application::is_initialized()) {
+        WebView::Application::container_store().remove_observer(*this);
         if (auto* browser_process = Application::the().browser_process_if_initialized()) {
             browser_process->on_new_tab = nullptr;
             browser_process->on_new_window = nullptr;
@@ -623,6 +627,8 @@ Messages::HubServer::InitializeResponse ConnectionFromUI::initialize()
     state.sandbox_is_disabled = options.disable_sandbox == WebView::DisableSandbox::Yes;
     state.gpu_painting_enabled = Application::the().compositor_gpu_painting_enabled();
     state.downloads = downloads();
+    for (auto const& container : WebView::Application::container_store().list_containers())
+        state.containers.append({ .id = container.id, .name = container.name, .color = container.color });
     state.urls = options.urls;
     state.raw_urls = options.raw_urls;
     state.crash_report_directory = WebView::CrashReportStore::the().directory();
@@ -645,6 +651,7 @@ Messages::HubServer::CreateViewResponse ConnectionFromUI::create_view(Hub::NewVi
 {
     auto& view = Application::the().create_view({
         .is_private = request.is_private,
+        .container_id = move(request.container_id),
         .device_pixel_ratio = request.device_pixel_ratio,
         .maximum_frames_per_second = request.maximum_frames_per_second,
         .display_id = request.display_id,
@@ -670,6 +677,31 @@ Messages::HubServer::ViewDescriptionResponse ConnectionFromUI::view_description(
 void ConnectionFromUI::crash_reports_changed()
 {
     async_crash_reports_changed();
+}
+
+void ConnectionFromUI::containers_changed()
+{
+    Vector<Hub::TabContainerInfo> containers;
+    for (auto const& container : WebView::Application::container_store().list_containers())
+        containers.append({ .id = container.id, .name = container.name, .color = container.color });
+    async_containers_changed(move(containers));
+}
+
+Messages::HubServer::CreateContainerResponse ConnectionFromUI::create_container(String name, String color)
+{
+    auto res = WebView::Application::container_store().create_container(move(name), move(color));
+    if (res.is_error())
+        return { Optional<Hub::TabContainerInfo> {}, MUST(String::formatted("{}", res.error())) };
+    auto created = res.release_value();
+    return { Hub::TabContainerInfo { .id = created.id, .name = created.name, .color = created.color }, Optional<String> {} };
+}
+
+Messages::HubServer::DeleteContainerResponse ConnectionFromUI::delete_container(String id)
+{
+    auto res = Application::the().delete_container(id);
+    if (res.is_error())
+        return { MUST(String::formatted("{}", res.error())) };
+    return { Optional<String> {} };
 }
 
 void ConnectionFromUI::ui_did_start()

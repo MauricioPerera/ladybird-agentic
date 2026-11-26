@@ -1,15 +1,16 @@
 # Ladybird Fork Architecture and Capabilities (`feat/extensions-dnr-and-dom-tools`)
 
-> **Scope and Baseline:** This manual documents the architecture, subsystems, security model, and known limitations implemented on branch `feat/extensions-dnr-and-dom-tools` at commit `0aa20e0a` in this repository.
+> **Scope and Baseline:** This manual documents the architecture, subsystems, security model, and verified behavior implemented on branch `feat/extensions-dnr-and-dom-tools` (including post-`339c5083` **Tab Containers**).
 
 ## 1. Executive Summary
 
-This fork extends upstream multi-process Ladybird with four capability layers while keeping real-time automation, extensions, and media tooling unified inside one profile:
+This fork extends upstream multi-process Ladybird with five capability layers while keeping real-time automation, extensions, session isolation, and media tooling unified inside one profile:
 
-1. **Embedded Model Context Protocol (`MCP`) and WebMCP Phase 1**: An in-browser HTTP + JSON-RPC 2.0 `MCPServer` (`LibMCP`) exposing 43 tools across tab control, Document Object Model (`DOM`) inspection, input synthesis, diagnostics, reusable flows, unpacked extensions, and `document.modelContext` / `navigator.modelContext` WebMCP page tools.
+1. **Embedded Model Context Protocol (`MCP`) and WebMCP Phase 1**: An in-browser HTTP + JSON-RPC 2.0 `MCPServer` (`LibMCP`) exposing 43 tools across tab control (`open_tab` supporting `container_id`), Document Object Model (`DOM`) inspection, input synthesis, diagnostics, reusable flows, unpacked extensions, and `document.modelContext` / `navigator.modelContext` WebMCP page tools.
 2. **Declarative Browser Automation (`Automation` and `about:flows`)**: A persistent JSON flow store (`FlowStore`), state-machine executor (`FlowRunner`), browser-based `about:flows` builder (`FlowsUI`), and an external Node.js Engine Protocol v1 adapter ([`Tools/e2e-ladybird-engine/README.md`](../Tools/e2e-ladybird-engine/README.md)).
 3. **Native Manifest V3 (`MV3`) Extensions and `declarativeNetRequest` (`DNR`)**: A native unpacked extension registry (`ExtensionStore`), content-script and adblock orchestrator (`ExtensionManager`) feeding `Web::ContentBlocker`, the `about:extensions` management page (`ExtensionsUI`), three bundled extensions, and Windows CryptoAPI / Authority Information Access (`AIA`) TLS chain fallback in `RequestServer`.
-4. **Real-Time WebRTC Media and Segmented `MP4` Tab Recording**: Windows Media Foundation (`WMF`) camera capture, H.264 / VP8 Media Foundation Transform (`MFT`) encoding, Windows Audio Session API (`WASAPI`) capture and recovery, Rust `webrtc` media/ICE transport, and sequential `MP4` tab recording with speaker diarization (`TabRecorder` and `SpeakerTimeline`).
+4. **Native Tab Containers (`ContainerStore`, `BrowsingSession`, `UI/Qt`)**: Persistent multi-account tab containers (`personal`, `work`, `banking`, `shopping`, plus custom containers) with isolated cookies, DOM storage, SQLite databases, HTTP caches, `WorkerAgentManager` session routing, `SessionStore` v13 persistence, and Qt tab visual badges/menus.
+5. **Real-Time WebRTC Media and Segmented `MP4` Tab Recording**: Windows Media Foundation (`WMF`) camera capture, H.264 / VP8 Media Foundation Transform (`MFT`) encoding, Windows Audio Session API (`WASAPI`) capture and recovery, Rust `webrtc` media/ICE transport, and sequential `MP4` tab recording with speaker diarization (`TabRecorder` and `SpeakerTimeline`).
 
 *Architectural rationale:* These layers share a single host controller (`WebView::Application`) so extensions can bundle reusable automation flows and filter lists, MCP agents can invoke flows and WebMCP tools inside the user's authenticated session, and W3C WebDriver detection (`navigator.webdriver`) remains `false` outside external WebDriver sessions.
 
@@ -171,6 +172,21 @@ sequenceDiagram
 
 ---
 
+## 5.5 Native Tab Containers (`ContainerStore`, Engine Isolation, Hub IPC, and Qt UI)
+
+- **Registry (`Libraries/LibWebView/ContainerStore.{h,cpp}`)**: Persists `TabContainer { id, name, color }` entries in `<profile.paths().config>/Containers.json`, seeding four defaults (`personal`, `work`, `banking`, `shopping`) on first load and exposing validation (`is_valid_container_id`, `is_valid_container_color`), creation, deletion, and `ContainerStoreObserver`.
+- **Engine Isolation (`BrowsingSession`, `CookieJar`, `WorkerAgentManager`, `RequestServerManager`, `WebView::Application`)**:
+  - Each active `container_id` resolves lazily to a distinct non-private `BrowsingSession` backed by `<profile.paths().data>/Containers/<id>/Ladybird.db` (cookies, localStorage/sessionStorage/IDB) and `<profile.paths().data>/Containers/<id>/Permissions.json`.
+  - `CookieJar::TransientStorage` filters live cookie change broadcasts by `m_owner_jar` pointer identity so cookie updates never cross containers.
+  - `WorkerAgentManager::post_broadcast_channel_message` and `WebWorkerClient` isolate `BroadcastChannel` and `SharedWorker` coordination by `session_id` rather than `IsPrivate`.
+  - `RequestServerManager` isolates site HMAC keys by `container_id` and scopes RequestServer HTTP caches under `RequestServer/Containers/<id>`.
+- **Hub IPC, Qt UI, Persistence & MCP**:
+  - `Services/Hub` (`HubClient.ipc` / `HubServer.ipc`) synchronizes `TabContainerInfo`, `containers_changed`, `create_container`/`delete_container`, and per-view `container_id` across in-process and out-of-process Hub builds.
+  - `UI/Qt` provides right-click on the `+` new-tab button, Ladybird menu -> *New Container Tab*, tab context menu -> *Reopen in Container*, duplicate-tab preservation, colored tab accent stripes/tooltips (`TabBar`), and `SessionStore` schema v13 (`SessionTabs.container_id`) persistence across restart/reopen.
+  - `LibMCP` exposes `container_id` on `TabInfo` and accepts optional `container_id` in `open_tab`.
+
+---
+
 ## 6. Real-Time Media, WebRTC, and Segmented `MP4` Tab Recording
 
 - **MediaCapture & AudioServer WASAPI**:
@@ -208,15 +224,16 @@ Remaining hardening / P2 architectural risks:
 | **High (`P1`)** | `Extensions` / WebMCP | Both systems inject asynchronously via `execute_script` into the Main World after commit (no isolated JS world; early `<head>` scripts may run first), `confirm_consequential` has no native Qt confirmation dialog, `permissions`/`host_permissions` are unenforced in JS, and `FlowsUI` interpolates `extract`/`eval`/`screenshot` `save_as` values unescaped into `{{var}}`. |
 | **Medium (`P2`)** | `WebRTC` / Windows | Windows `WebRTCClient` and `WebContent` are unsandboxed (`SandboxUnimplemented.cpp`). |
 
-### 7.2 Verification Suites (Commit `0aa20e0a`)
+### 7.2 Verification Suites (Current Tab Containers Build)
 
 | Test Binary / Suite | Scope / Verified Count | Command / Scope Covered |
 | :--- | :---: | :--- |
-| `TestLibWebView` (`TestExtensions`) | `8/8` | `./Build/release/bin/TestLibWebView[.exe] --suite TestExtensions` — paths/symlinks, URL patterns, manifests, store, injection, DNR translation |
-| `TestLibWebView` (`TestMCPAutomation`) | `6/6` | `./Build/release/bin/TestLibWebView[.exe] --suite TestMCPAutomation` — Auth/Host/Origin guards, 43 schemas, flows/extensions, agentic/WebMCP roundtrips, upload path validation |
-| `TestLibWebView` (`TestAutomationFlows`) | `5/5` | `./Build/release/bin/TestLibWebView[.exe] --suite TestAutomationFlows` — IDs, roundtrip JSON, `{{var}}`, locator escaping, `FlowStore` persistence |
+| `TestLibWebView` (`TestContainers`) | `2/2` | `./Build/release/bin/TestLibWebView[.exe] --suite TestContainers` — `ContainerStore` defaults/persistence and per-container `BrowsingSession`/`CookieJar` isolation |
+| `TestLibWebView` (`TestExtensions`) | `9/9` | `./Build/release/bin/TestLibWebView[.exe] --suite TestExtensions` — paths/symlinks, URL patterns, manifests, store, injection, DNR translation |
+| `TestLibWebView` (`TestMCPAutomation`) | `6/6` | `./Build/release/bin/TestLibWebView[.exe] --suite TestMCPAutomation` — Auth/Host/Origin guards, 43 schemas (including `open_tab.container_id`), flows/extensions, agentic/WebMCP roundtrips, upload path validation |
+| `TestLibWebView` (`TestAutomationFlows`) | `6/6` | `./Build/release/bin/TestLibWebView[.exe] --suite TestAutomationFlows` — IDs, roundtrip JSON, `{{var}}`, locator escaping, `FlowStore` persistence |
 | `TestLibWebView` (`TestOmnibox`) | `79/79` | `./Build/release/bin/TestLibWebView[.exe] --suite TestOmnibox` — URL, history, and `about:` WebUI suggestions |
-| `TestUIQt` (all Windows Qt suites) | `269/269` | `./Build/release/bin/TestUIQt[.exe]` — Qt chrome, session store, site settings, mic menu, `TabRecorderSettings` persistence |
+| `TestUIQt` (all Windows Qt suites) | `270/270` | `./Build/release/bin/TestUIQt[.exe]` — Qt chrome, session store schema v13 + `container_id` persistence (`TestSessionStore` `114/114`), snapshot storage (`61/61`), site settings, `TabRecorder` |
 | `TestLibMedia` (`TestWindowsMediaFoundationEncode.cpp`) | `11` test cases (compiled on `WIN32`) | `./Build/release/bin/TestLibMedia[.exe] --suite TestWindowsMediaFoundationEncode` — WMF H.264/VP8, camera sharing, `SpeakerTimeline`, `WindowsMediaFoundationMp4Recorder` |
 | `Tests/LibWeb/Text/input/WebRTC/*.html` | `17` text tests | PeerConnection lifecycle, audio/video loopback, mDNS obfuscation, permissions, RTX/FID, transforms |
 | `Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs` | `2` Node tests | `node --test Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs` — Protocol framing and mocked MCP engine roundtrips |

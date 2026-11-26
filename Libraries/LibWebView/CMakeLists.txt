@@ -24,6 +24,7 @@ set(SOURCES
     BrowserProcess.cpp
     CompositorClient.cpp
     CompositorPresentationClient.cpp
+    ContainerStore.cpp
     CookieJar.cpp
     CrashReport.cpp
     CrashReportDiagnostics.cpp

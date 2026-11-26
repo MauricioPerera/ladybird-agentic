@@ -113,6 +113,7 @@ struct WebView::ProcessSnapshot {
 // What it takes to make a view, which the UI asks for when the user opens a tab.
 struct Hub::NewViewRequest {
     WebView::IsPrivate is_private;
+    String container_id;
     double device_pixel_ratio;
     double maximum_frames_per_second;
     Optional<u64> display_id;
@@ -140,6 +141,8 @@ endpoint HubServer
 
     toggle_devtools_enabled() =|
     toggle_mcp_enabled() =|
+    create_container(String name, String color) => (Optional<Hub::TabContainerInfo> container, Optional<String> error)
+    delete_container(String id) => (Optional<String> error)
     check_for_updates(WebView::UpdateCheckTrigger trigger) =|
     skip_update_version(String version) =|
     set_preferred_contrast(Web::CSS::PreferredContrast contrast) =|

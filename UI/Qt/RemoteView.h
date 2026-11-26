@@ -72,6 +72,7 @@ public:
     void release_input(u64 input_id) { m_input_in_hub.remove(input_id); }
 
     WebView::IsPrivate is_private() const { return m_is_private; }
+    String const& container_id() const { return m_state.container_id; }
     URL::Origin permission_origin() const { return *m_state.permission_origin; }
     Vector<WebView::SitePermissionRow> site_permission_rows() const { return m_state.site_permission_rows; }
     void set_site_permission(URL::Origin const& origin, Web::Permissions::PermissionName name, Optional<WebView::PermissionDecision> decision) { HubConnection::the().async_view_set_site_permission(view_id(), origin, name, decision); }

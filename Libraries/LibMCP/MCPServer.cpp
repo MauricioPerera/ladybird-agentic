@@ -238,6 +238,7 @@ static JsonArray build_tool_definitions()
         props.set("url"sv, make_prop("string"sv, "Optional http:, https:, or about:blank URL to load in the new tab."sv));
         props.set("activate"sv, make_prop("boolean"sv, "Whether to focus the new tab in the window (default: true)."sv));
         props.set("wait_for_load"sv, make_prop("boolean"sv, "Whether to wait for initial page load before returning (default: true)."sv));
+        props.set("container_id"sv, make_prop("string"sv, "Optional tab container ID (e.g. 'personal', 'work') to isolate cookies and site storage from other tabs."sv));
         tools.must_append(make_tool_schema(
             "open_tab"sv,
             "Open a new non-private browser tab with MCP access automatically enabled."sv,
@@ -727,6 +728,7 @@ static JsonObject tab_info_to_json(TabInfo const& info)
     object.set("id"sv, info.id);
     object.set("title"sv, info.title);
     object.set("url"sv, info.url);
+    object.set("container_id"sv, info.container_id);
     object.set("is_loading"sv, info.is_loading);
     object.set("is_active"sv, info.is_active);
     return object;
@@ -1077,7 +1079,10 @@ private:
                 url = *maybe_url;
             bool activate = arguments.get_bool("activate"sv).value_or(true);
             bool wait_for_load = arguments.get_bool("wait_for_load"sv).value_or(true);
-            delegate.open_tab(move(url), activate, wait_for_load, move(complete));
+            Optional<String> container_id;
+            if (auto maybe_container = arguments.get_string("container_id"sv); maybe_container.has_value())
+                container_id = *maybe_container;
+            delegate.open_tab(move(url), activate, wait_for_load, move(container_id), move(complete));
             return;
         }
 

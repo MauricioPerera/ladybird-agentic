@@ -182,7 +182,7 @@ public:
     void unpin_tab(Tab&);
     void activate_first_unpinned_tab();
 
-    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation);
+    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation, String container_id = {});
     void duplicate_tab(Tab&, Web::HTML::ActivateTab = Web::HTML::ActivateTab::Yes, Optional<i32> history_step = {});
     void open_history_entry_in_new_tab(Tab&, int delta, Web::HTML::ActivateTab);
     void update_tab_audio_button(Tab&);
@@ -267,8 +267,9 @@ public slots:
     void tab_title_changed(int index, QString const&);
     void tab_favicon_changed(int index, QIcon const& icon);
     void tab_audio_state_changed(int index);
-    Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab, TabLocation);
+    Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab, TabLocation, String container_id = {});
     void open_new_tab();
+    void open_new_tab_in_container(String container_id);
     void activate_tab(int index);
     bool definitely_close_tab(int index);
     void move_tab(int old_index, int new_index);

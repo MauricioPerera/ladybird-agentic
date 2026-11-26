@@ -11,6 +11,7 @@
 #include <Hub/View.h>
 #include <LibIPC/ConnectionFromClient.h>
 #include <LibRequests/Request.h>
+#include <LibWebView/ContainerStore.h>
 #include <LibWebView/CrashReportOutbox.h>
 #include <LibWebView/FileDownloader.h>
 
@@ -20,7 +21,8 @@ namespace Hub {
 class ConnectionFromUI final
     : public IPC::ConnectionFromClient<HubClientEndpoint, HubServerEndpoint>
     , public WebView::FileDownloaderObserver
-    , public WebView::CrashReportOutboxObserver {
+    , public WebView::CrashReportOutboxObserver
+    , public WebView::ContainerStoreObserver {
     C_OBJECT(ConnectionFromUI);
 
 public:
@@ -42,6 +44,9 @@ private:
 
     // ^WebView::CrashReportOutboxObserver
     virtual void crash_reports_changed() override;
+
+    // ^WebView::ContainerStoreObserver
+    virtual void containers_changed() override;
 
     static View* find_view(u64 view_id);
 
@@ -72,6 +77,8 @@ private:
     virtual void stop_request(u64 request_id) override;
     virtual void toggle_devtools_enabled() override;
     virtual void toggle_mcp_enabled() override;
+    virtual Messages::HubServer::CreateContainerResponse create_container(String name, String color) override;
+    virtual Messages::HubServer::DeleteContainerResponse delete_container(String id) override;
     virtual void check_for_updates(WebView::UpdateCheckTrigger) override;
     virtual void skip_update_version(String) override;
     virtual void set_preferred_contrast(Web::CSS::PreferredContrast) override;

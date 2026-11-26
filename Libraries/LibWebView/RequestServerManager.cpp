@@ -121,7 +121,14 @@ void RequestServerManager::for_each_instance(Function<IterationDecision(RequestS
 
 ErrorOr<NonnullRefPtr<RequestServerInstance>> RequestServerManager::launch(NonnullRefPtr<BrowsingSession> session, Optional<Utf16String> site)
 {
-    auto cache_path = site.has_value() ? cache_path_for_site(*site) : Application::request_server_options().cache_path;
+    ByteString cache_path;
+    if (site.has_value()) {
+        cache_path = cache_path_for_site(*session, *site);
+    } else if (session->is_container()) {
+        cache_path = LexicalPath::join(Application::request_server_options().cache_path, "RequestServer"sv, "Containers"sv, session->container_id()).string();
+    } else {
+        cache_path = Application::request_server_options().cache_path;
+    }
     auto instance = adopt_ref(*new RequestServerInstance(session, move(site), move(cache_path)));
     TRY(launch_process(*instance));
     m_instances.append(instance);
@@ -352,9 +359,11 @@ ByteString RequestServerManager::sites_directory() const
 
 // The sandbox of a RequestServer does not stop it from asking whether a path exists, so a name that it could work out
 // itself would tell it which other sites the user has visited.
-ByteString RequestServerManager::cache_path_for_site(Utf16String const& site) const
+ByteString RequestServerManager::cache_path_for_site(BrowsingSession const& session, Utf16String const& site) const
 {
-    auto site_bytes = site.to_byte_string();
+    auto site_bytes = session.is_container()
+        ? ByteString::formatted("{}\0{}", session.container_id(), site.to_byte_string())
+        : site.to_byte_string();
     auto digest = MUST(Crypto::Authentication::hmac(Crypto::Hash::HashKind::SHA256, m_site_cache_key, site_bytes.bytes()));
     return LexicalPath::join(sites_directory(), encode_hex(digest.bytes())).string();
 }
