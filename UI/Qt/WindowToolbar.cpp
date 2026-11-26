@@ -690,6 +690,7 @@ private:
     qreal m_dot_scale { 1 };
 };
 
+#ifdef Q_OS_WIN
 class RecordButton final : public ToolbarButton {
 public:
     AK_ALLOC_WITH_KMALLOC;
@@ -770,6 +771,7 @@ private:
     i64 m_elapsed_seconds { 0 };
     u32 m_batch_index { 0 };
 };
+#endif
 
 template<typename ButtonType = ToolbarButton>
 static ButtonType* create_toolbar_button(QWidget& parent, QAction& action)
@@ -1309,6 +1311,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     toolbar_container_layout->setSpacing(0);
     toolbar_container_layout->setContentsMargins(0, 0, 0, TOOLBAR_BOTTOM_LINE_HEIGHT);
 
+#ifdef Q_OS_WIN
     m_record_button = new RecordButton(m_toolbar);
     QObject::connect(m_record_button, &QToolButton::clicked, this, [this] {
         if (m_tab)
@@ -1436,6 +1439,7 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     QObject::connect(m_recording_timer, &QTimer::timeout, this, [this] {
         update_record_button();
     });
+#endif
 
     m_downloads_button = new DownloadsButton(m_toolbar);
     QObject::connect(m_downloads_button, &QToolButton::clicked, this, [this] {
@@ -1650,7 +1654,8 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->addWidget(m_navigation_buttons, 0, Qt::AlignVCenter);
     m_navigation_buttons->show();
     toolbar_layout->addWidget(&field_slot(), 1);
-    toolbar_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
+    if (m_record_button)
+        toolbar_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -1689,7 +1694,8 @@ void WindowToolbar::lay_out_in_sidebar()
     m_window_controls_separator->hide();
 
     auto* footer_layout = static_cast<QBoxLayout*>(m_sidebar_footer->layout());
-    footer_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
+    if (m_record_button)
+        footer_layout->addWidget(m_record_button, 0, Qt::AlignVCenter);
     footer_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         footer_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
@@ -2020,6 +2026,8 @@ void WindowToolbar::update_record_button()
     u32 batch_idx = recording ? m_tab->recording_batch_index() : 0;
     m_record_button->set_recording_state(recording, elapsed_sec, batch_idx);
 
+    if (!m_recording_timer)
+        return;
     if (recording && !m_recording_timer->isActive())
         m_recording_timer->start();
     else if (!recording && m_recording_timer->isActive())

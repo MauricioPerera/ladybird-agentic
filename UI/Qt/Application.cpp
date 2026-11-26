@@ -3083,7 +3083,8 @@ void Application::report_active_view() const
 void Application::did_enable_devtools(u16 port)
 {
     m_devtools_port = port;
-    m_application_actions->devtools_enabled_changed(true);
+    if (m_application_actions)
+        m_application_actions->devtools_enabled_changed(true);
     for (auto* widget : QApplication::topLevelWidgets()) {
         if (auto* window = as_if<BrowserWindow>(widget))
             window->on_devtools_enabled();
@@ -3093,7 +3094,8 @@ void Application::did_enable_devtools(u16 port)
 void Application::did_disable_devtools()
 {
     m_devtools_port = {};
-    m_application_actions->devtools_enabled_changed(false);
+    if (m_application_actions)
+        m_application_actions->devtools_enabled_changed(false);
     for (auto* widget : QApplication::topLevelWidgets()) {
         if (auto* window = as_if<BrowserWindow>(widget))
             window->on_devtools_disabled();

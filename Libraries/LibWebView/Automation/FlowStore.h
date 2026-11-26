@@ -51,6 +51,7 @@ public:
 private:
     ByteString flow_file_path(StringView id) const;
     ByteString run_file_path(StringView run_id) const;
+    void remove_run_artifacts_from_disk(StringView run_id) const;
     void notify_flows_changed();
     void notify_flow_runs_changed();
 

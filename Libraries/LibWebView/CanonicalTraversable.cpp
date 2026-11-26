@@ -1755,6 +1755,8 @@ void CanonicalTraversable::did_activate_history_entry(HistoryOperation& operatio
             view->m_external_url_request_policy.clear_page_request_allowance();
             if (view->on_top_level_navigation_commit)
                 view->on_top_level_navigation_commit();
+            if (Application::is_initialized() && target_entry.url.scheme().is_one_of("http"sv, "https"sv))
+                Application::the().did_start_load_for_extensions(*view, target_entry.url);
         }
     }
 }

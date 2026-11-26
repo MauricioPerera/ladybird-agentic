@@ -171,8 +171,8 @@ static ErrorOr<FlowLocator> parse_locator(JsonValue const& value)
         locator.exact = *exact;
 
     if (auto nth = obj.get_integer<i64>("nth"sv); nth.has_value()) {
-        if (*nth < 0)
-            return Error::from_string_literal("Locator 'nth' must be non-negative");
+        if (*nth < 0 || *nth > 1000)
+            return Error::from_string_literal("Locator 'nth' must be between 0 and 1000");
         locator.nth = static_cast<size_t>(*nth);
     }
 

@@ -135,8 +135,11 @@ void FlowStore::reload()
         quick_sort(m_runs, [](FlowRunRecord const& a, FlowRunRecord const& b) {
             return a.started_at_ms > b.started_at_ms;
         });
-        if (m_runs.size() > max_in_memory_runs)
+        if (m_runs.size() > max_in_memory_runs) {
+            for (size_t i = max_in_memory_runs; i < m_runs.size(); ++i)
+                remove_run_artifacts_from_disk(m_runs[i].run_id);
             m_runs.shrink(max_in_memory_runs);
+        }
     }
 }
 
@@ -192,14 +195,43 @@ ErrorOr<void> FlowStore::delete_flow(StringView id)
         return Error::from_string_literal("Invalid flow 'id'");
 
     auto path = flow_file_path(id);
-    if (FileSystem::exists(path))
+    bool existed_on_disk = FileSystem::exists(path);
+    if (existed_on_disk)
         TRY(FileSystem::remove(path, FileSystem::RecursionMode::Disallowed));
 
-    if (!m_flows.remove(id) && !FileSystem::exists(path)) {
-        // Nothing removed from disk either if it didn't exist in memory; return ok only if existed, else NotFound.
-    }
+    bool removed_in_memory = m_flows.remove(id);
+    if (!existed_on_disk && !removed_in_memory)
+        return Error::from_string_literal("Flow not found");
+
     notify_flows_changed();
     return {};
+}
+
+void FlowStore::remove_run_artifacts_from_disk(StringView run_id) const
+{
+    if (!is_valid_flow_id(run_id))
+        return;
+
+    auto json_path = run_file_path(run_id);
+    if (FileSystem::exists(json_path))
+        (void)FileSystem::remove(json_path, FileSystem::RecursionMode::Disallowed);
+
+    auto runs_dir = runs_directory();
+    if (!FileSystem::is_directory(runs_dir))
+        return;
+
+    auto screenshot_prefix = ByteString::formatted("{}_step_", run_id);
+    Vector<ByteString> files_to_remove;
+    (void)Core::Directory::for_each_entry(runs_dir, Core::DirIterator::SkipParentAndBaseDir, [&](Core::DirectoryEntry const& entry, Core::Directory const& parent) -> ErrorOr<IterationDecision> {
+        if (entry.type == Core::DirectoryEntry::Type::File
+            && entry.name.starts_with(screenshot_prefix)
+            && entry.name.ends_with(".png"sv)) {
+            files_to_remove.append(parent.path().append(entry.name).string());
+        }
+        return IterationDecision::Continue;
+    });
+    for (auto const& file : files_to_remove)
+        (void)FileSystem::remove(file, FileSystem::RecursionMode::Disallowed);
 }
 
 void FlowStore::upsert_run(FlowRunRecord run, bool persist_to_disk)
@@ -220,8 +252,11 @@ void FlowStore::upsert_run(FlowRunRecord run, bool persist_to_disk)
     }
     if (!updated) {
         m_runs.prepend(move(run));
-        if (m_runs.size() > max_in_memory_runs)
+        if (m_runs.size() > max_in_memory_runs) {
+            for (size_t i = max_in_memory_runs; i < m_runs.size(); ++i)
+                remove_run_artifacts_from_disk(m_runs[i].run_id);
             m_runs.shrink(max_in_memory_runs);
+        }
     }
 
     notify_flow_runs_changed();

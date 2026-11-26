@@ -40,14 +40,14 @@
 
 ### Supported Actions (15)
 
-- **Navigation**: `open` (`http:`, `https:`, or `about:blank` only; fails if final URL is an `about:` error page when `wait_for_load` defaults to `true`), `reload` (waits for load by default; does **not** check for `about:` error pages), `back`, `forward` (`back` and `forward` wait a fixed `250 ms` timer rather than page-load completion events).
+- **Navigation**: `open` (`http:`, `https:`, or `about:blank` only; fails if final URL is an `about:` error page when `wait_for_load` defaults to `true`), `reload` (waits for load by default and fails if the landed page is an `about:` error page), `back`, `forward` (`back` and `forward` wait a fixed `250 ms` timer rather than page-load completion events).
 - **Interaction & Sync**: `click`, `fill` (clears by default; invokes native `HTMLInputElement` / `HTMLTextAreaElement` value setters and dispatches `input`/`change` events for React compatibility, and writes `textContent` on `isContentEditable` elements), `press` (`KeyboardEvent` dispatch), `wait_for`, `sleep`.
-- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`; results from `extract` and `eval` when `save_as` — or fallback alias `name` — is set update `record.outputs` and `runtime_vars` for downstream `{{var}}` interpolation).
-- **Capture**: `screenshot` (writes decoded PNG to `<storage_dir>/runs/<run_id>_step_<index>.png` and populates `step.output` / `step.screenshot_path`; `FlowRunner` ignores `save_as` for `screenshot` steps).
+- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`; results from `extract`, `eval`, and `screenshot` when `save_as` — or fallback alias `name` — is set update `record.outputs` and `runtime_vars` for downstream `{{var}}` interpolation).
+- **Capture**: `screenshot` (writes decoded PNG to `<storage_dir>/runs/<run_id>_step_<index>.png`, populates `step.output` / `step.screenshot_path`, and stores `step.output` into `record.outputs` / `runtime_vars` when `save_as` is set).
 
 ### Supported Locators (7)
 
-`css`, `xpath`, `role` (`role` + optional accessible `name`, or alias `value`), `label`, `placeholder`, `text`, and `test_id` (`data-testid`, also accepts `"testId"`), with optional `exact` (default `false`) and zero-based `nth` index (`FlowTypes` validates `nth >= 0`; `1000` upper bound exists only in MCP JSON Schema metadata).
+`css`, `xpath`, `role` (`role` + optional accessible `name`, or alias `value`), `label`, `placeholder`, `text`, and `test_id` (`data-testid`, also accepts `"testId"`), with optional `exact` (default `false`) and zero-based `nth` index (`0..1000` enforced in both `FlowTypes` and MCP JSON Schema).
 
 ## 3. Execution State Machine (`FlowRunner`)
 
@@ -74,14 +74,14 @@ flowchart LR
 
 - **Tab Permissions (`MCP` vs `about:flows`)**: MCP `run_flow` sets `require_mcp_permission = true`. `FlowsUI` (`about:flows`) sets `require_mcp_permission = false`, allowing flows to automate non-private `http:`/`https:`/`about:blank` tabs in the same browser session; private tabs (`IsPrivate::Yes`) are filtered out of `FlowsUI::send_state` and rejected by `Application::find_automation_view`.
 - **Variable Interpolation Surface**: `extract` and `eval` results stored via `save_as` flow directly from untrusted webpage DOM content into `{{var}}` substitutions (`open.url`, `fill.text`, `locator.value` / `xpath` / `css`), allowing page-controlled data to alter subsequent navigation targets or selectors.
-- **Unbounded Run Artifacts & Idempotent Delete**: Flows persist under `<data_dir>/automation/flows/` (or instance storage directory). Completed/cancelled run JSON files and step PNGs written under `runs/` are never pruned from disk (`max_in_memory_runs = 50` caps RAM only). `FlowStore::delete_flow` is an idempotent no-op returning success when called on an unknown `flow_id`.
+- **Run Pruning & Strict Delete**: Flows persist under `<data_dir>/automation/flows/` (or instance storage directory). Both `FlowStore::reload()` and `FlowStore::upsert_run()` cap active history at `max_in_memory_runs = 50` and prune evicted `<run_id>.json` and `<run_id>_step_*.png` files from `runs/`. `FlowStore::delete_flow` returns `"Flow not found"` if the `id` does not exist on disk or in memory.
 
 ## 5. Testing
 
-Run the unit test suite (`5` test cases at commit `0aa20e0a`):
+Run the unit test suite (`6` test cases):
 
 ```powershell
 ./Build/release/bin/TestLibWebView[.exe] --suite TestAutomationFlows
 ```
 
-Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, and `flow_store_persistence_and_observers`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.
+Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, `flow_store_persistence_and_observers`, and `flow_store_prunes_evicted_runs_from_disk`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.

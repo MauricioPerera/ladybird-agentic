@@ -71,6 +71,26 @@ TEST_CASE(parse_and_serialize_flow_roundtrip)
     invalid_id.set("id"sv, "../bad"sv);
     invalid_id.set("name"sv, "Bad ID"sv);
     EXPECT(WebView::parse_flow_definition(JsonValue { move(invalid_id) }).is_error());
+
+    auto make_locator_flow = [](i64 nth) {
+        JsonObject loc;
+        loc.set("kind"sv, "css"sv);
+        loc.set("value"sv, "button"sv);
+        loc.set("nth"sv, nth);
+        JsonObject step;
+        step.set("action"sv, "click"sv);
+        step.set("locator"sv, move(loc));
+        JsonArray steps;
+        steps.must_append(move(step));
+        JsonObject flow;
+        flow.set("id"sv, "nth-bound-check"sv);
+        flow.set("name"sv, "Nth Bound Check"sv);
+        flow.set("steps"sv, move(steps));
+        return flow;
+    };
+    EXPECT(!WebView::parse_flow_definition(JsonValue { make_locator_flow(1000) }).is_error());
+    EXPECT(WebView::parse_flow_definition(JsonValue { make_locator_flow(1001) }).is_error());
+    EXPECT(WebView::parse_flow_definition(JsonValue { make_locator_flow(-1) }).is_error());
 }
 
 TEST_CASE(variable_interpolation_single_pass)
@@ -141,6 +161,52 @@ TEST_CASE(flow_store_persistence_and_observers)
     MUST(store.delete_flow("example-smoke"sv));
     EXPECT_EQ(observer.flows_notifications, 2u);
     EXPECT(!store.get_flow("example-smoke"sv).has_value());
+    EXPECT(store.delete_flow("example-smoke"sv).is_error());
 
     store.remove_observer(observer);
+}
+
+TEST_CASE(flow_store_prunes_evicted_runs_from_disk)
+{
+    auto temp_dir = make_temp_flows_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    WebView::FlowStore store(temp_dir);
+    for (size_t i = 0; i < 53; ++i) {
+        WebView::FlowRunRecord run;
+        run.run_id = MUST(String::formatted("run-{:03}", i));
+        run.flow_id = "example-smoke"_string;
+        run.flow_name = "Example"_string;
+        run.status = "passed"_string;
+        run.started_at_ms = static_cast<i64>(1000 + i);
+        run.finished_at_ms = static_cast<i64>(1010 + i);
+        run.duration_ms = 10;
+        run.total_steps = 1;
+        store.upsert_run(run, true);
+
+        if (i < 3) {
+            auto png_path = LexicalPath::join(store.runs_directory(), ByteString::formatted("{}_step_0.png", run.run_id)).string();
+            auto file = MUST(Core::File::open(png_path, Core::File::OpenMode::Write));
+            MUST(file->write_until_depleted("png"sv));
+        }
+    }
+
+    EXPECT_EQ(store.list_runs({}, 100).size(), 50u);
+    EXPECT(!store.get_run("run-000"sv).has_value());
+    EXPECT(!store.get_run("run-002"sv).has_value());
+    EXPECT(store.get_run("run-003"sv).has_value());
+    EXPECT(store.get_run("run-052"sv).has_value());
+
+    EXPECT(!FileSystem::exists(LexicalPath::join(store.runs_directory(), "run-000.json"sv).string()));
+    EXPECT(!FileSystem::exists(LexicalPath::join(store.runs_directory(), "run-000_step_0.png"sv).string()));
+    EXPECT(!FileSystem::exists(LexicalPath::join(store.runs_directory(), "run-002.json"sv).string()));
+    EXPECT(!FileSystem::exists(LexicalPath::join(store.runs_directory(), "run-002_step_0.png"sv).string()));
+    EXPECT(FileSystem::exists(LexicalPath::join(store.runs_directory(), "run-052.json"sv).string()));
+
+    WebView::FlowStore reloaded(temp_dir);
+    EXPECT_EQ(reloaded.list_runs({}, 100).size(), 50u);
+    EXPECT(!reloaded.get_run("run-000"sv).has_value());
+    EXPECT(reloaded.get_run("run-052"sv).has_value());
 }

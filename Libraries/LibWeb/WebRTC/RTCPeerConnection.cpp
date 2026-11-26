@@ -121,10 +121,30 @@ RTCPeerConnection::RTCPeerConnection(GC::Ref<DOM::EventTarget> relevant_global_o
 void RTCPeerConnection::finalize()
 {
     auto& agent = WebRTCAgent::the();
-    if (!m_is_closed) {
+    bool was_closed = m_is_closed;
+    m_is_closed = true;
+    if (!was_closed) {
         if (auto* client = agent.existing_client())
             client->async_close_peer_connection(m_pc_id);
     }
+    for (auto const& [id, _] : m_data_channels_by_id)
+        agent.unregister_data_channel(id);
+    for (auto const& [_, pipeline] : m_outgoing_audio_pipelines) {
+        if (pipeline->sink)
+            pipeline->sink->deactivate();
+    }
+    m_outgoing_audio_pipelines.clear();
+    for (auto const& [_, pipeline] : m_outgoing_video_pipelines) {
+        if (pipeline->sink)
+            pipeline->sink->deactivate();
+    }
+    m_outgoing_video_pipelines.clear();
+    m_receiver_audio_decoders.clear();
+    m_receiver_video_decoders.clear();
+    m_pending_void_requests.clear();
+    m_pending_description_requests.clear();
+    m_pending_description_payloads.clear();
+    m_held_ice_events.clear();
     agent.unregister_peer_connection(m_pc_id);
     Base::finalize();
 }
@@ -1966,7 +1986,10 @@ void RTCPeerConnection::on_encoded_video_frame_received(u64 receiver_id, u32 ssr
 
     auto timestamp = AK::Duration::from_milliseconds(static_cast<i64>(rtp_timestamp / 90));
     auto flags = is_keyframe ? Media::FrameFlags::Keyframe : Media::FrameFlags::None;
-    Media::CodedFrame coded_frame { codec_id, timestamp, timestamp, AK::Duration::from_milliseconds(33), flags, MUST(FixedArray<u8>::create(coded_bytes)) };
+    auto frame_data_or_error = FixedArray<u8>::create(coded_bytes);
+    if (frame_data_or_error.is_error())
+        return;
+    Media::CodedFrame coded_frame { codec_id, timestamp, timestamp, AK::Duration::from_milliseconds(33), flags, frame_data_or_error.release_value() };
 
     auto rc = state.decoder->receive_coded_data(coded_frame, Media::DecodeIntent::Output);
     if (rc.is_error() && rc.error().category() == Media::DecoderErrorCategory::TryAgain) {
@@ -2035,7 +2058,10 @@ void RTCPeerConnection::feed_decoded_audio(u64 receiver_id, u32 ssrc, u32 contri
     auto& decoder = **m_receiver_audio_decoders.get(receiver_id);
 
     auto timestamp = AK::Duration::from_milliseconds(static_cast<i64>(rtp_timestamp / 48));
-    Media::CodedFrame coded_frame { Media::CodecID::Opus, timestamp, timestamp, {}, Media::FrameFlags::Keyframe, MUST(FixedArray<u8>::create(payload.bytes())) };
+    auto frame_data_or_error = FixedArray<u8>::create(payload.bytes());
+    if (frame_data_or_error.is_error())
+        return;
+    Media::CodedFrame coded_frame { Media::CodecID::Opus, timestamp, timestamp, {}, Media::FrameFlags::Keyframe, frame_data_or_error.release_value() };
     if (auto result = decoder.receive_coded_data(coded_frame); result.is_error()) {
         dbgln_if(WEBRTC_DEBUG, "RTCPeerConnection: Opus receive_coded_data failed: {}", result.error().description());
         return;

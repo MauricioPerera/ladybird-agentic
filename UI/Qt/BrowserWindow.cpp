@@ -561,10 +561,12 @@ void BrowserWindow::initialize_application_actions()
             m_tabs_container->set_current_index(m_tabs_container->count() - 1);
     });
 
+#ifdef Q_OS_WIN
     new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), this, [this]() {
         if (m_current_tab)
             m_current_tab->toggle_recording();
     });
+#endif
 }
 
 void BrowserWindow::initialize_application_menu()

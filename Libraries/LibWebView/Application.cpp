@@ -6448,7 +6448,9 @@ ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteS
         return Error::from_string_literal("Path must be a regular file");
 
     auto real_or_err = FileSystem::real_path(byte_path);
-    ByteString canonical = real_or_err.is_error() ? LexicalPath::canonicalized_path(byte_path) : real_or_err.release_value();
+    if (real_or_err.is_error())
+        return Error::from_string_literal("Could not resolve canonical file path");
+    ByteString canonical = real_or_err.release_value();
 
     auto norm_lower = canonical.replace("\\"sv, "/"sv, ReplaceMode::All).to_lowercase();
     if (norm_lower.starts_with("//"sv))
@@ -6478,7 +6480,9 @@ ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteS
             return Error::from_string_literal("Configured MCP upload directory does not exist");
 
         auto root_real_or_err = FileSystem::real_path(*allowed_root);
-        ByteString canonical_root = root_real_or_err.is_error() ? LexicalPath::canonicalized_path(*allowed_root) : root_real_or_err.release_value();
+        if (root_real_or_err.is_error())
+            return Error::from_string_literal("Could not resolve canonical MCP upload directory");
+        ByteString canonical_root = root_real_or_err.release_value();
 
         auto normalize_dir = [](ByteString path) {
             auto s = LexicalPath::canonicalized_path(path).replace("\\"sv, "/"sv, ReplaceMode::All);
@@ -6499,13 +6503,32 @@ ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteS
         if (!inside)
             return Error::from_string_literal("File path is outside the allowed MCP upload directory");
 
-        auto relative_part = norm_canonical.substring_view(prefix.length());
-        ByteString walk = canonical_root;
-        for (auto segment : relative_part.split_view('/', SplitBehavior::Nothing)) {
-            walk = LexicalPath::join(walk, segment).string();
-            if (FileSystem::is_link(walk))
-                return Error::from_string_literal("Uploading symbolic links or reparse points via MCP is not allowed");
-        }
+        auto walk_relative_links = [](ByteString const& base_root, StringView rel_path) -> ErrorOr<void> {
+            ByteString walk = base_root;
+            for (auto segment : rel_path.split_view('/', SplitBehavior::Nothing)) {
+                walk = LexicalPath::join(walk, segment).string();
+                if (FileSystem::is_link(walk))
+                    return Error::from_string_literal("Uploading symbolic links or reparse points via MCP is not allowed");
+            }
+            return {};
+        };
+
+        TRY(walk_relative_links(canonical_root, norm_canonical.substring_view(prefix.length())));
+
+        auto norm_raw = LexicalPath::canonicalized_path(byte_path).replace("\\"sv, "/"sv, ReplaceMode::All);
+        auto norm_allowed_root = normalize_dir(*allowed_root);
+        auto allowed_prefix = norm_allowed_root == "/"sv ? ByteString { "/" } : ByteString::formatted("{}/", norm_allowed_root);
+#if defined(AK_OS_WINDOWS)
+        if (norm_raw.to_lowercase().starts_with(allowed_prefix.to_lowercase()))
+            TRY(walk_relative_links(*allowed_root, norm_raw.substring_view(allowed_prefix.length())));
+        else if (norm_raw.to_lowercase().starts_with(prefix.to_lowercase()))
+            TRY(walk_relative_links(canonical_root, norm_raw.substring_view(prefix.length())));
+#else
+        if (norm_raw.starts_with(allowed_prefix))
+            TRY(walk_relative_links(*allowed_root, norm_raw.substring_view(allowed_prefix.length())));
+        else if (norm_raw.starts_with(prefix))
+            TRY(walk_relative_links(canonical_root, norm_raw.substring_view(prefix.length())));
+#endif
     }
 
     return canonical;

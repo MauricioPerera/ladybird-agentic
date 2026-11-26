@@ -248,15 +248,22 @@ void FlowRunner::run_next_step(String const& run_id)
 
     case FlowStep::Action::Reload: {
         if (step.wait_for_load) {
-            run.nav_wait_id = m_application.start_automation_navigation_wait(run.tab_id, timeout_ms, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx](ErrorOr<void> result) {
+            run.nav_wait_id = m_application.start_automation_navigation_wait(run.tab_id, timeout_ms, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission](ErrorOr<void> result) {
                 if (!weak_self)
                     return;
                 if (auto active = weak_self->m_active_runs.get(run_id); active.has_value())
                     active.value()->nav_wait_id.clear();
-                if (result.is_error())
+                if (result.is_error()) {
                     weak_self->fail_run(run_id, MUST(String::formatted("Reload failed: {}", result.error())));
-                else
-                    weak_self->complete_current_step(run_id, idx);
+                    return;
+                }
+                if (auto landed_view = weak_self->m_application.find_automation_view(tab_id, require_mcp); landed_view.has_value()) {
+                    if (landed_view->url().scheme() == "about"sv && landed_view->url() != URL::about_blank()) {
+                        weak_self->fail_run(run_id, MUST(String::formatted("Reload landed on browser error page '{}' (check SSL certificate or network)", landed_view->url().to_string())));
+                        return;
+                    }
+                }
+                weak_self->complete_current_step(run_id, idx);
             });
             view->reload();
             return;
@@ -533,7 +540,8 @@ void FlowRunner::complete_current_step(String const& run_id, size_t step_index, 
     step_res.output = move(output);
     step_res.screenshot_path = move(screenshot_path);
 
-    if (step_def.action == FlowStep::Action::Extract || (step_def.action == FlowStep::Action::Eval && step_def.save_as.has_value())) {
+    if (step_def.action == FlowStep::Action::Extract
+        || ((step_def.action == FlowStep::Action::Eval || step_def.action == FlowStep::Action::Screenshot) && step_def.save_as.has_value())) {
         auto key = step_def.save_as.value_or("extracted"_string);
         run.record.outputs.set(key, step_res.output);
         if (step_res.output.is_string())
