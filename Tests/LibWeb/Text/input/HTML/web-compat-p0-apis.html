@@ -36,5 +36,25 @@
 
         const persistResult = await navigator.storage.persist();
         println("storage.persist(): " + persistResult);
+
+        println("typeof PublicKeyCredential: " + (typeof PublicKeyCredential));
+        println("PublicKeyCredential inherits Credential: " + (Object.getPrototypeOf(PublicKeyCredential.prototype) === Credential.prototype));
+        println("isUserVerifyingPlatformAuthenticatorAvailable: " + await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+        println("isConditionalMediationAvailable: " + await PublicKeyCredential.isConditionalMediationAvailable());
+
+        println("typeof registerProtocolHandler: " + (typeof navigator.registerProtocolHandler));
+        println("typeof unregisterProtocolHandler: " + (typeof navigator.unregisterProtocolHandler));
+        try {
+            navigator.registerProtocolHandler("javascript", "https://example.com/?u=%s");
+            println("registerProtocolHandler(javascript): did not throw");
+        } catch (err) {
+            println("registerProtocolHandler(javascript): " + err.name);
+        }
+        try {
+            navigator.registerProtocolHandler("mailto", "https://example.com/no-placeholder");
+            println("registerProtocolHandler(no-placeholder): did not throw");
+        } catch (err) {
+            println("registerProtocolHandler(no-placeholder): " + err.name);
+        }
     });
 </script>

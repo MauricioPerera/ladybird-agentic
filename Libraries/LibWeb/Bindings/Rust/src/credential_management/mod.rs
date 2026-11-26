@@ -13,3 +13,4 @@ pub(crate) mod federated_credential;
 pub(crate) mod federated_credential_operations;
 pub(crate) mod password_credential;
 pub(crate) mod password_credential_operations;
+pub(crate) mod public_key_credential;

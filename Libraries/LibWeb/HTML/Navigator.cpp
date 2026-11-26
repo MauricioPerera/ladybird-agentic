@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/CharacterTypes.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibGC/Heap.h>
 #include <LibJS/HostClassBuilder.h>
 #include <LibWeb/Bindings/Wrappable.h>
@@ -25,6 +27,7 @@
 #include <LibWeb/ServiceWorker/ServiceWorkerContainer.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/CallbackType.h>
+#include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/Promise.h>
 
 namespace Web::HTML {
@@ -231,6 +234,80 @@ GC::Ref<PermissionsAPI::Permissions> Navigator::permissions()
     if (!m_permissions)
         m_permissions = PermissionsAPI::Permissions::create();
     return *m_permissions;
+}
+
+// https://html.spec.whatwg.org/multipage/system-state.html#normalize-protocol-handler-parameters
+static WebIDL::ExceptionOr<void> normalize_protocol_handler_parameters(Utf16String const& scheme, Utf16String const& url, EnvironmentSettingsObject& environment)
+{
+    // 1. Set scheme to scheme converted to ASCII lowercase.
+    auto normalized_scheme = scheme.to_ascii_lowercase();
+    auto scheme_view = normalized_scheme.utf16_view();
+
+    // 2. If scheme is neither a safelisted scheme nor a string starting with "web+" followed by one or more ASCII lower alphas,
+    //    then throw a "SecurityError" DOMException.
+    static constexpr Array safelisted_schemes = {
+        u"bitcoin"sv, u"ftp"sv, u"ftps"sv, u"geo"sv, u"im"sv, u"irc"sv, u"ircs"sv, u"magnet"sv,
+        u"mailto"sv, u"matrix"sv, u"mms"sv, u"news"sv, u"nntp"sv, u"openpgp4fpr"sv, u"sftp"sv,
+        u"sip"sv, u"sms"sv, u"smsto"sv, u"ssh"sv, u"tel"sv, u"urn"sv, u"webcal"sv, u"wtai"sv, u"xmpp"sv
+    };
+    bool is_safelisted = false;
+    for (auto const& candidate : safelisted_schemes) {
+        if (scheme_view == candidate) {
+            is_safelisted = true;
+            break;
+        }
+    }
+    if (!is_safelisted) {
+        bool is_valid_custom_scheme = scheme_view.starts_with(u"web+"sv) && scheme_view.length_in_code_units() > 4;
+        if (is_valid_custom_scheme) {
+            for (size_t i = 4; i < scheme_view.length_in_code_units(); ++i) {
+                if (!is_ascii_lower_alpha(scheme_view.code_unit_at(i))) {
+                    is_valid_custom_scheme = false;
+                    break;
+                }
+            }
+        }
+        if (!is_valid_custom_scheme)
+            return WebIDL::SecurityError::create(Utf16String::formatted("The scheme '{}' is not permitted for protocol handlers", scheme));
+    }
+
+    // 3. If url does not contain "%s", then throw a "SyntaxError" DOMException.
+    auto url_view = url.utf16_view();
+    auto placeholder_offset = url_view.find_code_unit_offset(u"%s"sv);
+    if (!placeholder_offset.has_value())
+        return WebIDL::SyntaxError::create("The URL argument must contain '%s'"_utf16);
+
+    // 4-6. Replace first "%s" with "dummy", encoding-parse relative to environment, and verify HTTP(S) + same origin.
+    Utf16StringBuilder replaced_url_builder;
+    replaced_url_builder.append(url_view.substring_view(0, *placeholder_offset));
+    replaced_url_builder.append(u"dummy"sv);
+    replaced_url_builder.append(url_view.substring_view(*placeholder_offset + 2));
+    auto replaced_url = replaced_url_builder.to_string();
+
+    auto parsed_url = environment.encoding_parse_url(replaced_url.utf16_view());
+    if (!parsed_url.has_value())
+        return WebIDL::SyntaxError::create(Utf16String::formatted("The URL '{}' is invalid", url));
+
+    if ((parsed_url->scheme() != "http"sv && parsed_url->scheme() != "https"sv)
+        || !parsed_url->origin().is_same_origin(environment.origin())) {
+        return WebIDL::SecurityError::create("Protocol handler URL must be same-origin and use http or https"_utf16);
+    }
+
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/system-state.html#dom-navigator-registerprotocolhandler
+WebIDL::ExceptionOr<void> Navigator::register_protocol_handler(Utf16String const& scheme, Utf16String const& url)
+{
+    TRY(normalize_protocol_handler_parameters(scheme, url, relevant_settings_object(*m_window)));
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/system-state.html#dom-navigator-unregisterprotocolhandler
+WebIDL::ExceptionOr<void> Navigator::unregister_protocol_handler(Utf16String const& scheme, Utf16String const& url)
+{
+    TRY(normalize_protocol_handler_parameters(scheme, url, relevant_settings_object(*m_window)));
+    return {};
 }
 
 Window* web_html_navigator_window(JSObject* navigator_wrapper)

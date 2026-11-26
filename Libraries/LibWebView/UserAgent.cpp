@@ -10,6 +10,7 @@ namespace WebView {
 
 OrderedHashMap<StringView, StringView> const& user_agents = *new OrderedHashMap<StringView, StringView> {
     { "Chrome Linux Desktop"sv, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"sv },
+    { "Chrome Windows Desktop"sv, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"sv },
     { "Chrome macOS Desktop"sv, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"sv },
     { "Firefox Linux Desktop"sv, "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"sv },
     { "Firefox macOS Desktop"sv, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0"sv },

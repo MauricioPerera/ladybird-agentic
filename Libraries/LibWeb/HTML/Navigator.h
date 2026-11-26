@@ -44,7 +44,8 @@ class Navigator
 public:
     [[nodiscard]] static GC::Ref<Navigator> create(Window&);
 
-    // FIXME: Implement NavigatorContentUtilsMixin
+    WebIDL::ExceptionOr<void> register_protocol_handler(Utf16String const& scheme, Utf16String const& url);
+    WebIDL::ExceptionOr<void> unregister_protocol_handler(Utf16String const& scheme, Utf16String const& url);
 
     // NavigatorCookies
     // FIXME: Hook up to Agent level state

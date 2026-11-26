@@ -9,3 +9,11 @@ credentials.preventSilentAccess(): undefined
 credentials.get(aborted) rejected: cancelled
 storage.persisted(): false
 storage.persist(): false
+typeof PublicKeyCredential: function
+PublicKeyCredential inherits Credential: true
+isUserVerifyingPlatformAuthenticatorAvailable: false
+isConditionalMediationAvailable: false
+typeof registerProtocolHandler: function
+typeof unregisterProtocolHandler: function
+registerProtocolHandler(javascript): SecurityError
+registerProtocolHandler(no-placeholder): SyntaxError

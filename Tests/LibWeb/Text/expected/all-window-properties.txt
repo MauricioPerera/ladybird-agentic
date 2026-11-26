@@ -395,6 +395,7 @@ ProcessingInstruction
 ProgressEvent
 Promise
 PromiseRejectionEvent
+PublicKeyCredential
 QuotaExceededError
 RTCCertificate
 RTCDTMFSender
