@@ -56,6 +56,8 @@ public:
     virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
     virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
     virtual void hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
+    virtual void drag(u64 tab_id, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String> to_ref, Optional<String> to_selector, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, OnToolCallComplete) = 0;
+    virtual void upload_file(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, OnToolCallComplete) = 0;
     virtual void select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, OnToolCallComplete) = 0;
     virtual void wait_for(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, OnToolCallComplete) = 0;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, OnToolCallComplete) = 0;

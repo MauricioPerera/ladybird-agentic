@@ -170,6 +170,35 @@ public:
         out.set("timeout_ms"sv, static_cast<u64>(timeout_ms));
         cb(ok_json_result(JsonValue { move(out) }));
     }
+    virtual void drag(u64, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String>, Optional<String>, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "drag"_string, from_ref, from_selector, {} };
+        JsonObject out;
+        out.set("dragged"sv, true);
+        JsonObject from_obj;
+        from_obj.set("x"sv, from_x.value_or(10));
+        from_obj.set("y"sv, from_y.value_or(20));
+        JsonObject to_obj;
+        to_obj.set("x"sv, to_x.value_or(from_x.value_or(10) + delta_x.value_or(0)));
+        to_obj.set("y"sv, to_y.value_or(from_y.value_or(20) + delta_y.value_or(0)));
+        out.set("from"sv, move(from_obj));
+        out.set("to"sv, move(to_obj));
+        out.set("steps"sv, static_cast<u64>(steps));
+        out.set("duration_ms"sv, static_cast<u64>(duration_ms));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void upload_file(u64, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "upload_file"_string, ref, selector, element_id };
+        JsonObject out;
+        out.set("uploaded"sv, true);
+        out.set("file_count"sv, static_cast<u64>(file_paths.size()));
+        JsonArray paths;
+        for (auto const& p : file_paths)
+            paths.must_append(p);
+        out.set("paths"sv, move(paths));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
     virtual void get_console_logs(u64 tab_id, size_t, bool, MCP::OnToolCallComplete cb) override
     {
         JsonArray logs;
@@ -626,7 +655,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 39u);
+    EXPECT_EQ(tools->size(), 41u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -635,6 +664,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     bool found_cancel_flow_run = false;
     bool found_install_extension = false;
     bool found_inject_extension = false;
+    bool found_drag = false;
+    bool found_upload_file = false;
     bool found_snapshot = false;
     bool found_console = false;
     bool found_network = false;
@@ -656,6 +687,10 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             found_install_extension = true;
         else if (name == "inject_extension"sv)
             found_inject_extension = true;
+        else if (name == "drag"sv)
+            found_drag = true;
+        else if (name == "upload_file"sv)
+            found_upload_file = true;
         else if (name == "get_page_snapshot"sv)
             found_snapshot = true;
         else if (name == "get_console_logs"sv)
@@ -673,6 +708,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(found_cancel_flow_run);
     EXPECT(found_install_extension);
     EXPECT(found_inject_extension);
+    EXPECT(found_drag);
+    EXPECT(found_upload_file);
     EXPECT(found_snapshot);
     EXPECT(found_console);
     EXPECT(found_network);
@@ -1036,5 +1073,49 @@ TEST_CASE(mcp_agentic_tools_roundtrip)
         auto res = call_mcp_tool(port, token, 10, "get_network_requests"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT_EQ(payload.get_array("requests"sv)->at(0).as_object().get_integer<u64>("status_code"sv).value_or(0), 500u);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("from_ref"sv, "@e1"sv);
+        args.set("delta_x"sv, 120);
+        args.set("steps"sv, 8);
+        args.set("duration_ms"sv, 200);
+        auto res = call_mcp_tool(port, token, 11, "drag"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("dragged"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<u64>("steps"sv).value_or(0), 8u);
+        EXPECT_EQ(payload.get_integer<u64>("duration_ms"sv).value_or(0), 200u);
+        EXPECT_EQ(delegate.last_action->tool, "drag"sv);
+    }
+
+    {
+        JsonArray paths;
+        paths.must_append("C:\\tmp\\thumb.png"sv);
+        paths.must_append("C:\\tmp\\captions.srt"sv);
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("selector"sv, "input[type=file]"sv);
+        args.set("paths"sv, move(paths));
+        auto res = call_mcp_tool(port, token, 12, "upload_file"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("uploaded"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<u64>("file_count"sv).value_or(0), 2u);
+        EXPECT_EQ(delegate.last_action->tool, "upload_file"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("ref"sv, "@e4"sv);
+        args.set("path"sv, "C:\\tmp\\single.mp4"sv);
+        auto res = call_mcp_tool(port, token, 13, "upload_file"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("uploaded"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<u64>("file_count"sv).value_or(0), 1u);
     }
 }

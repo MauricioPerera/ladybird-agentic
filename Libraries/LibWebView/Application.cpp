@@ -10,6 +10,7 @@
 #include <AK/Hex.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/LexicalPath.h>
 #include <AK/Math.h>
 #include <AK/Random.h>
 #include <AK/ScopeGuard.h>
@@ -5805,6 +5806,283 @@ return { hovered: true, tag: (el.tagName || '').toLowerCase() };
 )JS"sv);
 
     execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+}
+
+void Application::drag(u64 tab_id, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String> to_ref, Optional<String> to_selector, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, MCP::OnToolCallComplete on_complete)
+{
+    auto clamped_steps = max(1u, min(steps, 60u));
+    auto clamped_duration_ms = min(duration_ms, 5000u);
+
+    auto run_perform_actions = [this, tab_id, clamped_steps, clamped_duration_ms](i32 start_x, i32 start_y, i32 end_x, i32 end_y, MCP::OnToolCallComplete cb) {
+        JsonArray ptr_actions;
+
+        JsonObject move_start;
+        move_start.set("type"sv, "pointerMove"sv);
+        move_start.set("origin"sv, "viewport"sv);
+        move_start.set("x"sv, static_cast<i64>(start_x));
+        move_start.set("y"sv, static_cast<i64>(start_y));
+        move_start.set("duration"sv, 0);
+        ptr_actions.must_append(move(move_start));
+
+        JsonObject ptr_down;
+        ptr_down.set("type"sv, "pointerDown"sv);
+        ptr_down.set("button"sv, 0);
+        ptr_actions.must_append(move(ptr_down));
+
+        u64 base_step_ms = clamped_duration_ms / clamped_steps;
+        u64 extra_ms = clamped_duration_ms % clamped_steps;
+        for (u32 i = 1; i <= clamped_steps; ++i) {
+            double t = static_cast<double>(i) / static_cast<double>(clamped_steps);
+            i32 x = static_cast<i32>(round(start_x + (end_x - start_x) * t));
+            i32 y = static_cast<i32>(round(start_y + (end_y - start_y) * t));
+
+            JsonObject step_move;
+            step_move.set("type"sv, "pointerMove"sv);
+            step_move.set("origin"sv, "viewport"sv);
+            step_move.set("x"sv, static_cast<i64>(x));
+            step_move.set("y"sv, static_cast<i64>(y));
+            step_move.set("duration"sv, base_step_ms + (i == 1 ? extra_ms : 0));
+            ptr_actions.must_append(move(step_move));
+        }
+
+        JsonObject ptr_up;
+        ptr_up.set("type"sv, "pointerUp"sv);
+        ptr_up.set("button"sv, 0);
+        ptr_actions.must_append(move(ptr_up));
+
+        JsonObject ptr_params;
+        ptr_params.set("pointerType"sv, "mouse"sv);
+
+        JsonObject ptr_seq;
+        ptr_seq.set("type"sv, "pointer"sv);
+        ptr_seq.set("id"sv, "mcp-mouse"sv);
+        ptr_seq.set("parameters"sv, move(ptr_params));
+        ptr_seq.set("actions"sv, move(ptr_actions));
+
+        JsonArray actions_list;
+        actions_list.must_append(move(ptr_seq));
+
+        JsonObject payload;
+        payload.set("actions"sv, move(actions_list));
+
+        enqueue_mcp_webdriver_command(tab_id, "perform_actions"_string, move(payload), {}, [start_x, start_y, end_x, end_y, clamped_steps, clamped_duration_ms, cb = move(cb)](Web::WebDriver::Response response) {
+            if (response.is_error()) {
+                cb(format_mcp_webdriver_error(response.error()));
+                return;
+            }
+            JsonObject result;
+            result.set("dragged"sv, true);
+            JsonObject from_obj;
+            from_obj.set("x"sv, static_cast<i64>(start_x));
+            from_obj.set("y"sv, static_cast<i64>(start_y));
+            JsonObject to_obj;
+            to_obj.set("x"sv, static_cast<i64>(end_x));
+            to_obj.set("y"sv, static_cast<i64>(end_y));
+            result.set("from"sv, move(from_obj));
+            result.set("to"sv, move(to_obj));
+            result.set("steps"sv, static_cast<u64>(clamped_steps));
+            result.set("duration_ms"sv, static_cast<u64>(clamped_duration_ms));
+            cb(mcp_ok_json(JsonValue { move(result) }));
+        });
+    };
+
+    bool has_from_el = (from_ref.has_value() && !from_ref->is_empty()) || (from_selector.has_value() && !from_selector->is_empty());
+    bool has_to_el = (to_ref.has_value() && !to_ref->is_empty()) || (to_selector.has_value() && !to_selector->is_empty());
+
+    if (!has_from_el && from_x.has_value() && from_y.has_value() && !has_to_el && ((to_x.has_value() && to_y.has_value()) || delta_x.has_value() || delta_y.has_value())) {
+        i32 end_x = to_x.value_or(*from_x + delta_x.value_or(0));
+        i32 end_y = to_y.value_or(*from_y + delta_y.value_or(0));
+        run_perform_actions(*from_x, *from_y, end_x, end_y, move(on_complete));
+        return;
+    }
+
+    JsonObject cfg;
+    if (from_ref.has_value() && !from_ref->is_empty())
+        cfg.set("fromRef"sv, *from_ref);
+    if (from_selector.has_value() && !from_selector->is_empty())
+        cfg.set("fromSelector"sv, *from_selector);
+    if (from_x.has_value() && from_y.has_value()) {
+        cfg.set("fromX"sv, static_cast<i64>(*from_x));
+        cfg.set("fromY"sv, static_cast<i64>(*from_y));
+    }
+    if (to_ref.has_value() && !to_ref->is_empty())
+        cfg.set("toRef"sv, *to_ref);
+    if (to_selector.has_value() && !to_selector->is_empty())
+        cfg.set("toSelector"sv, *to_selector);
+    if (to_x.has_value() && to_y.has_value()) {
+        cfg.set("toX"sv, static_cast<i64>(*to_x));
+        cfg.set("toY"sv, static_cast<i64>(*to_y));
+    }
+    if (delta_x.has_value())
+        cfg.set("deltaX"sv, static_cast<i64>(*delta_x));
+    if (delta_y.has_value())
+        cfg.set("deltaY"sv, static_cast<i64>(*delta_y));
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+let sx, sy;
+if (cfg.fromRef || cfg.fromSelector) {
+  const src = resolveTarget({ ref: cfg.fromRef, selector: cfg.fromSelector });
+  if (src.error) return { error: 'Source: ' + src.error };
+  if (typeof src.el.scrollIntoView === 'function') src.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const r = src.el.getBoundingClientRect();
+  sx = Math.round(r.left + r.width / 2);
+  sy = Math.round(r.top + r.height / 2);
+} else if (cfg.fromX !== undefined && cfg.fromY !== undefined) {
+  sx = Math.round(Number(cfg.fromX));
+  sy = Math.round(Number(cfg.fromY));
+} else {
+  return { error: 'Source requires from_ref, from_selector, or from_x and from_y' };
+}
+
+let ex, ey;
+if (cfg.toRef || cfg.toSelector) {
+  const dst = resolveTarget({ ref: cfg.toRef, selector: cfg.toSelector });
+  if (dst.error) return { error: 'Destination: ' + dst.error };
+  const r = dst.el.getBoundingClientRect();
+  ex = Math.round(r.left + r.width / 2);
+  ey = Math.round(r.top + r.height / 2);
+} else if (cfg.toX !== undefined && cfg.toY !== undefined) {
+  ex = Math.round(Number(cfg.toX));
+  ey = Math.round(Number(cfg.toY));
+} else if (cfg.deltaX !== undefined || cfg.deltaY !== undefined) {
+  ex = Math.round(sx + Number(cfg.deltaX || 0));
+  ey = Math.round(sy + Number(cfg.deltaY || 0));
+} else {
+  return { error: 'Destination requires to_ref, to_selector, to_x/to_y, or delta_x/delta_y' };
+}
+return { sx, sy, ex, ey };
+)JS"sv);
+
+    JsonArray args;
+    args.must_append(move(cfg));
+    JsonObject payload;
+    payload.set("script"sv, MUST(js.to_string()));
+    payload.set("args"sv, move(args));
+
+    enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [run_perform_actions = move(run_perform_actions), on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        if (!response.value().is_object()) {
+            on_complete(mcp_error_result("Unexpected drag coordinate resolution response"sv));
+            return;
+        }
+        auto const& obj = response.value().as_object();
+        if (auto err = obj.get_string("error"sv); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
+        auto sx = obj.get_integer<i32>("sx"sv);
+        auto sy = obj.get_integer<i32>("sy"sv);
+        auto ex = obj.get_integer<i32>("ex"sv);
+        auto ey = obj.get_integer<i32>("ey"sv);
+        if (!sx.has_value() || !sy.has_value() || !ex.has_value() || !ey.has_value()) {
+            on_complete(mcp_error_result("Failed resolving drag coordinates"sv));
+            return;
+        }
+        run_perform_actions(*sx, *sy, *ex, *ey, move(on_complete));
+    });
+}
+
+void Application::upload_file(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, MCP::OnToolCallComplete on_complete)
+{
+    if (file_paths.is_empty()) {
+        on_complete(mcp_error_result("At least one local file path must be provided"sv));
+        return;
+    }
+
+    StringBuilder joined;
+    JsonArray paths_array;
+    for (auto const& path : file_paths) {
+        auto byte_path = path.to_byte_string();
+        if (!LexicalPath::is_absolute_path(byte_path)) {
+            on_complete(mcp_error_result(MUST(String::formatted("File path must be absolute: {}", path))));
+            return;
+        }
+        if (!FileSystem::exists(byte_path)) {
+            on_complete(mcp_error_result(MUST(String::formatted("File does not exist: {}", path))));
+            return;
+        }
+        if (FileSystem::is_directory(byte_path)) {
+            on_complete(mcp_error_result(MUST(String::formatted("Path must be a file, not a directory: {}", path))));
+            return;
+        }
+        if (!joined.is_empty())
+            joined.append('\n');
+        joined.append(path);
+        paths_array.must_append(path);
+    }
+
+    auto joined_paths = MUST(joined.to_string());
+    auto file_count = file_paths.size();
+
+    auto send_files = [this, tab_id, joined_paths = move(joined_paths), file_count, paths_array = move(paths_array)](String resolved_element_id, MCP::OnToolCallComplete cb) mutable {
+        JsonObject payload;
+        payload.set("text"sv, move(joined_paths));
+        Vector<String> args;
+        args.append(resolved_element_id);
+
+        enqueue_mcp_webdriver_command(tab_id, "element_send_keys"_string, move(payload), move(args), [resolved_element_id = move(resolved_element_id), file_count, paths_array = move(paths_array), cb = move(cb)](Web::WebDriver::Response response) mutable {
+            if (response.is_error()) {
+                cb(format_mcp_webdriver_error(response.error()));
+                return;
+            }
+            JsonObject result;
+            result.set("uploaded"sv, true);
+            result.set("element_id"sv, resolved_element_id);
+            result.set("file_count"sv, static_cast<u64>(file_count));
+            result.set("paths"sv, move(paths_array));
+            cb(mcp_ok_json(JsonValue { move(result) }));
+        });
+    };
+
+    if (element_id.has_value() && !element_id->is_empty()) {
+        send_files(*element_id, move(on_complete));
+        return;
+    }
+
+    if ((!ref.has_value() || ref->is_empty()) && (!selector.has_value() || selector->is_empty())) {
+        on_complete(mcp_error_result("Either 'ref', 'selector', or 'element_id' must be provided"sv));
+        return;
+    }
+
+    JsonObject cfg;
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+const res = resolveTarget(cfg);
+if (res.error) throw new Error(res.error);
+return res.el;
+)JS"sv);
+
+    JsonArray args;
+    args.must_append(move(cfg));
+    JsonObject payload;
+    payload.set("script"sv, MUST(js.to_string()));
+    payload.set("args"sv, move(args));
+
+    enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [send_files = move(send_files), on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        auto uuid = extract_mcp_element_id(response.value());
+        if (!uuid.has_value()) {
+            on_complete(mcp_error_result("Matched target response missing element handle"sv));
+            return;
+        }
+        send_files(*uuid, move(on_complete));
+    });
 }
 
 void Application::select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, MCP::OnToolCallComplete on_complete)

@@ -432,6 +432,49 @@ static JsonArray build_tool_definitions()
     {
         JsonObject props;
         props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("from_ref"sv, make_prop("string"sv, "Source element @ref from get_page_snapshot."sv));
+        props.set("from_selector"sv, make_prop("string"sv, "Source CSS selector (used if from_ref is omitted)."sv));
+        props.set("from_x"sv, make_prop("integer"sv, "Source viewport X coordinate (used if from_ref/from_selector omitted)."sv));
+        props.set("from_y"sv, make_prop("integer"sv, "Source viewport Y coordinate (used if from_ref/from_selector omitted)."sv));
+        props.set("to_ref"sv, make_prop("string"sv, "Target element @ref from get_page_snapshot."sv));
+        props.set("to_selector"sv, make_prop("string"sv, "Target CSS selector (used if to_ref is omitted)."sv));
+        props.set("to_x"sv, make_prop("integer"sv, "Target viewport X coordinate."sv));
+        props.set("to_y"sv, make_prop("integer"sv, "Target viewport Y coordinate."sv));
+        props.set("delta_x"sv, make_prop("integer"sv, "Horizontal drag offset in pixels from source center/coordinates."sv));
+        props.set("delta_y"sv, make_prop("integer"sv, "Vertical drag offset in pixels from source center/coordinates."sv));
+        props.set("steps"sv, make_int_prop("Interpolated move steps between source and destination (default: 10)."sv, 1, 60, 10));
+        props.set("duration_ms"sv, make_int_prop("Total drag duration in milliseconds (default: 250)."sv, 0, 5000, 250));
+        tools.must_append(make_tool_schema(
+            "drag"sv,
+            "Perform a real pointer mouse drag between elements (@ref/selector) or viewport coordinates/deltas (for timeline handles, sliders, drag-and-drop)."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("ref"sv, make_prop("string"sv, "File input @ref from get_page_snapshot."sv));
+        props.set("selector"sv, make_prop("string"sv, "CSS selector for target <input type=\"file\"> (traverses open shadow DOM)."sv));
+        props.set("element_id"sv, make_prop("string"sv, "Previously returned element ID from find_elements."sv));
+        props.set("path"sv, make_prop("string"sv, "Single absolute local file path to attach."sv));
+        JsonObject paths_prop;
+        paths_prop.set("type"sv, "array"sv);
+        paths_prop.set("description"sv, "Array of absolute local file paths to attach (for multi-file inputs)."sv);
+        JsonObject item_schema;
+        item_schema.set("type"sv, "string"sv);
+        paths_prop.set("items"sv, move(item_schema));
+        props.set("paths"sv, move(paths_prop));
+        tools.must_append(make_tool_schema(
+            "upload_file"sv,
+            "Attach one or more existing local files directly to an <input type=\"file\"> without opening a native file dialog."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
         props.set("ref"sv, make_prop("string"sv, "<select> element reference from get_page_snapshot."sv));
         props.set("selector"sv, make_prop("string"sv, "<select> CSS selector (used if ref is omitted)."sv));
         props.set("value"sv, make_prop("string"sv, "Option value attribute to select."sv));
@@ -873,7 +916,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -1126,6 +1169,67 @@ private:
             if (!tab_id.has_value())
                 return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
             delegate.hover_element(*tab_id, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), move(complete));
+            return;
+        }
+
+        if (tool_name == "drag"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto from_ref = arguments.get_string("from_ref"sv);
+            auto from_selector = arguments.get_string("from_selector"sv);
+            auto from_x = arguments.get_integer<i32>("from_x"sv);
+            auto from_y = arguments.get_integer<i32>("from_y"sv);
+            auto to_ref = arguments.get_string("to_ref"sv);
+            auto to_selector = arguments.get_string("to_selector"sv);
+            auto to_x = arguments.get_integer<i32>("to_x"sv);
+            auto to_y = arguments.get_integer<i32>("to_y"sv);
+            auto delta_x = arguments.get_integer<i32>("delta_x"sv);
+            auto delta_y = arguments.get_integer<i32>("delta_y"sv);
+
+            bool has_source = (from_ref.has_value() && !from_ref->is_empty())
+                || (from_selector.has_value() && !from_selector->is_empty())
+                || (from_x.has_value() && from_y.has_value());
+            bool has_dest = (to_ref.has_value() && !to_ref->is_empty())
+                || (to_selector.has_value() && !to_selector->is_empty())
+                || (to_x.has_value() && to_y.has_value())
+                || delta_x.has_value()
+                || delta_y.has_value();
+            if (!has_source || !has_dest)
+                return fail_invalid_params("drag requires source (from_ref/from_selector or from_x+from_y) and destination (to_ref/to_selector, to_x+to_y, or delta_x/delta_y)"sv);
+
+            auto steps = static_cast<u32>(min<u64>(60, max<u64>(1, arguments.get_u64("steps"sv).value_or(10))));
+            auto duration_ms = static_cast<u32>(min<u64>(5000, arguments.get_u64("duration_ms"sv).value_or(250)));
+            delegate.drag(*tab_id, from_ref.copy(), from_selector.copy(), from_x, from_y, to_ref.copy(), to_selector.copy(), to_x, to_y, delta_x, delta_y, steps, duration_ms, move(complete));
+            return;
+        }
+
+        if (tool_name == "upload_file"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto ref = arguments.get_string("ref"sv);
+            auto selector = arguments.get_string("selector"sv);
+            auto element_id = arguments.get_string("element_id"sv);
+            if ((!ref.has_value() || ref->is_empty()) && (!selector.has_value() || selector->is_empty()) && (!element_id.has_value() || element_id->is_empty()))
+                return fail_invalid_params("upload_file requires at least one target ('ref', 'selector', or 'element_id')"sv);
+
+            Vector<String> file_paths;
+            if (auto paths_arr = arguments.get_array("paths"sv); paths_arr.has_value()) {
+                for (size_t i = 0; i < paths_arr->size(); ++i) {
+                    if (paths_arr->at(i).is_string()) {
+                        auto p = paths_arr->at(i).as_string();
+                        if (!p.is_empty())
+                            file_paths.append(move(p));
+                    }
+                }
+            }
+            if (auto single_path = arguments.get_string("path"sv); single_path.has_value() && !single_path->is_empty())
+                file_paths.append(*single_path);
+            if (file_paths.is_empty())
+                return fail_invalid_params("upload_file requires non-empty 'path' or 'paths'"sv);
+
+            delegate.upload_file(*tab_id, ref.copy(), selector.copy(), element_id.copy(), move(file_paths), move(complete));
             return;
         }
 
