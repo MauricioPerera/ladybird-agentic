@@ -465,6 +465,68 @@ public:
         cb(ok_json_result(JsonValue { move(out) }));
     }
 
+    virtual void list_page_tools(u64 tab_id, bool include_declarative, MCP::OnToolCallComplete cb) override
+    {
+        JsonArray tools;
+        {
+            JsonObject tool;
+            tool.set("name"sv, "search_items"sv);
+            tool.set("kind"sv, "imperative"sv);
+            tool.set("description"sv, "Search items on the page"sv);
+            JsonObject schema;
+            schema.set("type"sv, "object"sv);
+            JsonObject props;
+            JsonObject q;
+            q.set("type"sv, "string"sv);
+            props.set("query"sv, move(q));
+            schema.set("properties"sv, move(props));
+            tool.set("inputSchema"sv, move(schema));
+            JsonObject ann;
+            ann.set("readOnlyHint"sv, true);
+            ann.set("untrustedContentHint"sv, true);
+            tool.set("annotations"sv, move(ann));
+            tools.must_append(move(tool));
+        }
+        if (include_declarative) {
+            JsonObject tool;
+            tool.set("name"sv, "delete_item"sv);
+            tool.set("kind"sv, "declarative"sv);
+            tool.set("description"sv, "Delete item form"sv);
+            JsonObject schema;
+            schema.set("type"sv, "object"sv);
+            schema.set("properties"sv, JsonObject {});
+            tool.set("inputSchema"sv, move(schema));
+            JsonObject ann;
+            ann.set("readOnlyHint"sv, false);
+            ann.set("consequentialHint"sv, true);
+            ann.set("untrustedContentHint"sv, true);
+            tool.set("annotations"sv, move(ann));
+            tools.must_append(move(tool));
+        }
+        JsonObject out;
+        out.set("tab_id"sv, tab_id);
+        out.set("webmcp_shim_installed"sv, true);
+        out.set("count"sv, static_cast<u64>(tools.size()));
+        out.set("tools"sv, move(tools));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "call_page_tool"_string, {}, {}, tool_name };
+        if (tool_name == "delete_item"sv && !confirm_consequential) {
+            cb(error_result("Consequential tool requires confirmation"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("ok"sv, true);
+        out.set("tab_id"sv, tab_id);
+        out.set("tool"sv, move(tool_name));
+        out.set("arguments"sv, move(arguments));
+        out.set("confirmed"sv, confirm_consequential);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
 private:
     WebView::FlowStore m_store;
     WebView::ExtensionStore m_ext_store;
@@ -651,16 +713,20 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(instructions.has_value());
     EXPECT(instructions->contains("save_flow"sv));
     EXPECT(instructions->contains("run_flow"sv));
+    EXPECT(instructions->contains("list_page_tools"sv));
+    EXPECT(instructions->contains("call_page_tool"sv));
 
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 41u);
+    EXPECT_EQ(tools->size(), 43u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
     Optional<JsonObject> click_tool;
     Optional<JsonObject> type_text_tool;
+    Optional<JsonObject> list_page_tools_tool;
+    Optional<JsonObject> call_page_tool_tool;
     bool found_cancel_flow_run = false;
     bool found_install_extension = false;
     bool found_inject_extension = false;
@@ -681,6 +747,10 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             click_tool = tool;
         else if (name == "type_text"sv)
             type_text_tool = tool;
+        else if (name == "list_page_tools"sv)
+            list_page_tools_tool = tool;
+        else if (name == "call_page_tool"sv)
+            call_page_tool_tool = tool;
         else if (name == "cancel_flow_run"sv)
             found_cancel_flow_run = true;
         else if (name == "install_unpacked_extension"sv)
@@ -705,6 +775,10 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(run_flow_tool.has_value());
     EXPECT(click_tool.has_value());
     EXPECT(type_text_tool.has_value());
+    EXPECT(list_page_tools_tool.has_value());
+    EXPECT(call_page_tool_tool.has_value());
+    EXPECT(call_page_tool_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("arguments"sv));
+    EXPECT(call_page_tool_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("confirm_consequential"sv));
     EXPECT(found_cancel_flow_run);
     EXPECT(found_install_extension);
     EXPECT(found_inject_extension);
@@ -1117,5 +1191,76 @@ TEST_CASE(mcp_agentic_tools_roundtrip)
         auto payload = parse_tool_json_payload(res);
         EXPECT(payload.get_bool("uploaded"sv).value_or(false));
         EXPECT_EQ(payload.get_integer<u64>("file_count"sv).value_or(0), 1u);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("include_declarative"sv, true);
+        auto res = call_mcp_tool(port, token, 14, "list_page_tools"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 2u);
+        EXPECT_EQ(payload.get_array("tools"sv)->size(), 2u);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("include_declarative"sv, false);
+        auto res = call_mcp_tool(port, token, 15, "list_page_tools"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+        EXPECT_EQ(payload.get_array("tools"sv)->at(0).as_object().get_string("name"sv).value_or(String {}), "search_items"sv);
+    }
+
+    {
+        JsonObject tool_args;
+        tool_args.set("query"sv, "ladybird"sv);
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("name"sv, "search_items"sv);
+        args.set("arguments"sv, move(tool_args));
+        auto res = call_mcp_tool(port, token, 16, "call_page_tool"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("ok"sv).value_or(false));
+        EXPECT_EQ(payload.get_string("tool"sv).value_or(String {}), "search_items"sv);
+        EXPECT_EQ(payload.get_object("arguments"sv)->get_string("query"sv).value_or(String {}), "ladybird"sv);
+        EXPECT_EQ(delegate.last_action->tool, "call_page_tool"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("name"sv, "search_items"sv);
+        args.set("arguments"sv, "{\"query\":\"webmcp\"}"sv);
+        auto res = call_mcp_tool(port, token, 17, "call_page_tool"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("ok"sv).value_or(false));
+        EXPECT_EQ(payload.get_object("arguments"sv)->get_string("query"sv).value_or(String {}), "webmcp"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("name"sv, "delete_item"sv);
+        args.set("confirm_consequential"sv, false);
+        auto blocked = call_mcp_tool(port, token, 18, "call_page_tool"sv, move(args));
+        EXPECT(blocked.get_bool("isError"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("name"sv, "delete_item"sv);
+        args.set("confirm_consequential"sv, true);
+        auto confirmed = call_mcp_tool(port, token, 19, "call_page_tool"sv, move(args));
+        EXPECT(!confirmed.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(confirmed);
+        EXPECT(payload.get_bool("ok"sv).value_or(false));
+        EXPECT(payload.get_bool("confirmed"sv).value_or(false));
     }
 }

@@ -684,6 +684,38 @@ static JsonArray build_tool_definitions()
             Array { "extension_id"sv }));
     }
 
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("include_declarative"sv, [] {
+            auto p = make_prop("boolean"sv, "Also scan declarative <form toolname=...> HTML tools (default: true)."sv);
+            p.set("default"sv, true);
+            return p;
+        }());
+        tools.must_append(make_tool_schema(
+            "list_page_tools"sv,
+            "Discover WebMCP tools exposed by a page or extension via document.modelContext / navigator.modelContext and declarative <form toolname> annotations in an MCP-allowed tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("name"sv, make_prop("string"sv, "Name of the WebMCP tool to invoke."sv));
+        props.set("arguments"sv, make_prop("object"sv, "JSON object of tool input arguments matching the tool's inputSchema (default: {})."sv));
+        props.set("confirm_consequential"sv, [] {
+            auto p = make_prop("boolean"sv, "Set true only after user confirmation when calling a tool annotated as consequentialHint or destructiveHint."sv);
+            p.set("default"sv, false);
+            return p;
+        }());
+        tools.must_append(make_tool_schema(
+            "call_page_tool"sv,
+            "Invoke a WebMCP tool discovered via list_page_tools inside an MCP-allowed tab. Supports async execute() handlers and declarative forms. Consequential/destructive tools require confirm_consequential: true."sv,
+            move(props),
+            Array { "tab_id"sv, "name"sv }));
+    }
+
     return tools;
 }
 
@@ -916,7 +948,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, drag, upload_file, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, inject_extension, and remove_extension to manage unpacked browser extensions. Use list_page_tools and call_page_tool to discover and invoke page- or extension-registered WebMCP tools (document.modelContext / navigator.modelContext and declarative <form toolname> elements) before falling back to low-level DOM primitives."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -1418,6 +1450,40 @@ private:
             if (arguments.has("tab_id"sv) && (!tab_id.has_value() || *tab_id == 0))
                 return fail_invalid_params("Parameter 'tab_id' must be a positive integer"sv);
             delegate.inject_extension(*ext_id, tab_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_page_tools"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            bool include_declarative = arguments.get_bool("include_declarative"sv).value_or(true);
+            delegate.list_page_tools(*tab_id, include_declarative, move(complete));
+            return;
+        }
+
+        if (tool_name == "call_page_tool"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto name = arguments.get_string("name"sv);
+            if (!name.has_value() || name->is_empty())
+                return fail_invalid_params("Missing string parameter 'name'"sv);
+
+            JsonObject tool_args;
+            if (auto arg_obj = arguments.get_object("arguments"sv); arg_obj.has_value()) {
+                tool_args = *arg_obj;
+            } else if (auto arg_str = arguments.get_string("arguments"sv); arg_str.has_value()) {
+                auto parsed = JsonValue::from_string(*arg_str);
+                if (parsed.is_error() || !parsed.value().is_object())
+                    return fail_invalid_params("Parameter 'arguments' must be a JSON object"sv);
+                tool_args = parsed.release_value().as_object();
+            } else if (arguments.has("arguments"sv) && !arguments.get("arguments"sv)->is_null()) {
+                return fail_invalid_params("Parameter 'arguments' must be a JSON object"sv);
+            }
+
+            bool confirm_consequential = arguments.get_bool("confirm_consequential"sv).value_or(false);
+            delegate.call_page_tool(*tab_id, *name, move(tool_args), confirm_consequential, move(complete));
             return;
         }
 

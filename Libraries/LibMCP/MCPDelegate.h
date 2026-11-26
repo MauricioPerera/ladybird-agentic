@@ -80,6 +80,9 @@ public:
     virtual void reload_extension(String extension_id, OnToolCallComplete) = 0;
     virtual void remove_extension(String extension_id, OnToolCallComplete) = 0;
     virtual void inject_extension(String extension_id, Optional<u64> tab_id, OnToolCallComplete) = 0;
+
+    virtual void list_page_tools(u64 tab_id, bool include_declarative, OnToolCallComplete) = 0;
+    virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, OnToolCallComplete) = 0;
 };
 
 }

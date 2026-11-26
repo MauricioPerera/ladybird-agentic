@@ -427,6 +427,7 @@ public:
     ExtensionManager& extension_manager();
     void did_start_load_for_extensions(ViewImplementation&, URL::URL const&);
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
+    void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
     Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab) const;
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
@@ -705,6 +706,8 @@ private:
     virtual void reload_extension(String extension_id, MCP::OnToolCallComplete) override;
     virtual void remove_extension(String extension_id, MCP::OnToolCallComplete) override;
     virtual void inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete) override;
+    virtual void list_page_tools(u64 tab_id, bool include_declarative, MCP::OnToolCallComplete) override;
+    virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
