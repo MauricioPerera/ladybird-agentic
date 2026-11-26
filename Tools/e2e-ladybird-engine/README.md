@@ -5,7 +5,7 @@ Connects the [`e2e`](https://github.com/e2e-inc/e2e) agentic testing framework t
 ## 1. Start Ladybird with MCP enabled
 
 ```powershell
-& "D:\ladybird\Build\release\bin\Ladybird.exe" --mcp --mcp-token "my-local-dev-token"
+./Build/release/bin/Ladybird --mcp --mcp-token "my-local-dev-token"
 ```
 
 Default MCP endpoint when port is omitted: `http://127.0.0.1:7331/mcp`.
@@ -15,7 +15,7 @@ Default MCP endpoint when port is omitted: `http://127.0.0.1:7331/mcp`.
 ```ts
 import type { E2EConfig } from 'e2e';
 import { connectEngine, spawnTransport } from 'e2e/engine';
-import { createLadybirdEngine } from 'D:/ladybird/Tools/e2e-ladybird-engine/index.mjs';
+import { createLadybirdEngine } from './Tools/e2e-ladybird-engine/index.mjs';
 
 export default {
   targets: [

@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -253,10 +254,11 @@ test('LSP Engine Protocol v1 round-trip against mock Ladybird MCP server', async
   }
 });
 
-const e2eClientPath = 'D:/Repo/Nueva carpeta (153)/e2e/packages/core/dist/engine/protocol/client.js';
-const e2eTransportPath = 'D:/Repo/Nueva carpeta (153)/e2e/packages/core/dist/engine/protocol/transport.js';
+const e2eRepoPath = process.env.E2E_REPO_PATH;
+const e2eClientPath = e2eRepoPath ? path.join(e2eRepoPath, 'packages/core/dist/engine/protocol/client.js') : '';
+const e2eTransportPath = e2eRepoPath ? path.join(e2eRepoPath, 'packages/core/dist/engine/protocol/transport.js') : '';
 
-test('e2e connectEngine + spawnTransport integration check', { skip: !fs.existsSync(e2eClientPath) }, async () => {
+test('e2e connectEngine + spawnTransport integration check', { skip: !e2eClientPath || !fs.existsSync(e2eClientPath) || !fs.existsSync(e2eTransportPath) }, async () => {
   const { connectEngine } = await import(pathToFileURL(e2eClientPath).href);
   const { spawnTransport } = await import(pathToFileURL(e2eTransportPath).href);
 

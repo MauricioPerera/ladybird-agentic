@@ -1,6 +1,6 @@
 # Declarative Browser Automation (`Libraries/LibWebView/Automation`)
 
-> Reusable JSON browser automation engine used by MCP (`run_flow`, `save_flow`), `about:flows`, and bundled extensions (`0aa20e0a`).  
+> Reusable JSON browser automation engine used by MCP (`run_flow`, `save_flow`), `about:flows`, and bundled extensions (`feat/extensions-dnr-and-dom-tools` / `main`).  
 > See [Fork Architecture and Capabilities](../../../Documentation/ForkArchitectureAndCapabilities.md), [LibMCP README](../../LibMCP/README.md), and [Extensions README](../Extensions/README.md).
 
 ## 1. Architecture and Files
@@ -74,7 +74,7 @@ flowchart LR
 
 - **Tab Permissions (`MCP` vs `about:flows`)**: MCP `run_flow` sets `require_mcp_permission = true`. `FlowsUI` (`about:flows`) sets `require_mcp_permission = false`, allowing flows to automate non-private `http:`/`https:`/`about:blank` tabs in the same browser session; private tabs (`IsPrivate::Yes`) are filtered out of `FlowsUI::send_state` and rejected by `Application::find_automation_view`.
 - **Variable Interpolation Surface**: `extract` and `eval` results stored via `save_as` flow directly from untrusted webpage DOM content into `{{var}}` substitutions (`open.url`, `fill.text`, `locator.value` / `xpath` / `css`), allowing page-controlled data to alter subsequent navigation targets or selectors.
-- **Run Pruning & Strict Delete**: Flows persist under `<data_dir>/automation/flows/` (or instance storage directory). Both `FlowStore::reload()` and `FlowStore::upsert_run()` cap active history at `max_in_memory_runs = 50` and prune evicted `<run_id>.json` and `<run_id>_step_*.png` files from `runs/`. `FlowStore::delete_flow` returns `"Flow not found"` if the `id` does not exist on disk or in memory.
+- **Run Pruning & Strict Delete**: Flows persist under `<data_dir>/flows/` (or instance storage directory). Both `FlowStore::reload()` and `FlowStore::upsert_run()` cap active history at `max_in_memory_runs = 50` and prune evicted `<run_id>.json` and `<run_id>_step_*.png` files from `runs/`. `FlowStore::delete_flow` returns `"Flow not found"` if the `id` does not exist on disk or in memory.
 
 ## 5. Testing
 

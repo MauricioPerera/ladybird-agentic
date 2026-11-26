@@ -1,6 +1,6 @@
 # Native MV3 Extensions and `declarativeNetRequest` (`Libraries/LibWebView/Extensions`)
 
-> Unpacked Manifest V3 (`MV3`) extension loader (loaded directly from local folders), `declarativeNetRequest` (`DNR`) rule compiler, content-script injector, and `about:extensions` integration (`0aa20e0a`).  
+> Unpacked Manifest V3 (`MV3`) extension loader (loaded directly from local folders), `declarativeNetRequest` (`DNR`) rule compiler, content-script injector, and `about:extensions` integration (`feat/extensions-dnr-and-dom-tools` / `main`).  
 > See [Fork Architecture and Capabilities](../../../Documentation/ForkArchitectureAndCapabilities.md), [LibMCP README](../../LibMCP/README.md), and [Automation README](../Automation/README.md).
 
 ## 1. Architecture and Files
@@ -60,12 +60,12 @@
 ## 5. Bundled Extensions
 
 - `Tools/example-extension/` (`ladybird-page-inspector`): Heading/link badge + sample flow (`ext-page-inspector-smoke`).
-- `Tools/extensions/table-enhancer/` (`ladybird-table-enhancer`): HTML table column filtering, multi-type sorting, reset, and CSV export (`Blob` object URL not revoked).
+- `Tools/extensions/table-enhancer/` (`ladybird-table-enhancer`): HTML table column filtering, multi-type sorting, reset, and CSV export (automatically skips webmail/app layout tables such as Google Chat/Mail/Calendar/Outlook, `role="grid|treegrid|presentation"`, and `>= 8` controls/nested tables).
 - `Tools/extensions/youtube-clean-and-adblock/` (`ladybird-youtube-clean-adblock`): 7 DNR block rules (`rules.json`), 18 adblock filters (`filters.txt`), `early.js` (`fetch`/`XHR`/`ytInitialPlayerResponse` ad pruning), and `content.js`/`content.css` (DOM cleanup, ad skip/fast-forward, Shorts redirect).
 
 ## 6. Testing
 
-Run the unit test suite (`8` test cases at commit `0aa20e0a`):
+Run the unit test suite (`9` test cases):
 
 ```powershell
 ./Build/release/bin/TestLibWebView[.exe] --suite TestExtensions
