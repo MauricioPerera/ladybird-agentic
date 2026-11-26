@@ -52,6 +52,15 @@ jobs:
           clang --version
           clang++ --version
 
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
+          key: vcpkg-linux-x64-dist-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-linux-x64-dist-
+
       - name: Build Ladybird Distribution
         uses: ./.github/actions/build
         with:
@@ -61,6 +70,13 @@ jobs:
           build_preset: 'Distribution'
           version: ${{ inputs.version }}
           use_caches: false
+
+      - name: Save vcpkg binary cache
+        if: ${{ always() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Smoke test headless multi-tab MCP server
         working-directory: ${{ github.workspace }}
