@@ -3962,6 +3962,9 @@ void ViewImplementation::notify_load_finish()
         if (listener.on_load_finish)
             listener.on_load_finish(client_url);
     }
+
+    if (Application::is_initialized() && client_url.scheme().is_one_of("http"sv, "https"sv))
+        Application::the().did_finish_load_for_extensions(*this, client_url);
 }
 
 void ViewImplementation::did_finish_navigation()

@@ -63,6 +63,12 @@ public:
     virtual void list_flow_runs(Optional<String> flow_id, size_t limit, OnToolCallComplete) = 0;
     virtual void get_flow_run(String run_id, OnToolCallComplete) = 0;
     virtual void cancel_flow_run(String run_id, OnToolCallComplete) = 0;
+
+    virtual void list_extensions(OnToolCallComplete) = 0;
+    virtual void install_unpacked_extension(String path, OnToolCallComplete) = 0;
+    virtual void set_extension_enabled(String extension_id, bool enabled, OnToolCallComplete) = 0;
+    virtual void reload_extension(String extension_id, OnToolCallComplete) = 0;
+    virtual void remove_extension(String extension_id, OnToolCallComplete) = 0;
 };
 
 }

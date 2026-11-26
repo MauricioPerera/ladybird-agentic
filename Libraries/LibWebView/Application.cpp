@@ -53,6 +53,9 @@
 #include <LibWebView/Automation/FlowStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/BlobURLStore.h>
+#include <LibWebView/Extensions/ExtensionManager.h>
+#include <LibWebView/Extensions/ExtensionStore.h>
+#include <LibWebView/Extensions/ExtensionTypes.h>
 #include <LibWebView/CompositorClient.h>
 #include <LibWebView/CompositorPresentationClient.h>
 #include <LibWebView/CookieJar.h>
@@ -233,6 +236,8 @@ Application::~Application()
 {
     if (m_flow_runner)
         m_flow_runner->cancel_all_runs("Browser shutting down"sv);
+    m_extension_manager.clear();
+    m_extension_store.clear();
     m_flow_runner.clear();
     m_flow_store.clear();
     m_mcp.clear();
@@ -4773,6 +4778,7 @@ FlowStore& Application::flow_store()
         auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
         auto flows_dir = LexicalPath::join(base_dir, "flows"sv).string();
         m_flow_store = make<FlowStore>(move(flows_dir));
+        (void)extension_manager();
     }
     return *m_flow_store;
 }
@@ -4782,6 +4788,32 @@ FlowRunner& Application::flow_runner()
     if (!m_flow_runner)
         m_flow_runner = make<FlowRunner>(*this, flow_store());
     return *m_flow_runner;
+}
+
+ExtensionStore& Application::extension_store()
+{
+    if (!m_extension_store) {
+        auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
+        auto ext_dir = LexicalPath::join(base_dir, "extensions"sv).string();
+        m_extension_store = make<ExtensionStore>(move(ext_dir));
+    }
+    return *m_extension_store;
+}
+
+ExtensionManager& Application::extension_manager()
+{
+    if (!m_extension_manager)
+        m_extension_manager = make<ExtensionManager>(*this, extension_store(), flow_store());
+    return *m_extension_manager;
+}
+
+void Application::did_finish_load_for_extensions(ViewImplementation& view, URL::URL const& url)
+{
+    if (view.owner_view_id().has_value())
+        return;
+    if (url.scheme() != "http"sv && url.scheme() != "https"sv)
+        return;
+    extension_manager().did_finish_load(view, url);
 }
 
 Optional<ViewImplementation&> Application::find_automation_view(u64 tab_id, bool require_mcp_permission) const
@@ -5457,6 +5489,75 @@ void Application::cancel_flow_run(String run_id, MCP::OnToolCallComplete on_comp
     JsonObject result;
     result.set("cancelled"sv, true);
     result.set("run_id"sv, run_id);
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::list_extensions(MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    JsonArray array;
+    for (auto const& ext : extension_store().list_extensions())
+        array.must_append(serialize_extension(ext));
+    JsonObject result;
+    result.set("extensions"sv, move(array));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::install_unpacked_extension(String path, MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    auto installed = extension_store().install_unpacked(path.to_byte_string());
+    if (installed.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed to install unpacked extension: {}", installed.error()))));
+        return;
+    }
+    auto refreshed = extension_store().get_extension(installed.value().manifest.id).value_or(installed.release_value());
+    JsonObject result;
+    result.set("installed"sv, true);
+    result.set("extension"sv, serialize_extension(refreshed));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::set_extension_enabled(String extension_id, bool enabled, MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    auto updated = extension_store().set_enabled(extension_id, enabled);
+    if (updated.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed updating extension: {}", updated.error()))));
+        return;
+    }
+    auto refreshed = extension_store().get_extension(extension_id).value_or(updated.release_value());
+    JsonObject result;
+    result.set("updated"sv, true);
+    result.set("extension"sv, serialize_extension(refreshed));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::reload_extension(String extension_id, MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    auto reloaded = extension_store().reload_extension(extension_id);
+    if (reloaded.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed reloading extension: {}", reloaded.error()))));
+        return;
+    }
+    auto refreshed = extension_store().get_extension(extension_id).value_or(reloaded.release_value());
+    JsonObject result;
+    result.set("reloaded"sv, true);
+    result.set("extension"sv, serialize_extension(refreshed));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::remove_extension(String extension_id, MCP::OnToolCallComplete on_complete)
+{
+    (void)extension_manager();
+    if (auto res = extension_store().remove_extension(extension_id); res.is_error()) {
+        on_complete(mcp_error_result(MUST(String::formatted("Failed removing extension: {}", res.error()))));
+        return;
+    }
+    JsonObject result;
+    result.set("removed"sv, true);
+    result.set("extension_id"sv, extension_id);
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 

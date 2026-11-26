@@ -33,6 +33,9 @@ set(SOURCES
     CrashReportSubmission.cpp
     DownloadSegmentation.cpp
     DownloadStore.cpp
+    Extensions/ExtensionManager.cpp
+    Extensions/ExtensionStore.cpp
+    Extensions/ExtensionTypes.cpp
     ExternalURLHandler.cpp
     FaviconStore.cpp
     FileDownloader.cpp
@@ -104,6 +107,7 @@ set(SOURCES
     WebUI/ApplicationWebUI.cpp
     WebUI/CertificateUI.cpp
     WebUI/CrashReportsUI.cpp
+    WebUI/ExtensionsUI.cpp
     WebUI/FlowsUI.cpp
     WebUI/SupportUI.cpp
     WebUI/SettingsUI.cpp

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "ext-page-inspector-smoke",
+  "name": "Extension: Page Inspector Smoke",
+  "description": "Bundled by Tools/example-extension to verify extension injection on http://example.com.",
+  "variables": {
+    "target_url": "http://example.com"
+  },
+  "steps": [
+    { "action": "open", "url": "{{target_url}}" },
+    { "action": "wait_for", "locator": { "kind": "css", "value": "#ladybird-ext-inspector-badge" } },
+    { "action": "extract", "locator": { "kind": "css", "value": "#ladybird-ext-inspector-badge" }, "save_as": "badge_text" }
+  ]
+}

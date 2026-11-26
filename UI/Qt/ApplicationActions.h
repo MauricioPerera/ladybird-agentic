@@ -55,6 +55,7 @@ public:
     Action& open_about_page_action() { return *m_open_about_page_action; }
     Action& open_downloads_page_action() { return *m_open_downloads_page_action; }
     Action& open_settings_page_action() { return *m_open_settings_page_action; }
+    Action& open_extensions_page_action() { return *m_open_extensions_page_action; }
     Action& open_flows_page_action() { return *m_open_flows_page_action; }
     Action& zoom_in_action() { return *m_zoom_in_action; }
     Action& zoom_out_action() { return *m_zoom_out_action; }
@@ -107,6 +108,7 @@ private:
     RefPtr<Action> m_view_source_action;
     RefPtr<Action> m_toggle_devtools_action;
     RefPtr<Action> m_toggle_mcp_action;
+    RefPtr<Action> m_open_extensions_page_action;
     RefPtr<Action> m_open_flows_page_action;
     RefPtr<Action> m_report_website_issue_action;
     RefPtr<Action> m_show_tab_performance_monitor_action;

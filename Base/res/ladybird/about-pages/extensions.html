@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Extensions</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
+        <style>
+            body {
+                max-width: 1080px;
+                padding: 36px 24px 64px 24px;
+            }
+
+            header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            header h1 {
+                flex: none;
+            }
+
+            .meta-bar {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+                min-width: 200px;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: var(--control);
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 500;
+            }
+
+            .header-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            button {
+                height: 30px;
+                padding: 0 12px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--control-hover);
+            }
+
+            button.primary {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            button.primary:hover:not(:disabled) {
+                background: #1d4ed8;
+            }
+
+            button.danger {
+                color: #ef4444;
+            }
+
+            button.small {
+                height: 26px;
+                padding: 0 10px;
+                font-size: 12px;
+            }
+
+            .card {
+                background: var(--card-background);
+                border: 1px solid var(--border-color);
+                border-radius: 10px;
+                padding: 16px;
+                margin-bottom: 14px;
+            }
+
+            .card h2 {
+                margin: 0 0 10px 0;
+                font-size: 15px;
+                font-weight: 600;
+            }
+
+            .row {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+            }
+
+            input[type="text"],
+            textarea {
+                font: inherit;
+                font-size: 13px;
+                color: var(--text);
+                background: var(--control);
+                border: 1px solid var(--border-color);
+                border-radius: 7px;
+                padding: 7px 10px;
+                outline: none;
+            }
+
+            input[type="text"] {
+                flex: 1;
+                min-width: 260px;
+            }
+
+            textarea {
+                width: 100%;
+                min-height: 150px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+                resize: vertical;
+            }
+
+            .ext-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+                gap: 12px;
+            }
+
+            .ext-card {
+                background: var(--card-background);
+                border: 1px solid var(--border-color);
+                border-radius: 10px;
+                padding: 14px 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .ext-card.disabled {
+                opacity: 0.72;
+            }
+
+            .ext-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .ext-title {
+                font-size: 15px;
+                font-weight: 600;
+            }
+
+            .ext-sub {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 2px;
+            }
+
+            .chips {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+
+            .chip {
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 6px;
+                background: var(--control);
+                color: var(--muted);
+                border: 1px solid var(--border-color);
+            }
+
+            .error-box {
+                font-size: 12px;
+                color: #ef4444;
+                background: rgba(239, 68, 68, 0.1);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                border-radius: 6px;
+                padding: 8px 10px;
+            }
+
+            .toast {
+                margin-bottom: 12px;
+                padding: 10px 12px;
+                border-radius: 8px;
+                font-size: 13px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                display: none;
+            }
+
+            .toast.ok {
+                display: block;
+                border-color: rgba(22, 163, 74, 0.45);
+                color: #16a34a;
+            }
+
+            .toast.err {
+                display: block;
+                border-color: rgba(239, 68, 68, 0.45);
+                color: #ef4444;
+            }
+
+            .muted {
+                color: var(--muted);
+                font-size: 12px;
+            }
+
+            #storage-panel {
+                display: none;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Extensions</h1>
+            <div class="meta-bar">
+                <span class="badge" id="count-badge">0 installed</span>
+                <span class="badge" id="mcp-badge">MCP: off</span>
+            </div>
+            <div class="header-actions">
+                <button id="example-btn" type="button">Create Example Extension</button>
+                <button id="flows-btn" type="button">Open Automation Flows</button>
+            </div>
+        </header>
+
+        <div id="toast" class="toast"></div>
+
+        <section class="card">
+            <h2>Load Unpacked Extension</h2>
+            <div class="row">
+                <input id="unpacked-path" type="text" placeholder="Absolute path to folder containing manifest.json (MV3 + optional ladybird.flows)" />
+                <button id="load-btn" class="primary" type="button">Load Unpacked</button>
+            </div>
+            <p class="muted" id="storage-dir-label" style="margin: 8px 0 0 0;"></p>
+        </section>
+
+        <section class="card" id="storage-panel">
+            <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+                <h2 style="margin: 0;" id="storage-title">Extension Storage</h2>
+                <button id="storage-close-btn" class="small" type="button">Close</button>
+            </div>
+            <textarea id="storage-editor" spellcheck="false"></textarea>
+            <div class="row" style="margin-top: 8px; justify-content: flex-end;">
+                <button id="storage-save-btn" class="primary small" type="button">Save Storage</button>
+            </div>
+        </section>
+
+        <section>
+            <div id="ext-list" class="ext-grid"></div>
+            <p id="empty-state" class="muted" style="display: none;">No extensions installed yet. Click "Create Example Extension" or load an unpacked MV3 extension directory above.</p>
+        </section>
+
+        <script>
+            let state = { extensions: [], storageDirectory: "", mcpEnabled: false };
+            let editingStorageExtId = null;
+
+            const toastEl = document.getElementById("toast");
+            const listEl = document.getElementById("ext-list");
+            const emptyEl = document.getElementById("empty-state");
+            const countBadge = document.getElementById("count-badge");
+            const mcpBadge = document.getElementById("mcp-badge");
+            const storageDirLabel = document.getElementById("storage-dir-label");
+            const storagePanel = document.getElementById("storage-panel");
+            const storageTitle = document.getElementById("storage-title");
+            const storageEditor = document.getElementById("storage-editor");
+
+            function showToast(ok, msg) {
+                if (!msg) return;
+                toastEl.textContent = msg;
+                toastEl.className = "toast " + (ok ? "ok" : "err");
+            }
+
+            function render() {
+                const exts = state.extensions || [];
+                const enabledCount = exts.filter(e => e.enabled).length;
+                countBadge.textContent = `${exts.length} installed (${enabledCount} enabled)`;
+                mcpBadge.textContent = state.mcpEnabled ? "MCP: active" : "MCP: off";
+                storageDirLabel.textContent = state.storageDirectory
+                    ? `Registry & storage directory: ${state.storageDirectory}`
+                    : "";
+
+                listEl.innerHTML = "";
+                emptyEl.style.display = exts.length === 0 ? "block" : "none";
+
+                for (const ext of exts) {
+                    const card = document.createElement("div");
+                    card.className = "ext-card" + (ext.enabled ? "" : " disabled");
+
+                    const head = document.createElement("div");
+                    head.className = "ext-head";
+
+                    const info = document.createElement("div");
+                    const title = document.createElement("div");
+                    title.className = "ext-title";
+                    title.textContent = `${ext.name} v${ext.version}`;
+                    const sub = document.createElement("div");
+                    sub.className = "ext-sub";
+                    sub.textContent = `ID: ${ext.id} | Path: ${ext.root_path}`;
+                    info.appendChild(title);
+                    info.appendChild(sub);
+
+                    const toggles = document.createElement("div");
+                    toggles.className = "row";
+
+                    const enableLabel = document.createElement("label");
+                    enableLabel.className = "row muted";
+                    const enableCb = document.createElement("input");
+                    enableCb.type = "checkbox";
+                    enableCb.checked = !!ext.enabled;
+                    enableCb.addEventListener("change", () => {
+                        ladybird.sendMessage("setEnabled", { id: ext.id, enabled: enableCb.checked });
+                    });
+                    enableLabel.appendChild(enableCb);
+                    enableLabel.append("Enabled");
+
+                    const privLabel = document.createElement("label");
+                    privLabel.className = "row muted";
+                    const privCb = document.createElement("input");
+                    privCb.type = "checkbox";
+                    privCb.checked = !!ext.allow_in_private;
+                    privCb.addEventListener("change", () => {
+                        ladybird.sendMessage("setAllowInPrivate", { id: ext.id, allow: privCb.checked });
+                    });
+                    privLabel.appendChild(privCb);
+                    privLabel.append("Private tabs");
+
+                    toggles.appendChild(enableLabel);
+                    toggles.appendChild(privLabel);
+                    head.appendChild(info);
+                    head.appendChild(toggles);
+                    card.appendChild(head);
+
+                    if (ext.description) {
+                        const desc = document.createElement("div");
+                        desc.className = "muted";
+                        desc.textContent = ext.description;
+                        card.appendChild(desc);
+                    }
+
+                    const chips = document.createElement("div");
+                    chips.className = "chips";
+                    for (const perm of ext.permissions || []) {
+                        const c = document.createElement("span");
+                        c.className = "chip";
+                        c.textContent = `perm: ${perm}`;
+                        chips.appendChild(c);
+                    }
+                    const scriptCount = (ext.content_scripts || []).length;
+                    if (scriptCount > 0) {
+                        const c = document.createElement("span");
+                        c.className = "chip";
+                        c.textContent = `${scriptCount} content script rule(s)`;
+                        chips.appendChild(c);
+                    }
+                    for (const fid of ext.registered_flow_ids || []) {
+                        const c = document.createElement("span");
+                        c.className = "chip";
+                        c.textContent = `flow: ${fid}`;
+                        chips.appendChild(c);
+                    }
+                    card.appendChild(chips);
+
+                    if (ext.last_error) {
+                        const err = document.createElement("div");
+                        err.className = "error-box";
+                        err.textContent = ext.last_error;
+                        card.appendChild(err);
+                    }
+
+                    const actions = document.createElement("div");
+                    actions.className = "row";
+
+                    const reloadBtn = document.createElement("button");
+                    reloadBtn.className = "small";
+                    reloadBtn.textContent = "Reload";
+                    reloadBtn.addEventListener("click", () => {
+                        ladybird.sendMessage("reloadExtension", ext.id);
+                    });
+
+                    const injectBtn = document.createElement("button");
+                    injectBtn.className = "small";
+                    injectBtn.textContent = "Inject Active Tab";
+                    injectBtn.disabled = !ext.enabled;
+                    injectBtn.addEventListener("click", () => {
+                        ladybird.sendMessage("injectActiveTab", ext.id);
+                    });
+
+                    const storageBtn = document.createElement("button");
+                    storageBtn.className = "small";
+                    storageBtn.textContent = "Storage";
+                    storageBtn.addEventListener("click", () => {
+                        ladybird.sendMessage("getStorage", ext.id);
+                    });
+
+                    const removeBtn = document.createElement("button");
+                    removeBtn.className = "small danger";
+                    removeBtn.textContent = "Remove";
+                    removeBtn.addEventListener("click", () => {
+                        ladybird.sendMessage("removeExtension", ext.id);
+                    });
+
+                    actions.appendChild(reloadBtn);
+                    actions.appendChild(injectBtn);
+                    actions.appendChild(storageBtn);
+                    actions.appendChild(removeBtn);
+                    card.appendChild(actions);
+
+                    listEl.appendChild(card);
+                }
+            }
+
+            document.getElementById("load-btn").addEventListener("click", () => {
+                const path = document.getElementById("unpacked-path").value.trim();
+                ladybird.sendMessage("installUnpacked", { path });
+            });
+
+            document.getElementById("example-btn").addEventListener("click", () => {
+                ladybird.sendMessage("createExampleExtension", {});
+            });
+
+            document.getElementById("flows-btn").addEventListener("click", () => {
+                window.location.href = "about:flows";
+            });
+
+            document.getElementById("storage-close-btn").addEventListener("click", () => {
+                editingStorageExtId = null;
+                storagePanel.style.display = "none";
+            });
+
+            document.getElementById("storage-save-btn").addEventListener("click", () => {
+                if (!editingStorageExtId) return;
+                try {
+                    const parsed = JSON.parse(storageEditor.value || "{}");
+                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                        showToast(false, "Storage JSON must be an object.");
+                        return;
+                    }
+                    ladybird.sendMessage("setStorage", { id: editingStorageExtId, storage: parsed });
+                } catch (e) {
+                    showToast(false, "Invalid JSON: " + e.message);
+                }
+            });
+
+            document.addEventListener("WebUIMessage", event => {
+                const { name, data } = event.detail;
+                if (name === "stateUpdated") {
+                    state = data;
+                    render();
+                } else if (name === "actionResult") {
+                    showToast(!!data.ok, data.message || "");
+                } else if (name === "storageLoaded") {
+                    editingStorageExtId = data.id;
+                    storageTitle.textContent = `Extension Storage: ${data.id}`;
+                    storageEditor.value = JSON.stringify(data.storage || {}, null, 2);
+                    storagePanel.style.display = "block";
+                }
+            });
+
+            ladybird.sendMessage("loadState", {});
+        </script>
+    </body>
+</html>

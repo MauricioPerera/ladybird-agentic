@@ -476,6 +476,52 @@ static JsonArray build_tool_definitions()
             Array { "run_id"sv }));
     }
 
+    tools.must_append(make_tool_schema(
+        "list_extensions"sv,
+        "List installed browser extensions with IDs, versions, permissions, bundled flows, and errors."sv,
+        JsonObject {}));
+
+    {
+        JsonObject props;
+        props.set("path"sv, make_prop("string"sv, "Absolute path to an unpacked extension directory containing manifest.json."sv));
+        tools.must_append(make_tool_schema(
+            "install_unpacked_extension"sv,
+            "Validate and install an unpacked MV3 extension directory (with optional bundled Ladybird automation flows)."sv,
+            move(props),
+            Array { "path"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("extension_id"sv, make_prop("string"sv, "ID of the installed extension."sv));
+        props.set("enabled"sv, make_prop("boolean"sv, "Whether the extension should be enabled."sv));
+        tools.must_append(make_tool_schema(
+            "set_extension_enabled"sv,
+            "Enable or disable an installed browser extension."sv,
+            move(props),
+            Array { "extension_id"sv, "enabled"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("extension_id"sv, make_prop("string"sv, "ID of the installed extension to reload from disk."sv));
+        tools.must_append(make_tool_schema(
+            "reload_extension"sv,
+            "Reload an unpacked extension's manifest and bundled flows from disk."sv,
+            move(props),
+            Array { "extension_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("extension_id"sv, make_prop("string"sv, "ID of the installed extension to remove from Ladybird."sv));
+        tools.must_append(make_tool_schema(
+            "remove_extension"sv,
+            "Uninstall a browser extension from the profile registry (keeps the unpacked source folder intact)."sv,
+            move(props),
+            Array { "extension_id"sv }));
+    }
+
     return tools;
 }
 
@@ -708,7 +754,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, and remove_extension to manage unpacked browser extensions."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -1028,6 +1074,44 @@ private:
             if (!run_id.has_value() || run_id->is_empty())
                 return fail_invalid_params("Missing string parameter 'run_id'"sv);
             delegate.cancel_flow_run(*run_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "list_extensions"sv) {
+            delegate.list_extensions(move(complete));
+            return;
+        }
+
+        if (tool_name == "install_unpacked_extension"sv) {
+            auto path = arguments.get_string("path"sv);
+            if (!path.has_value() || path->is_empty())
+                return fail_invalid_params("Missing string parameter 'path'"sv);
+            delegate.install_unpacked_extension(*path, move(complete));
+            return;
+        }
+
+        if (tool_name == "set_extension_enabled"sv) {
+            auto ext_id = arguments.get_string("extension_id"sv);
+            auto enabled = arguments.get_bool("enabled"sv);
+            if (!ext_id.has_value() || ext_id->is_empty() || !enabled.has_value())
+                return fail_invalid_params("Missing required parameters 'extension_id' and 'enabled'"sv);
+            delegate.set_extension_enabled(*ext_id, *enabled, move(complete));
+            return;
+        }
+
+        if (tool_name == "reload_extension"sv) {
+            auto ext_id = arguments.get_string("extension_id"sv);
+            if (!ext_id.has_value() || ext_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'extension_id'"sv);
+            delegate.reload_extension(*ext_id, move(complete));
+            return;
+        }
+
+        if (tool_name == "remove_extension"sv) {
+            auto ext_id = arguments.get_string("extension_id"sv);
+            if (!ext_id.has_value() || ext_id->is_empty())
+                return fail_invalid_params("Missing string parameter 'extension_id'"sv);
+            delegate.remove_extension(*ext_id, move(complete));
             return;
         }
 

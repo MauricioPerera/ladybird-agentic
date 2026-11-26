@@ -23,6 +23,8 @@
 #include <LibTest/TestCase.h>
 #include <LibWebView/Automation/FlowStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
+#include <LibWebView/Extensions/ExtensionStore.h>
+#include <LibWebView/Extensions/ExtensionTypes.h>
 
 namespace {
 
@@ -52,7 +54,8 @@ MCP::ToolCallResult error_result(StringView message)
 class FakeMCPDelegate final : public MCP::MCPDelegate {
 public:
     explicit FakeMCPDelegate(ByteString storage_dir)
-        : m_store(move(storage_dir))
+        : m_store(LexicalPath::join(storage_dir, "flows"sv).string())
+        , m_ext_store(LexicalPath::join(storage_dir, "extensions"sv).string())
     {
     }
 
@@ -245,8 +248,70 @@ public:
         cb(ok_json_result(JsonValue { move(out) }));
     }
 
+    virtual void list_extensions(MCP::OnToolCallComplete cb) override
+    {
+        JsonArray list;
+        for (auto const& ext : m_ext_store.list_extensions())
+            list.must_append(WebView::serialize_extension(ext));
+        JsonObject out;
+        out.set("extensions"sv, move(list));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void install_unpacked_extension(String path, MCP::OnToolCallComplete cb) override
+    {
+        auto installed = m_ext_store.install_unpacked(path.to_byte_string());
+        if (installed.is_error()) {
+            cb(error_result(MUST(String::formatted("Install failed: {}", installed.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("installed"sv, true);
+        out.set("extension"sv, WebView::serialize_extension(installed.value()));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void set_extension_enabled(String extension_id, bool enabled, MCP::OnToolCallComplete cb) override
+    {
+        auto updated = m_ext_store.set_enabled(extension_id, enabled);
+        if (updated.is_error()) {
+            cb(error_result(MUST(String::formatted("Update failed: {}", updated.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("updated"sv, true);
+        out.set("extension"sv, WebView::serialize_extension(updated.value()));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void reload_extension(String extension_id, MCP::OnToolCallComplete cb) override
+    {
+        auto reloaded = m_ext_store.reload_extension(extension_id);
+        if (reloaded.is_error()) {
+            cb(error_result(MUST(String::formatted("Reload failed: {}", reloaded.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("reloaded"sv, true);
+        out.set("extension"sv, WebView::serialize_extension(reloaded.value()));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
+    virtual void remove_extension(String extension_id, MCP::OnToolCallComplete cb) override
+    {
+        if (auto res = m_ext_store.remove_extension(extension_id); res.is_error()) {
+            cb(error_result(MUST(String::formatted("Remove failed: {}", res.error()))));
+            return;
+        }
+        JsonObject out;
+        out.set("removed"sv, true);
+        out.set("extension_id"sv, extension_id);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+
 private:
     WebView::FlowStore m_store;
+    WebView::ExtensionStore m_ext_store;
     Vector<String> m_active_runs;
     u64 m_run_counter { 0 };
 };
@@ -434,11 +499,12 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 25u);
+    EXPECT_EQ(tools->size(), 30u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
     bool found_cancel_flow_run = false;
+    bool found_install_extension = false;
     for (size_t i = 0; i < tools->size(); ++i) {
         auto tool = tools->at(i).as_object();
         auto name = tool.get_string("name"sv).value_or(String {});
@@ -448,11 +514,14 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             run_flow_tool = tool;
         else if (name == "cancel_flow_run"sv)
             found_cancel_flow_run = true;
+        else if (name == "install_unpacked_extension"sv)
+            found_install_extension = true;
     }
 
     EXPECT(save_flow_tool.has_value());
     EXPECT(run_flow_tool.has_value());
     EXPECT(found_cancel_flow_run);
+    EXPECT(found_install_extension);
 
     auto flow_schema = save_flow_tool->get_object("inputSchema"sv)
                            ->get_object("properties"sv)
@@ -610,5 +679,74 @@ TEST_CASE(mcp_automation_flow_lifecycle)
         get_args.set("flow_id"sv, "mcp-stringified"sv);
         auto get_res = call_mcp_tool(port, token, 13, "get_flow"sv, move(get_args));
         EXPECT(get_res.get_bool("isError"sv).value_or(false));
+    }
+}
+
+TEST_CASE(mcp_extensions_lifecycle)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    auto unpacked_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+        (void)FileSystem::remove(unpacked_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    auto manifest_file = MUST(Core::File::open(LexicalPath::join(unpacked_dir, "manifest.json"sv).string(), Core::File::OpenMode::Write));
+    MUST(manifest_file->write_until_depleted(R"JSON({
+        "manifest_version": 3,
+        "id": "mcp-ext-demo",
+        "name": "MCP Extension Demo",
+        "version": "1.0.0",
+        "permissions": ["storage"],
+        "content_scripts": [{ "matches": ["http://*/*"], "js": ["plugin.js"] }]
+    })JSON"sv));
+    auto js_file = MUST(Core::File::open(LexicalPath::join(unpacked_dir, "plugin.js"sv).string(), Core::File::OpenMode::Write));
+    MUST(js_file->write_until_depleted("console.log('mcp extension');"sv));
+
+    FakeMCPDelegate delegate(temp_dir);
+    auto token = "mcp-ext-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = *server->local_port();
+
+    {
+        JsonObject args;
+        args.set("path"sv, String::from_utf8_without_validation(unpacked_dir.bytes()));
+        auto res = call_mcp_tool(port, token, 1, "install_unpacked_extension"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("installed"sv).value_or(false));
+        EXPECT_EQ(payload.get_object("extension"sv)->get_string("id"sv).value_or(String {}), "mcp-ext-demo"sv);
+    }
+
+    {
+        auto res = call_mcp_tool(port, token, 2, "list_extensions"sv, JsonObject {});
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_array("extensions"sv)->size(), 1u);
+    }
+
+    {
+        JsonObject args;
+        args.set("extension_id"sv, "mcp-ext-demo"sv);
+        args.set("enabled"sv, false);
+        auto res = call_mcp_tool(port, token, 3, "set_extension_enabled"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(!payload.get_object("extension"sv)->get_bool("enabled"sv).value_or(true));
+    }
+
+    {
+        JsonObject args;
+        args.set("extension_id"sv, "mcp-ext-demo"sv);
+        auto res = call_mcp_tool(port, token, 4, "reload_extension"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("reloaded"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("extension_id"sv, "mcp-ext-demo"sv);
+        auto res = call_mcp_tool(port, token, 5, "remove_extension"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("removed"sv).value_or(false));
     }
 }

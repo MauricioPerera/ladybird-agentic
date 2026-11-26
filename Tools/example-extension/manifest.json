@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "id": "ladybird-page-inspector",
+  "name": "Page Inspector",
+  "version": "1.0.0",
+  "description": "Adds a corner link/heading badge on web pages and bundles a smoke automation flow.",
+  "permissions": ["storage", "flows"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "css": ["content.css"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "ladybird": {
+    "flows": ["flows/inspect-page.json"]
+  }
+}

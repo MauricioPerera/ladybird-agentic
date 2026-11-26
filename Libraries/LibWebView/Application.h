@@ -418,6 +418,9 @@ public:
 
     FlowStore& flow_store();
     FlowRunner& flow_runner();
+    ExtensionStore& extension_store();
+    ExtensionManager& extension_manager();
+    void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
     Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab) const;
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
@@ -680,6 +683,11 @@ private:
     virtual void list_flow_runs(Optional<String> flow_id, size_t limit, MCP::OnToolCallComplete) override;
     virtual void get_flow_run(String run_id, MCP::OnToolCallComplete) override;
     virtual void cancel_flow_run(String run_id, MCP::OnToolCallComplete) override;
+    virtual void list_extensions(MCP::OnToolCallComplete) override;
+    virtual void install_unpacked_extension(String path, MCP::OnToolCallComplete) override;
+    virtual void set_extension_enabled(String extension_id, bool enabled, MCP::OnToolCallComplete) override;
+    virtual void reload_extension(String extension_id, MCP::OnToolCallComplete) override;
+    virtual void remove_extension(String extension_id, MCP::OnToolCallComplete) override;
 
     static Application* s_the;
 
@@ -831,6 +839,8 @@ private:
     Optional<String> m_mcp_token;
     OwnPtr<FlowStore> m_flow_store;
     OwnPtr<FlowRunner> m_flow_runner;
+    OwnPtr<ExtensionStore> m_extension_store;
+    OwnPtr<ExtensionManager> m_extension_manager;
     u64 m_next_mcp_command_id { 0x8000'0000'0000'0001ULL };
     u64 m_next_mcp_wait_id { 1 };
 
