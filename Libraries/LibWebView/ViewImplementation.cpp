@@ -871,7 +871,9 @@ void ViewImplementation::set_mcp_access_allowed(bool allowed)
         return;
 
     m_mcp_access_allowed = allowed;
-    if (!allowed && Application::is_initialized())
+    if (allowed)
+        page().async_start_sending_console_output(true, true);
+    else if (Application::is_initialized())
         Application::the().did_revoke_mcp_access_for_view(view_id());
     did_change_state();
 }
@@ -4341,8 +4343,10 @@ void ViewImplementation::display_page_changed(RefPtr<WebContentPage> previous_pa
     // DevTools inspects the page that displays the tab, and no other. A client that took the console's messages or
     // errors takes those of this page too.
     page.async_set_has_devtools_client(m_devtools_connected);
-    if (m_devtools_takes_console_messages || m_devtools_takes_console_errors)
-        page.async_start_sending_console_output(m_devtools_takes_console_messages, m_devtools_takes_console_errors);
+    bool want_console_messages = m_devtools_takes_console_messages || m_mcp_access_allowed;
+    bool want_console_errors = m_devtools_takes_console_errors || m_mcp_access_allowed;
+    if (want_console_messages || want_console_errors)
+        page.async_start_sending_console_output(want_console_messages, want_console_errors);
     handle_resize();
     update_ui_overlays();
 

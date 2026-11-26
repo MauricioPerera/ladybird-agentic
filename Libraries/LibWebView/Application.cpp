@@ -48,6 +48,7 @@
 #include <LibWebCommon/Loader/UserAgent.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
+#include <LibWebCommon/WebView/ConsoleOutput.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
 #include <LibWebView/Automation/FlowStore.h>
@@ -4556,6 +4557,8 @@ ErrorOr<void> Application::toggle_mcp_enabled()
 void Application::did_revoke_mcp_access_for_view(u64 view_id)
 {
     fail_mcp_requests_for_view(view_id, mcp_denied_message);
+    m_mcp_console_logs.remove(view_id);
+    m_mcp_network_requests.remove(view_id);
 }
 
 void Application::did_close_mcp_view(u64 view_id)
@@ -4564,6 +4567,8 @@ void Application::did_close_mcp_view(u64 view_id)
         m_flow_runner->did_close_view(view_id);
     fail_mcp_requests_for_view(view_id, "Tab closed"sv);
     m_mcp_content_queues.remove(view_id);
+    m_mcp_console_logs.remove(view_id);
+    m_mcp_network_requests.remove(view_id);
 }
 
 void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
@@ -4598,6 +4603,14 @@ void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
     }
     for (auto wait_id : tree_ids)
         finish_mcp_tree_wait(wait_id, mcp_error_result(message));
+
+    Vector<u64> cond_ids;
+    for (auto const& [wait_id, wait] : m_mcp_condition_waits) {
+        if (wait->view_id == view_id)
+            cond_ids.append(wait_id);
+    }
+    for (auto wait_id : cond_ids)
+        finish_mcp_condition_wait(wait_id, mcp_error_result(message));
 }
 
 void Application::fail_all_mcp_requests(StringView message)
@@ -4610,6 +4623,10 @@ void Application::fail_all_mcp_requests(StringView message)
             view_ids.append(wait->view_id);
     }
     for (auto const& [_, wait] : m_mcp_tree_waits) {
+        if (!view_ids.contains_slow(wait->view_id))
+            view_ids.append(wait->view_id);
+    }
+    for (auto const& [_, wait] : m_mcp_condition_waits) {
         if (!view_ids.contains_slow(wait->view_id))
             view_ids.append(wait->view_id);
     }
@@ -5191,8 +5208,229 @@ void Application::find_elements(u64 tab_id, String selector, String strategy, MC
     });
 }
 
-void Application::click_element(u64 tab_id, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete on_complete)
+static constexpr size_t max_mcp_buffered_events = 200;
+
+static StringView mcp_console_level_name(JS::ConsoleLogLevel level)
 {
+    switch (level) {
+    case JS::ConsoleLogLevel::Assert:
+        return "assert"sv;
+    case JS::ConsoleLogLevel::Count:
+        return "count"sv;
+    case JS::ConsoleLogLevel::CountReset:
+        return "countReset"sv;
+    case JS::ConsoleLogLevel::Debug:
+        return "debug"sv;
+    case JS::ConsoleLogLevel::Dir:
+        return "dir"sv;
+    case JS::ConsoleLogLevel::DirXML:
+        return "dirxml"sv;
+    case JS::ConsoleLogLevel::Error:
+        return "error"sv;
+    case JS::ConsoleLogLevel::Group:
+        return "group"sv;
+    case JS::ConsoleLogLevel::GroupCollapsed:
+        return "groupCollapsed"sv;
+    case JS::ConsoleLogLevel::Info:
+        return "info"sv;
+    case JS::ConsoleLogLevel::Log:
+        return "log"sv;
+    case JS::ConsoleLogLevel::TimeEnd:
+        return "timeEnd"sv;
+    case JS::ConsoleLogLevel::TimeLog:
+        return "timeLog"sv;
+    case JS::ConsoleLogLevel::Table:
+        return "table"sv;
+    case JS::ConsoleLogLevel::Trace:
+        return "trace"sv;
+    case JS::ConsoleLogLevel::Warn:
+        return "warn"sv;
+    }
+    return "log"sv;
+}
+
+void Application::record_mcp_console_output(u64 view_id, ConsoleOutput const& output)
+{
+    auto& entries = m_mcp_console_logs.ensure(view_id, [] { return Vector<MCPConsoleEntry> {}; });
+    while (entries.size() >= max_mcp_buffered_events)
+        entries.take_first();
+
+    MCPConsoleEntry entry;
+    entry.timestamp_ms = output.timestamp.milliseconds_since_epoch();
+
+    bool should_store = true;
+    output.output.visit(
+        [&](ConsoleLog const& log) {
+            entry.kind = "log"_string;
+            entry.level = String::from_utf8_without_validation(mcp_console_level_name(log.level).bytes());
+            StringBuilder text;
+            for (size_t i = 0; i < log.arguments.size(); ++i) {
+                if (i > 0)
+                    text.append(' ');
+                auto const& arg = log.arguments[i];
+                if (arg.is_string())
+                    text.append(arg.as_string());
+                else
+                    text.append(arg.serialized());
+            }
+            entry.text = MUST(text.to_string());
+            if (log.location.has_value() && log.location->file.has_value())
+                entry.location = MUST(String::formatted("{}:{}:{}", *log.location->file, log.location->line.value_or(0), log.location->column.value_or(0)));
+        },
+        [&](ConsoleError const& err) {
+            entry.kind = "exception"_string;
+            entry.level = "error"_string;
+            entry.text = MUST(String::formatted("{}: {}", err.name, err.message));
+            if (!err.trace.is_empty() && err.trace.first().file.has_value())
+                entry.location = MUST(String::formatted("{}:{}:{}", *err.trace.first().file, err.trace.first().line.value_or(0), err.trace.first().column.value_or(0)));
+        },
+        [&](ConsoleTrace const& trace) {
+            entry.kind = "trace"_string;
+            entry.level = "trace"_string;
+            entry.text = trace.label;
+            if (!trace.stack.is_empty() && trace.stack.first().file.has_value())
+                entry.location = MUST(String::formatted("{}:{}:{}", *trace.stack.first().file, trace.stack.first().line.value_or(0), trace.stack.first().column.value_or(0)));
+        },
+        [&](ConsoleGroupEnd const&) {
+            should_store = false;
+        });
+
+    if (should_store)
+        entries.append(move(entry));
+}
+
+void Application::record_mcp_network_request_started(u64 view_id, u64 request_id, URL::URL const& url, ByteString const& method, Optional<String> const& initiator_type)
+{
+    auto& entries = m_mcp_network_requests.ensure(view_id, [] { return Vector<MCPNetworkEntry> {}; });
+    while (entries.size() >= max_mcp_buffered_events)
+        entries.take_first();
+
+    MCPNetworkEntry entry;
+    entry.request_id = request_id;
+    entry.url = url.to_string();
+    entry.method = MUST(String::from_byte_string(method));
+    entry.initiator_type = initiator_type;
+    entry.started_at_ms = UnixDateTime::now().milliseconds_since_epoch();
+    entries.append(move(entry));
+}
+
+void Application::record_mcp_network_response_headers(u64 view_id, u64 request_id, u32 status_code, Optional<String> const& reason_phrase)
+{
+    auto entries = m_mcp_network_requests.get(view_id);
+    if (!entries.has_value())
+        return;
+    for (size_t i = entries->size(); i-- > 0;) {
+        auto& entry = (*entries)[i];
+        if (entry.request_id == request_id) {
+            entry.status_code = status_code;
+            entry.reason_phrase = reason_phrase;
+            break;
+        }
+    }
+}
+
+void Application::record_mcp_network_request_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const& network_error)
+{
+    auto entries = m_mcp_network_requests.get(view_id);
+    if (!entries.has_value())
+        return;
+    for (size_t i = entries->size(); i-- > 0;) {
+        auto& entry = (*entries)[i];
+        if (entry.request_id == request_id) {
+            entry.body_size = body_size;
+            entry.finished = true;
+            entry.finished_at_ms = UnixDateTime::now().milliseconds_since_epoch();
+            if (network_error.has_value()) {
+                auto err_sv = Requests::network_error_to_string(*network_error);
+                entry.error = String::from_utf8_without_validation(err_sv.bytes());
+            }
+            break;
+        }
+    }
+}
+
+static constexpr auto mcp_target_resolver_js = R"JS(
+const findDeep = (root, sel) => {
+  if (!root || !sel) return null;
+  try {
+    const direct = root.querySelector(sel);
+    if (direct) return direct;
+  } catch (e) { return null; }
+  const all = root.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].shadowRoot) {
+      const hit = findDeep(all[i].shadowRoot, sel);
+      if (hit) return hit;
+    }
+  }
+  return null;
+};
+const resolveTarget = (cfg) => {
+  if (cfg.ref) {
+    const refs = window.__ladybirdMcpRefs || {};
+    const key = String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref));
+    const el = refs[key];
+    if (!el || !el.isConnected)
+      return { error: 'Stale or unknown element ref: ' + key + '. Call get_page_snapshot again.' };
+    return { el };
+  }
+  if (cfg.selector) {
+    const el = findDeep(document, cfg.selector);
+    if (!el)
+      return { error: 'No element matched selector: ' + cfg.selector };
+    return { el };
+  }
+  return { error: 'Either ref or selector must be provided' };
+};
+)JS"sv;
+
+static void execute_mcp_js_json(Application& app, u64 tab_id, String script, JsonObject cfg, MCP::OnToolCallComplete on_complete)
+{
+    JsonArray args;
+    args.must_append(move(cfg));
+
+    JsonObject payload;
+    payload.set("script"sv, move(script));
+    payload.set("args"sv, move(args));
+
+    app.enqueue_automation_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, true, [on_complete = move(on_complete)](Web::WebDriver::Response response) {
+        if (response.is_error()) {
+            on_complete(format_mcp_webdriver_error(response.error()));
+            return;
+        }
+        if (response.value().is_object()) {
+            if (auto err = response.value().as_object().get_string("error"sv); err.has_value()) {
+                on_complete(mcp_error_result(*err));
+                return;
+            }
+        }
+        on_complete(mcp_ok_json(response.value()));
+    });
+}
+
+void Application::click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete on_complete)
+{
+    if (ref.has_value() && !ref->is_empty()) {
+        JsonObject cfg;
+        cfg.set("ref"sv, *ref);
+        StringBuilder js;
+        js.append("const cfg = arguments[0] || {};\n"sv);
+        js.append(mcp_target_resolver_js);
+        js.append(R"JS(
+const res = resolveTarget(cfg);
+if (res.error) return { error: res.error };
+const el = res.el;
+if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'nearest' });
+if (typeof el.focus === 'function') el.focus();
+for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup'])
+  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+el.click();
+return { clicked: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref)), tag: (el.tagName || '').toLowerCase() };
+)JS"sv);
+        execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+        return;
+    }
+
     auto do_click = [this, tab_id](String resolved_element_id, MCP::OnToolCallComplete cb) {
         Vector<String> args;
         args.append(resolved_element_id);
@@ -5214,7 +5452,7 @@ void Application::click_element(u64 tab_id, Optional<String> selector, Optional<
     }
 
     if (!selector.has_value() || selector->is_empty()) {
-        on_complete(mcp_error_result("Either 'selector' or 'element_id' must be provided"sv));
+        on_complete(mcp_error_result("Either 'ref', 'selector', or 'element_id' must be provided"sv));
         return;
     }
 
@@ -5236,8 +5474,43 @@ void Application::click_element(u64 tab_id, Optional<String> selector, Optional<
     });
 }
 
-void Application::type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete on_complete)
+void Application::type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete on_complete)
 {
+    if (ref.has_value() && !ref->is_empty()) {
+        JsonObject cfg;
+        cfg.set("ref"sv, *ref);
+        cfg.set("text"sv, move(text));
+        cfg.set("clear"sv, clear_first);
+        StringBuilder js;
+        js.append("const cfg = arguments[0] || {};\n"sv);
+        js.append(mcp_target_resolver_js);
+        js.append(R"JS(
+const res = resolveTarget(cfg);
+if (res.error) return { error: res.error };
+const el = res.el;
+if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'nearest' });
+if (typeof el.focus === 'function') el.focus();
+if (el.isContentEditable) {
+  const prev = cfg.clear ? '' : (el.textContent || '');
+  el.textContent = prev + String(cfg.text || '');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+} else {
+  const prev = cfg.clear ? '' : (el.value !== undefined ? String(el.value) : '');
+  const next = prev + String(cfg.text || '');
+  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement?.prototype : window.HTMLInputElement?.prototype;
+  const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+  if (desc && typeof desc.set === 'function') desc.set.call(el, next);
+  else el.value = next;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+return { typed: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref)) };
+)JS"sv);
+        execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+        return;
+    }
+
     auto do_type = [this, tab_id, text = move(text), clear_first](String resolved_element_id, MCP::OnToolCallComplete cb) mutable {
         auto send_keys = [this, tab_id, text = move(text)](String elem_id, MCP::OnToolCallComplete send_cb) mutable {
             JsonObject payload;
@@ -5278,7 +5551,7 @@ void Application::type_text(u64 tab_id, Optional<String> selector, Optional<Stri
     }
 
     if (!selector.has_value() || selector->is_empty()) {
-        on_complete(mcp_error_result("Either 'selector' or 'element_id' must be provided"sv));
+        on_complete(mcp_error_result("Either 'ref', 'selector', or 'element_id' must be provided"sv));
         return;
     }
 
@@ -5298,6 +5571,471 @@ void Application::type_text(u64 tab_id, Optional<String> selector, Optional<Stri
         }
         do_type(*uuid, move(on_complete));
     });
+}
+
+void Application::get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject cfg;
+    cfg.set("max_elements"sv, static_cast<u64>(min(max_elements, 500uz)));
+    cfg.set("include_text"sv, include_text);
+
+    auto script = R"JS(
+const cfg = arguments[0] || {};
+const maxElements = Math.max(1, Math.min(500, Number(cfg.max_elements || 150)));
+const isVisible = (el) => {
+  if (!el || el.nodeType !== 1) return false;
+  const style = window.getComputedStyle(el);
+  if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+const isInteractive = (el) => {
+  const tag = (el.tagName || '').toLowerCase();
+  if (['a', 'button', 'input', 'textarea', 'select', 'summary', 'details'].includes(tag)) return true;
+  if (el.hasAttribute('role') || el.hasAttribute('tabindex') || el.isContentEditable) return true;
+  if (typeof el.onclick === 'function' || el.hasAttribute('onclick')) return true;
+  return false;
+};
+const inferRole = (el) => {
+  const explicit = (el.getAttribute('role') || '').trim();
+  if (explicit) return explicit;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'a' && el.hasAttribute('href')) return 'link';
+  if (tag === 'button') return 'button';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'input') {
+    const t = (el.getAttribute('type') || 'text').toLowerCase();
+    if (['button', 'submit', 'reset'].includes(t)) return 'button';
+    if (t === 'checkbox') return 'checkbox';
+    if (t === 'radio') return 'radio';
+    return 'textbox';
+  }
+  return tag;
+};
+const getLabelText = (el) => {
+  const aria = (el.getAttribute('aria-label') || '').trim();
+  if (aria) return aria;
+  if (el.id) {
+    try {
+      const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+      if (lbl && lbl.textContent) return lbl.textContent.trim().slice(0, 120);
+    } catch (e) {}
+  }
+  const parentLabel = el.closest && el.closest('label');
+  if (parentLabel && parentLabel.textContent) return parentLabel.textContent.trim().slice(0, 120);
+  const txt = (el.innerText || el.textContent || el.value || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
+  return txt.replace(/\s+/g, ' ').slice(0, 120);
+};
+const elements = [];
+const refs = Object.create(null);
+const visited = new Set();
+const walk = (root, inShadow) => {
+  if (!root || elements.length >= maxElements) return;
+  const nodes = root.querySelectorAll('*');
+  for (let i = 0; i < nodes.length && elements.length < maxElements; i++) {
+    const el = nodes[i];
+    if (!visited.has(el)) {
+      visited.add(el);
+      if (isInteractive(el) && isVisible(el)) {
+        const ref = '@e' + (elements.length + 1);
+        refs[ref] = el;
+        const r = el.getBoundingClientRect();
+        const item = {
+          ref,
+          tag: (el.tagName || '').toLowerCase(),
+          role: inferRole(el),
+          text: getLabelText(el),
+          bounds: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+          disabled: !!el.disabled
+        };
+        if (el.id) item.id = el.id;
+        const nameAttr = el.getAttribute('name');
+        if (nameAttr) item.name = nameAttr;
+        const typeAttr = el.getAttribute('type');
+        if (typeAttr) item.type = typeAttr;
+        const href = el.getAttribute('href');
+        if (href) item.href = href.slice(0, 180);
+        if (inShadow) item.shadow_dom = true;
+        elements.push(item);
+      }
+    }
+    if (el.shadowRoot && elements.length < maxElements)
+      walk(el.shadowRoot, true);
+  }
+};
+walk(document, false);
+window.__ladybirdMcpRefs = refs;
+const out = {
+  url: window.location.href,
+  title: document.title || '',
+  viewport: { width: window.innerWidth, height: window.innerHeight, scrollX: Math.round(window.scrollX), scrollY: Math.round(window.scrollY) },
+  element_count: elements.length,
+  elements
+};
+if (cfg.include_text && document.body) {
+  out.text_excerpt = (document.body.innerText || document.body.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+}
+return out;
+)JS"_string;
+
+    execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(on_complete));
+}
+
+void Application::press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject cfg;
+    cfg.set("key"sv, move(key));
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+let el = document.activeElement || document.body || document.documentElement;
+if (cfg.ref || cfg.selector) {
+  const res = resolveTarget(cfg);
+  if (res.error) return { error: res.error };
+  el = res.el;
+  if (typeof el.focus === 'function') el.focus();
+}
+if (!el) return { error: 'No active element' };
+const init = { key: cfg.key, bubbles: true, cancelable: true };
+const ok = el.dispatchEvent(new KeyboardEvent('keydown', init));
+if (cfg.key === 'Enter' || cfg.key.length === 1)
+  el.dispatchEvent(new KeyboardEvent('keypress', init));
+el.dispatchEvent(new KeyboardEvent('keyup', init));
+if (cfg.key === 'Enter' && ok && el.form) {
+  if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit();
+  else el.form.submit();
+}
+return { pressed: true, key: cfg.key };
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+}
+
+void Application::scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject cfg;
+    cfg.set("direction"sv, move(direction));
+    cfg.set("amount"sv, static_cast<i64>(amount));
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+if (cfg.ref || cfg.selector) {
+  const res = resolveTarget(cfg);
+  if (res.error) return { error: res.error };
+  if (typeof res.el.scrollIntoView === 'function')
+    res.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+} else {
+  const amt = Math.max(0, Number(cfg.amount || 600));
+  if (cfg.direction === 'top') window.scrollTo(0, 0);
+  else if (cfg.direction === 'bottom') window.scrollTo(0, document.documentElement.scrollHeight);
+  else if (cfg.direction === 'up') window.scrollBy(0, -amt);
+  else window.scrollBy(0, amt);
+}
+return {
+  scrolled: true,
+  scrollX: Math.round(window.scrollX),
+  scrollY: Math.round(window.scrollY),
+  scrollHeight: document.documentElement ? document.documentElement.scrollHeight : 0,
+  clientHeight: document.documentElement ? document.documentElement.clientHeight : 0
+};
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+}
+
+void Application::hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject cfg;
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+const res = resolveTarget(cfg);
+if (res.error) return { error: res.error };
+const el = res.el;
+if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'nearest' });
+const r = el.getBoundingClientRect();
+const cx = Math.round(r.left + r.width / 2);
+const cy = Math.round(r.top + r.height / 2);
+for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove'])
+  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window }));
+return { hovered: true, tag: (el.tagName || '').toLowerCase() };
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+}
+
+void Application::select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, MCP::OnToolCallComplete on_complete)
+{
+    JsonObject cfg;
+    if (ref.has_value() && !ref->is_empty())
+        cfg.set("ref"sv, *ref);
+    if (selector.has_value() && !selector->is_empty())
+        cfg.set("selector"sv, *selector);
+    if (value.has_value())
+        cfg.set("value"sv, *value);
+    if (label.has_value())
+        cfg.set("label"sv, *label);
+    if (index.has_value())
+        cfg.set("index"sv, static_cast<u64>(*index));
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+const res = resolveTarget(cfg);
+if (res.error) return { error: res.error };
+const el = res.el;
+if ((el.tagName || '').toLowerCase() !== 'select')
+  return { error: 'Target element is not a <select>' };
+let matchedIdx = -1;
+const opts = Array.from(el.options || []);
+if (cfg.value !== undefined) {
+  matchedIdx = opts.findIndex(o => o.value === cfg.value);
+} else if (cfg.label !== undefined) {
+  matchedIdx = opts.findIndex(o => (o.label || o.textContent || '').trim() === String(cfg.label).trim());
+} else if (cfg.index !== undefined) {
+  const idx = Number(cfg.index);
+  if (idx >= 0 && idx < opts.length) matchedIdx = idx;
+} else {
+  return { error: 'Provide one of value, label, or index' };
+}
+if (matchedIdx < 0) return { error: 'No matching <option> found in <select>' };
+el.selectedIndex = matchedIdx;
+el.dispatchEvent(new Event('input', { bubbles: true }));
+el.dispatchEvent(new Event('change', { bubbles: true }));
+const chosen = opts[matchedIdx];
+return { selected: true, selected_index: matchedIdx, selected_value: chosen.value, selected_label: (chosen.label || chosen.textContent || '').trim() };
+)JS"sv);
+
+    execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(on_complete));
+}
+
+void Application::finish_mcp_condition_wait(u64 wait_id, MCP::ToolCallResult result)
+{
+    auto wait = m_mcp_condition_waits.take(wait_id);
+    if (!wait.has_value())
+        return;
+
+    if (wait.value()->timer) {
+        wait.value()->timer->stop();
+        wait.value()->timer.clear();
+    }
+
+    if (auto callback = move(wait.value()->on_complete))
+        callback(move(result));
+}
+
+void Application::poll_mcp_condition_wait(u64 wait_id)
+{
+    auto entry = m_mcp_condition_waits.get(wait_id);
+    if (!entry.has_value())
+        return;
+    auto& wait = *entry.value();
+
+    if (!find_allowed_mcp_view(wait.view_id).has_value()) {
+        finish_mcp_condition_wait(wait_id, mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    JsonObject cfg;
+    if (wait.ref.has_value() && !wait.ref->is_empty())
+        cfg.set("ref"sv, *wait.ref);
+    if (wait.selector.has_value() && !wait.selector->is_empty())
+        cfg.set("selector"sv, *wait.selector);
+    if (wait.text.has_value())
+        cfg.set("text"sv, *wait.text);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_target_resolver_js);
+    js.append(R"JS(
+let container = document.body || document.documentElement;
+if (cfg.ref || cfg.selector) {
+  const res = resolveTarget(cfg);
+  if (res.error) return { satisfied: false, reason: res.error };
+  const el = res.el;
+  const style = window.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || r.width <= 0 || r.height <= 0)
+    return { satisfied: false, reason: 'Target element is not yet visible' };
+  container = el;
+}
+if (cfg.text !== undefined && String(cfg.text).length > 0) {
+  const bodyText = container ? (container.innerText || container.textContent || '') : '';
+  if (!bodyText.includes(String(cfg.text)))
+    return { satisfied: false, reason: 'Expected text not yet present' };
+}
+return { satisfied: true, url: window.location.href };
+)JS"sv);
+
+    JsonArray args;
+    args.must_append(move(cfg));
+    JsonObject payload;
+    payload.set("script"sv, MUST(js.to_string()));
+    payload.set("args"sv, move(args));
+
+    enqueue_mcp_webdriver_command(wait.view_id, "execute_script"_string, move(payload), {}, [this, wait_id](Web::WebDriver::Response response) {
+        auto active = m_mcp_condition_waits.get(wait_id);
+        if (!active.has_value())
+            return;
+
+        if (response.is_error()) {
+            finish_mcp_condition_wait(wait_id, format_mcp_webdriver_error(response.error()));
+            return;
+        }
+
+        bool satisfied = false;
+        Optional<String> reason;
+        if (response.value().is_object()) {
+            auto const& obj = response.value().as_object();
+            satisfied = obj.get_bool("satisfied"sv).value_or(false);
+            reason = obj.get_string("reason"sv).copy();
+        }
+
+        if (satisfied) {
+            finish_mcp_condition_wait(wait_id, mcp_ok_json(response.value()));
+            return;
+        }
+
+        if (MonotonicTime::now() >= active.value()->deadline) {
+            finish_mcp_condition_wait(wait_id, mcp_error_result(reason.value_or("Timed out waiting for condition"_string)));
+            return;
+        }
+
+        active.value()->timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(150), [this, wait_id] {
+            poll_mcp_condition_wait(wait_id);
+        });
+        active.value()->timer->start();
+    });
+}
+
+void Application::wait_for(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, MCP::OnToolCallComplete on_complete)
+{
+    if (!find_allowed_mcp_view(tab_id).has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    bool has_ref = ref.has_value() && !ref->is_empty();
+    bool has_sel = selector.has_value() && !selector->is_empty();
+    bool has_text = text.has_value() && !text->is_empty();
+    if (!has_ref && !has_sel && !has_text) {
+        on_complete(mcp_error_result("Provide at least one of 'ref', 'selector', or 'text'"sv));
+        return;
+    }
+
+    u32 clamped = clamp(timeout_ms, 100u, 60000u);
+    auto wait_id = m_next_mcp_wait_id++;
+    auto wait = make<PendingMCPConditionWait>();
+    wait->view_id = tab_id;
+    wait->ref = move(ref);
+    wait->selector = move(selector);
+    wait->text = move(text);
+    wait->deadline = MonotonicTime::now() + AK::Duration::from_milliseconds(clamped);
+    wait->on_complete = move(on_complete);
+
+    m_mcp_condition_waits.set(wait_id, move(wait));
+    poll_mcp_condition_wait(wait_id);
+}
+
+void Application::get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete on_complete)
+{
+    if (!find_allowed_mcp_view(tab_id).has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    size_t clamped_limit = clamp(limit, static_cast<size_t>(1), max_mcp_buffered_events);
+    JsonArray items;
+    if (auto entries = m_mcp_console_logs.get(tab_id); entries.has_value()) {
+        size_t start = entries->size() > clamped_limit ? entries->size() - clamped_limit : 0;
+        for (size_t i = start; i < entries->size(); ++i) {
+            auto const& e = (*entries)[i];
+            JsonObject obj;
+            obj.set("timestamp_ms"sv, e.timestamp_ms);
+            obj.set("kind"sv, e.kind);
+            obj.set("level"sv, e.level);
+            obj.set("text"sv, e.text);
+            if (e.location.has_value())
+                obj.set("location"sv, *e.location);
+            items.must_append(move(obj));
+        }
+        if (clear)
+            entries->clear();
+    }
+
+    JsonObject result;
+    result.set("tab_id"sv, tab_id);
+    result.set("count"sv, static_cast<u64>(items.size()));
+    result.set("logs"sv, move(items));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete on_complete)
+{
+    if (!find_allowed_mcp_view(tab_id).has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    size_t clamped_limit = clamp(limit, static_cast<size_t>(1), max_mcp_buffered_events);
+    JsonArray items;
+    if (auto entries = m_mcp_network_requests.get(tab_id); entries.has_value()) {
+        Vector<MCPNetworkEntry const*> filtered;
+        for (auto const& e : *entries) {
+            bool is_err = e.error.has_value() || (e.status_code.has_value() && *e.status_code >= 400);
+            if (!only_errors || is_err)
+                filtered.append(&e);
+        }
+        size_t start = filtered.size() > clamped_limit ? filtered.size() - clamped_limit : 0;
+        for (size_t i = start; i < filtered.size(); ++i) {
+            auto const& e = *filtered[i];
+            JsonObject obj;
+            obj.set("request_id"sv, e.request_id);
+            obj.set("url"sv, e.url);
+            obj.set("method"sv, e.method);
+            if (e.initiator_type.has_value())
+                obj.set("initiator_type"sv, *e.initiator_type);
+            if (e.status_code.has_value())
+                obj.set("status_code"sv, static_cast<u64>(*e.status_code));
+            if (e.reason_phrase.has_value())
+                obj.set("reason_phrase"sv, *e.reason_phrase);
+            obj.set("body_size"sv, e.body_size);
+            obj.set("finished"sv, e.finished);
+            obj.set("started_at_ms"sv, e.started_at_ms);
+            if (e.finished_at_ms.has_value())
+                obj.set("finished_at_ms"sv, *e.finished_at_ms);
+            if (e.error.has_value())
+                obj.set("error"sv, *e.error);
+            items.must_append(move(obj));
+        }
+        if (clear)
+            entries->clear();
+    }
+
+    JsonObject result;
+    result.set("tab_id"sv, tab_id);
+    result.set("count"sv, static_cast<u64>(items.size()));
+    result.set("requests"sv, move(items));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
 void Application::evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete on_complete)

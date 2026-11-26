@@ -7,10 +7,12 @@
 #include <LibCrypto/OpenSSL.h>
 #include <RequestServer/AIA.h>
 #include <RequestServer/CertificateExceptions.h>
+#include <RequestServer/Resolver.h>
 
 #include <AK/AnyOf.h>
 #include <AK/ByteString.h>
 #include <AK/HashMap.h>
+#include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
 
@@ -18,6 +20,14 @@
 // Included before the OpenSSL headers so the winsock2 struct timeval is renamed and can't collide with AK's.
 // Same reason CURL.h includes it before curl.h.
 #    include <AK/Windows.h>
+#    include <wincrypt.h>
+#    undef X509_NAME
+#    undef X509_CERT_PAIR
+#    undef X509_EXTENSIONS
+#    undef PKCS7_ISSUER_AND_SERIAL
+#    undef PKCS7_SIGNER_INFO
+#    undef OCSP_REQUEST
+#    undef OCSP_RESPONSE
 #endif
 
 #include <openssl/err.h>
@@ -277,6 +287,104 @@ static int apply_self_signed_certificate_exception(X509_STORE_CTX* context, AIAC
     return 0;
 }
 
+#if defined(AK_OS_WINDOWS)
+static bool export_x509_der(X509 const* certificate, Vector<u8>& out_der)
+{
+    if (!certificate)
+        return false;
+    int len = i2d_X509(certificate, nullptr);
+    if (len <= 0)
+        return false;
+    if (out_der.try_resize(static_cast<size_t>(len)).is_error())
+        return false;
+    auto* ptr = out_der.data();
+    return i2d_X509(certificate, &ptr) == len;
+}
+
+static bool verify_chain_with_windows_cryptoapi(X509_STORE_CTX* context, AIACollector const* collector)
+{
+    if (!default_certificate_path().is_empty())
+        return false;
+
+    auto* leaf = X509_STORE_CTX_get0_cert(context);
+    if (!leaf)
+        return false;
+
+    Vector<u8> leaf_der;
+    if (!export_x509_der(leaf, leaf_der))
+        return false;
+
+    PCCERT_CONTEXT leaf_ctx = CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, leaf_der.data(), static_cast<DWORD>(leaf_der.size()));
+    if (!leaf_ctx)
+        return false;
+    ScopeGuard free_leaf = [&] { CertFreeCertificateContext(leaf_ctx); };
+
+    HCERTSTORE additional_store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, nullptr);
+    if (!additional_store)
+        return false;
+    ScopeGuard free_store = [&] { CertCloseStore(additional_store, 0); };
+
+    auto add_x509 = [&](X509 const* cert) {
+        Vector<u8> der;
+        if (!export_x509_der(cert, der))
+            return;
+        CertAddEncodedCertificateToStore(additional_store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, der.data(), static_cast<DWORD>(der.size()), CERT_STORE_ADD_USE_EXISTING, nullptr);
+    };
+
+    if (auto* server_untrusted = X509_STORE_CTX_get0_untrusted(context)) {
+        for (int i = 0; i < sk_X509_num(server_untrusted); ++i)
+            add_x509(sk_X509_value(server_untrusted, i));
+    }
+    if (collector) {
+        for (auto const& fetched : collector->fetched_intermediates)
+            add_x509(fetched.ptr());
+    }
+
+    LPSTR usage_oids[] = { const_cast<LPSTR>(szOID_PKIX_KP_SERVER_AUTH) };
+    CERT_CHAIN_PARA chain_para {};
+    chain_para.cbSize = sizeof(chain_para);
+    chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
+    chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
+    chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usage_oids;
+
+    PCCERT_CHAIN_CONTEXT chain_ctx = nullptr;
+    if (!CertGetCertificateChain(nullptr, leaf_ctx, nullptr, additional_store, &chain_para, CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY, nullptr, &chain_ctx) || !chain_ctx)
+        return false;
+    ScopeGuard free_chain = [&] { CertFreeCertificateChain(chain_ctx); };
+
+    Vector<WCHAR> wide_host;
+    LPCWSTR server_name = nullptr;
+    if (collector && !collector->host.is_empty() && !collector->checks_host_name) {
+        auto host_view = collector->host.view();
+        if (host_view.starts_with('[') && host_view.ends_with(']'))
+            host_view = host_view.substring_view(1, host_view.length() - 2);
+        int needed = MultiByteToWideChar(CP_UTF8, 0, host_view.characters_without_null_termination(), static_cast<int>(host_view.length()), nullptr, 0);
+        if (needed > 0 && !wide_host.try_resize(static_cast<size_t>(needed) + 1).is_error()) {
+            MultiByteToWideChar(CP_UTF8, 0, host_view.characters_without_null_termination(), static_cast<int>(host_view.length()), wide_host.data(), needed);
+            wide_host[needed] = L'\0';
+            server_name = wide_host.data();
+        }
+    }
+
+    SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_policy {};
+    ssl_policy.cbSize = sizeof(ssl_policy);
+    ssl_policy.dwAuthType = AUTHTYPE_SERVER;
+    ssl_policy.pwszServerName = const_cast<WCHAR*>(server_name);
+
+    CERT_CHAIN_POLICY_PARA policy_para {};
+    policy_para.cbSize = sizeof(policy_para);
+    policy_para.pvExtraPolicyPara = &ssl_policy;
+
+    CERT_CHAIN_POLICY_STATUS policy_status {};
+    policy_status.cbSize = sizeof(policy_status);
+
+    if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain_ctx, &policy_para, &policy_status))
+        return false;
+
+    return policy_status.dwError == ERROR_SUCCESS;
+}
+#endif
+
 // Installed via SSL_CTX_set_cert_verify_callback. On failure, we record the failing cert's caIssuers URLs for the
 // request layer to fetch and retry.
 static int verify_callback(X509_STORE_CTX* context, void* collector_data)
@@ -303,6 +411,19 @@ static int verify_callback(X509_STORE_CTX* context, void* collector_data)
         X509_STORE_CTX_set0_untrusted(context, server_untrusted);
         sk_X509_free(untrusted);
     }
+
+#if defined(AK_OS_WINDOWS)
+    if (result <= 0) {
+        auto const initial_error = X509_STORE_CTX_get_error(context);
+        if ((initial_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+                || initial_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
+                || initial_error == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN)
+            && verify_chain_with_windows_cryptoapi(context, collector)) {
+            X509_STORE_CTX_set_error(context, X509_V_OK);
+            result = 1;
+        }
+    }
+#endif
 
     auto accepted_by_exception = false;
     if (result <= 0 && collector) {

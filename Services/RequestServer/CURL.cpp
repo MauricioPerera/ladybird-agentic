@@ -119,6 +119,12 @@ static bool curl_uses_openssl()
 
 CURLcode configure_certificate_verification(CURL* handle, AIACollector& collector)
 {
+#if defined(AK_OS_WINDOWS)
+    if (default_certificate_path().is_empty()) {
+        if (auto result = curl_easy_setopt(handle, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA); result != CURLE_OK)
+            return result;
+    }
+#endif
     // Exceptions may allow another host name, so our OpenSSL verifier must check names instead of curl.
     // Other backends keep curl's host name checks.
     collector.checks_host_name = curl_uses_openssl() && has_any_certificate_exception(collector.host, collector.port);

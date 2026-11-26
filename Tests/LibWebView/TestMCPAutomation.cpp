@@ -72,6 +72,14 @@ public:
     };
     Optional<LastRunCall> last_run_call;
 
+    struct RecordedAction {
+        String tool;
+        Optional<String> ref;
+        Optional<String> selector;
+        Optional<String> key;
+    };
+    Optional<RecordedAction> last_action;
+
     virtual Vector<MCP::TabInfo> list_allowed_tabs() const override { return {}; }
     virtual Optional<MCP::TabInfo> active_allowed_tab() const override { return {}; }
 
@@ -86,8 +94,108 @@ public:
     virtual void get_dom_tree(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void get_page_source(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void find_elements(u64, String, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
-    virtual void click_element(u64, Optional<String>, Optional<String>, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
-    virtual void type_text(u64, Optional<String>, Optional<String>, String, bool, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
+    virtual void click_element(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "click"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("clicked"sv, true);
+        if (ref.has_value())
+            out.set("ref"sv, *ref);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void type_text(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, bool, String, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "type_text"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("typed"sv, true);
+        if (ref.has_value())
+            out.set("ref"sv, *ref);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete cb) override
+    {
+        JsonArray elements;
+        JsonObject btn;
+        btn.set("ref"sv, "@e1"sv);
+        btn.set("role"sv, "button"sv);
+        btn.set("text"sv, "Submit"sv);
+        elements.must_append(move(btn));
+
+        JsonObject out;
+        out.set("tab_id"sv, tab_id);
+        out.set("max_elements"sv, static_cast<u64>(max_elements));
+        out.set("include_text"sv, include_text);
+        out.set("element_count"sv, 1);
+        out.set("elements"sv, move(elements));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void press_key(u64, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "press_key"_string, ref, selector, key };
+        JsonObject out;
+        out.set("pressed"sv, true);
+        out.set("key"sv, move(key));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void scroll_page(u64, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "scroll"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("scrolled"sv, true);
+        out.set("direction"sv, move(direction));
+        out.set("amount"sv, static_cast<i64>(amount));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void hover_element(u64, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "hover"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("hovered"sv, true);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void select_option(u64, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String>, Optional<size_t>, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "select_option"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("selected"sv, true);
+        if (value.has_value())
+            out.set("selected_value"sv, *value);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void wait_for(u64, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "wait_for"_string, ref, selector, text };
+        JsonObject out;
+        out.set("satisfied"sv, true);
+        out.set("timeout_ms"sv, static_cast<u64>(timeout_ms));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void get_console_logs(u64 tab_id, size_t, bool, MCP::OnToolCallComplete cb) override
+    {
+        JsonArray logs;
+        JsonObject entry;
+        entry.set("level"sv, "error"sv);
+        entry.set("text"sv, "TypeError: test"sv);
+        logs.must_append(move(entry));
+        JsonObject out;
+        out.set("tab_id"sv, tab_id);
+        out.set("count"sv, 1);
+        out.set("logs"sv, move(logs));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void get_network_requests(u64 tab_id, size_t, bool, bool only_errors, MCP::OnToolCallComplete cb) override
+    {
+        JsonArray reqs;
+        JsonObject req;
+        req.set("url"sv, "https://example.com/api"sv);
+        req.set("status_code"sv, only_errors ? 500 : 200);
+        reqs.must_append(move(req));
+        JsonObject out;
+        out.set("tab_id"sv, tab_id);
+        out.set("count"sv, 1);
+        out.set("requests"sv, move(reqs));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
     virtual void evaluate_javascript(u64, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void take_screenshot(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
 
@@ -499,12 +607,18 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 30u);
+    EXPECT_EQ(tools->size(), 38u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
+    Optional<JsonObject> click_tool;
+    Optional<JsonObject> type_text_tool;
     bool found_cancel_flow_run = false;
     bool found_install_extension = false;
+    bool found_snapshot = false;
+    bool found_console = false;
+    bool found_network = false;
+    bool found_wait_for = false;
     for (size_t i = 0; i < tools->size(); ++i) {
         auto tool = tools->at(i).as_object();
         auto name = tool.get_string("name"sv).value_or(String {});
@@ -512,16 +626,36 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             save_flow_tool = tool;
         else if (name == "run_flow"sv)
             run_flow_tool = tool;
+        else if (name == "click"sv)
+            click_tool = tool;
+        else if (name == "type_text"sv)
+            type_text_tool = tool;
         else if (name == "cancel_flow_run"sv)
             found_cancel_flow_run = true;
         else if (name == "install_unpacked_extension"sv)
             found_install_extension = true;
+        else if (name == "get_page_snapshot"sv)
+            found_snapshot = true;
+        else if (name == "get_console_logs"sv)
+            found_console = true;
+        else if (name == "get_network_requests"sv)
+            found_network = true;
+        else if (name == "wait_for"sv)
+            found_wait_for = true;
     }
 
     EXPECT(save_flow_tool.has_value());
     EXPECT(run_flow_tool.has_value());
+    EXPECT(click_tool.has_value());
+    EXPECT(type_text_tool.has_value());
     EXPECT(found_cancel_flow_run);
     EXPECT(found_install_extension);
+    EXPECT(found_snapshot);
+    EXPECT(found_console);
+    EXPECT(found_network);
+    EXPECT(found_wait_for);
+    EXPECT(click_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("ref"sv));
+    EXPECT(type_text_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("ref"sv));
 
     auto flow_schema = save_flow_tool->get_object("inputSchema"sv)
                            ->get_object("properties"sv)
@@ -748,5 +882,116 @@ TEST_CASE(mcp_extensions_lifecycle)
         auto res = call_mcp_tool(port, token, 5, "remove_extension"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT(payload.get_bool("removed"sv).value_or(false));
+    }
+}
+
+TEST_CASE(mcp_agentic_tools_roundtrip)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    auto token = "mcp-agentic-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = *server->local_port();
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        auto res = call_mcp_tool(port, token, 1, "get_page_snapshot"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("element_count"sv).value_or(0), 1u);
+        EXPECT_EQ(payload.get_array("elements"sv)->at(0).as_object().get_string("ref"sv).value_or(String {}), "@e1"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("ref"sv, "@e1"sv);
+        auto res = call_mcp_tool(port, token, 2, "click"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("clicked"sv).value_or(false));
+        EXPECT_EQ(delegate.last_action->ref.value_or(String {}), "@e1"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("ref"sv, "@e2"sv);
+        args.set("text"sv, "hello"sv);
+        auto res = call_mcp_tool(port, token, 3, "type_text"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("typed"sv).value_or(false));
+        EXPECT_EQ(delegate.last_action->ref.value_or(String {}), "@e2"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("key"sv, "Enter"sv);
+        args.set("ref"sv, "@e2"sv);
+        auto res = call_mcp_tool(port, token, 4, "press_key"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("pressed"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("direction"sv, "down"sv);
+        args.set("amount"sv, 400);
+        auto res = call_mcp_tool(port, token, 5, "scroll"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("scrolled"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("ref"sv, "@e1"sv);
+        auto res = call_mcp_tool(port, token, 6, "hover"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("hovered"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("ref"sv, "@e3"sv);
+        args.set("value"sv, "opt1"sv);
+        auto res = call_mcp_tool(port, token, 7, "select_option"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("selected"sv).value_or(false));
+        EXPECT_EQ(payload.get_string("selected_value"sv).value_or(String {}), "opt1"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("text"sv, "Loaded"sv);
+        args.set("timeout_ms"sv, 2000);
+        auto res = call_mcp_tool(port, token, 8, "wait_for"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("satisfied"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        auto res = call_mcp_tool(port, token, 9, "get_console_logs"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("only_errors"sv, true);
+        auto res = call_mcp_tool(port, token, 10, "get_network_requests"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_array("requests"sv)->at(0).as_object().get_integer<u64>("status_code"sv).value_or(0), 500u);
     }
 }

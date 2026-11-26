@@ -350,12 +350,13 @@ static JsonArray build_tool_definitions()
     {
         JsonObject props;
         props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
-        props.set("selector"sv, make_prop("string"sv, "Selector for the element to click (used if element_id is omitted)."sv));
+        props.set("ref"sv, make_prop("string"sv, "Element reference from get_page_snapshot (e.g. '@e1'). Takes precedence over selector."sv));
+        props.set("selector"sv, make_prop("string"sv, "Selector for the element to click (used if ref and element_id are omitted)."sv));
         props.set("element_id"sv, make_prop("string"sv, "Previously returned element ID from find_elements."sv));
         props.set("strategy"sv, make_string_enum_prop("Locator strategy when selector is used (default: css selector)."sv, selector_strategies, "css selector"sv));
         tools.must_append(make_tool_schema(
             "click"sv,
-            "Click an element identified by element_id or selector."sv,
+            "Click an element identified by @ref, element_id, or selector."sv,
             move(props),
             Array { "tab_id"sv }));
     }
@@ -364,15 +365,122 @@ static JsonArray build_tool_definitions()
         JsonObject props;
         props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
         props.set("text"sv, make_prop("string"sv, "Text to type into the element."sv));
-        props.set("selector"sv, make_prop("string"sv, "Selector for the target input element (used if element_id is omitted)."sv));
+        props.set("ref"sv, make_prop("string"sv, "Element reference from get_page_snapshot (e.g. '@e2'). Takes precedence over selector."sv));
+        props.set("selector"sv, make_prop("string"sv, "Selector for the target input element (used if ref and element_id are omitted)."sv));
         props.set("element_id"sv, make_prop("string"sv, "Previously returned element ID from find_elements."sv));
         props.set("clear"sv, make_prop("boolean"sv, "Clear existing value before typing (default: false)."sv));
         props.set("strategy"sv, make_string_enum_prop("Locator strategy when selector is used (default: css selector)."sv, selector_strategies, "css selector"sv));
         tools.must_append(make_tool_schema(
             "type_text"sv,
-            "Type text into an element identified by element_id or selector."sv,
+            "Type text into an element identified by @ref, element_id, or selector."sv,
             move(props),
             Array { "tab_id"sv, "text"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("max_elements"sv, make_int_prop("Maximum interactive elements to capture (default: 150)."sv, 1, 500, 150));
+        props.set("include_text"sv, make_prop("boolean"sv, "Include a compact visible body text excerpt (default: true)."sv));
+        tools.must_append(make_tool_schema(
+            "get_page_snapshot"sv,
+            "Return a compact, token-efficient snapshot of visible interactive elements with @e1/@e2 refs usable directly by click, type_text, press_key, hover, select_option, scroll, and wait_for."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("key"sv, make_prop("string"sv, "Keyboard key name (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown')."sv));
+        props.set("ref"sv, make_prop("string"sv, "Optional @ref target element to focus before pressing the key."sv));
+        props.set("selector"sv, make_prop("string"sv, "Optional CSS selector target to focus before pressing the key."sv));
+        tools.must_append(make_tool_schema(
+            "press_key"sv,
+            "Dispatch a keyboard key press on the active element or specified @ref/selector."sv,
+            move(props),
+            Array { "tab_id"sv, "key"sv }));
+    }
+
+    {
+        static constexpr Array scroll_directions { "down"sv, "up"sv, "top"sv, "bottom"sv };
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("direction"sv, make_string_enum_prop("Scroll direction (default: down)."sv, scroll_directions, "down"sv));
+        props.set("amount"sv, make_int_prop("Pixels to scroll for 'up'/'down' (default: 600)."sv, 0, 10000, 600));
+        props.set("ref"sv, make_prop("string"sv, "Optional @ref element to scroll into view instead of scrolling viewport."sv));
+        props.set("selector"sv, make_prop("string"sv, "Optional CSS selector to scroll into view."sv));
+        tools.must_append(make_tool_schema(
+            "scroll"sv,
+            "Scroll the viewport or scroll a specific @ref/selector element into view."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("ref"sv, make_prop("string"sv, "Element reference from get_page_snapshot (e.g. '@e1')."sv));
+        props.set("selector"sv, make_prop("string"sv, "CSS selector (used if ref is omitted)."sv));
+        tools.must_append(make_tool_schema(
+            "hover"sv,
+            "Move pointer/hover over an element identified by @ref or CSS selector."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("ref"sv, make_prop("string"sv, "<select> element reference from get_page_snapshot."sv));
+        props.set("selector"sv, make_prop("string"sv, "<select> CSS selector (used if ref is omitted)."sv));
+        props.set("value"sv, make_prop("string"sv, "Option value attribute to select."sv));
+        props.set("label"sv, make_prop("string"sv, "Option visible label text to select."sv));
+        props.set("index"sv, make_int_prop("Zero-based option index to select."sv, 0, 10000));
+        tools.must_append(make_tool_schema(
+            "select_option"sv,
+            "Select an option in a <select> element by value, label, or index."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("ref"sv, make_prop("string"sv, "Optional @ref element to wait to appear/remain visible."sv));
+        props.set("selector"sv, make_prop("string"sv, "Optional CSS selector to wait to become visible."sv));
+        props.set("text"sv, make_prop("string"sv, "Optional substring text to wait for in the page body (or inside ref/selector)."sv));
+        props.set("timeout_ms"sv, make_int_prop("Timeout in milliseconds (default: 10000)."sv, 100, 60000, 10000));
+        tools.must_append(make_tool_schema(
+            "wait_for"sv,
+            "Wait until an element (@ref/selector) is visible and/or expected text appears on the page."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("limit"sv, make_int_prop("Maximum recent log entries to return (default: 100)."sv, 1, 200, 100));
+        props.set("clear"sv, make_prop("boolean"sv, "Clear buffered console logs for this tab after reading (default: false)."sv));
+        tools.must_append(make_tool_schema(
+            "get_console_logs"sv,
+            "Read buffered JavaScript console logs, warnings, errors, and uncaught exceptions for an MCP-allowed tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
+        props.set("limit"sv, make_int_prop("Maximum recent network requests to return (default: 100)."sv, 1, 200, 100));
+        props.set("clear"sv, make_prop("boolean"sv, "Clear buffered network requests for this tab after reading (default: false)."sv));
+        props.set("only_errors"sv, make_prop("boolean"sv, "Return only failed requests or HTTP status >= 400 (default: false)."sv));
+        tools.must_append(make_tool_schema(
+            "get_network_requests"sv,
+            "Inspect buffered HTTP/network requests, status codes, sizes, and network/SSL errors for an MCP-allowed tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
     }
 
     {
@@ -754,7 +862,7 @@ private:
             result.set("protocolVersion"sv, "2025-03-26"sv);
             result.set("capabilities"sv, move(capabilities));
             result.set("serverInfo"sv, move(server_info));
-            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, and remove_extension to manage unpacked browser extensions."sv);
+            result.set("instructions"sv, "Ladybird native MCP server. User tabs require explicit per-tab opt-in before access; tabs opened via open_tab or run_flow (with open_new_tab: true) are automatically allowed. Prefer get_page_snapshot first to inspect interactive elements with compact @e1 refs usable by click, type_text, press_key, hover, select_option, scroll, and wait_for. Use get_console_logs and get_network_requests to inspect runtime JS errors and HTTP/SSL failures. Use save_flow, list_flows, get_flow, and delete_flow to manage reusable declarative browser automations, and run_flow (by flow_id or inline flow; set wait: false for async polling via get_flow_run and close_tab_on_finish: true for temporary tabs), list_flow_runs, get_flow_run, and cancel_flow_run to execute and monitor them. Use list_extensions, install_unpacked_extension, set_extension_enabled, reload_extension, and remove_extension to manage unpacked browser extensions."sv);
 
             auto extra_headers = MUST(String::formatted("Mcp-Session-Id: {}\r\n", m_server->session_id()));
             send_json_rpc_result(id, move(result), extra_headers);
@@ -951,14 +1059,11 @@ private:
             auto tab_id = require_tab_id();
             if (!tab_id.has_value())
                 return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
-            Optional<String> selector;
-            if (auto maybe_selector = arguments.get_string("selector"sv); maybe_selector.has_value())
-                selector = *maybe_selector;
-            Optional<String> element_id;
-            if (auto maybe_element_id = arguments.get_string("element_id"sv); maybe_element_id.has_value())
-                element_id = *maybe_element_id;
+            auto ref = arguments.get_string("ref"sv).copy();
+            auto selector = arguments.get_string("selector"sv).copy();
+            auto element_id = arguments.get_string("element_id"sv).copy();
             auto strategy = arguments.get_string("strategy"sv).value_or("css selector"_string);
-            delegate.click_element(*tab_id, move(selector), move(element_id), strategy, move(complete));
+            delegate.click_element(*tab_id, move(ref), move(selector), move(element_id), strategy, move(complete));
             return;
         }
 
@@ -967,15 +1072,90 @@ private:
             auto text = arguments.get_string("text"sv);
             if (!tab_id.has_value() || !text.has_value())
                 return fail_invalid_params("Missing required parameters 'tab_id' and 'text'"sv);
-            Optional<String> selector;
-            if (auto maybe_selector = arguments.get_string("selector"sv); maybe_selector.has_value())
-                selector = *maybe_selector;
-            Optional<String> element_id;
-            if (auto maybe_element_id = arguments.get_string("element_id"sv); maybe_element_id.has_value())
-                element_id = *maybe_element_id;
+            auto ref = arguments.get_string("ref"sv).copy();
+            auto selector = arguments.get_string("selector"sv).copy();
+            auto element_id = arguments.get_string("element_id"sv).copy();
             bool clear_first = arguments.get_bool("clear"sv).value_or(false);
             auto strategy = arguments.get_string("strategy"sv).value_or("css selector"_string);
-            delegate.type_text(*tab_id, move(selector), move(element_id), *text, clear_first, strategy, move(complete));
+            delegate.type_text(*tab_id, move(ref), move(selector), move(element_id), *text, clear_first, strategy, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_page_snapshot"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto max_elements = static_cast<size_t>(arguments.get_u64("max_elements"sv).value_or(150));
+            bool include_text = arguments.get_bool("include_text"sv).value_or(true);
+            delegate.get_page_snapshot(*tab_id, max_elements, include_text, move(complete));
+            return;
+        }
+
+        if (tool_name == "press_key"sv) {
+            auto tab_id = require_tab_id();
+            auto key = arguments.get_string("key"sv);
+            if (!tab_id.has_value() || !key.has_value() || key->is_empty())
+                return fail_invalid_params("Missing required parameters 'tab_id' and 'key'"sv);
+            delegate.press_key(*tab_id, *key, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), move(complete));
+            return;
+        }
+
+        if (tool_name == "scroll"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto direction = arguments.get_string("direction"sv).value_or("down"_string);
+            auto amount = static_cast<i32>(arguments.get_integer<i64>("amount"sv).value_or(600));
+            delegate.scroll_page(*tab_id, move(direction), amount, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), move(complete));
+            return;
+        }
+
+        if (tool_name == "hover"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.hover_element(*tab_id, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), move(complete));
+            return;
+        }
+
+        if (tool_name == "select_option"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            Optional<size_t> index;
+            if (auto maybe_idx = arguments.get_u64("index"sv); maybe_idx.has_value())
+                index = static_cast<size_t>(*maybe_idx);
+            delegate.select_option(*tab_id, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), arguments.get_string("value"sv).copy(), arguments.get_string("label"sv).copy(), index, move(complete));
+            return;
+        }
+
+        if (tool_name == "wait_for"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto timeout_ms = static_cast<u32>(arguments.get_u64("timeout_ms"sv).value_or(10000));
+            delegate.wait_for(*tab_id, arguments.get_string("ref"sv).copy(), arguments.get_string("selector"sv).copy(), arguments.get_string("text"sv).copy(), timeout_ms, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_console_logs"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto limit = static_cast<size_t>(arguments.get_u64("limit"sv).value_or(100));
+            bool clear = arguments.get_bool("clear"sv).value_or(false);
+            delegate.get_console_logs(*tab_id, limit, clear, move(complete));
+            return;
+        }
+
+        if (tool_name == "get_network_requests"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            auto limit = static_cast<size_t>(arguments.get_u64("limit"sv).value_or(100));
+            bool clear = arguments.get_bool("clear"sv).value_or(false);
+            bool only_errors = arguments.get_bool("only_errors"sv).value_or(false);
+            delegate.get_network_requests(*tab_id, limit, clear, only_errors, move(complete));
             return;
         }
 

@@ -50,8 +50,16 @@ public:
     virtual void get_dom_tree(u64 tab_id, OnToolCallComplete) = 0;
     virtual void get_page_source(u64 tab_id, OnToolCallComplete) = 0;
     virtual void find_elements(u64 tab_id, String selector, String strategy, OnToolCallComplete) = 0;
-    virtual void click_element(u64 tab_id, Optional<String> selector, Optional<String> element_id, String strategy, OnToolCallComplete) = 0;
-    virtual void type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, OnToolCallComplete) = 0;
+    virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, OnToolCallComplete) = 0;
+    virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, OnToolCallComplete) = 0;
+    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, OnToolCallComplete) = 0;
+    virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
+    virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
+    virtual void hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
+    virtual void select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, OnToolCallComplete) = 0;
+    virtual void wait_for(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, OnToolCallComplete) = 0;
+    virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, OnToolCallComplete) = 0;
+    virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, OnToolCallComplete) = 0;
     virtual void evaluate_javascript(u64 tab_id, String script, OnToolCallComplete) = 0;
     virtual void take_screenshot(u64 tab_id, OnToolCallComplete) = 0;
 

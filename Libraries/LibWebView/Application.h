@@ -415,6 +415,10 @@ public:
     ErrorOr<void> toggle_mcp_enabled();
     void did_revoke_mcp_access_for_view(u64 view_id);
     void did_close_mcp_view(u64 view_id);
+    void record_mcp_console_output(u64 view_id, ConsoleOutput const&);
+    void record_mcp_network_request_started(u64 view_id, u64 request_id, URL::URL const&, ByteString const& method, Optional<String> const& initiator_type);
+    void record_mcp_network_response_headers(u64 view_id, u64 request_id, u32 status_code, Optional<String> const& reason_phrase);
+    void record_mcp_network_request_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const&);
 
     FlowStore& flow_store();
     FlowRunner& flow_runner();
@@ -671,8 +675,16 @@ private:
     virtual void get_dom_tree(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void get_page_source(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void find_elements(u64 tab_id, String selector, String strategy, MCP::OnToolCallComplete) override;
-    virtual void click_element(u64 tab_id, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete) override;
-    virtual void type_text(u64 tab_id, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete) override;
+    virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete) override;
+    virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete) override;
+    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete) override;
+    virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
+    virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
+    virtual void hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
+    virtual void select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, MCP::OnToolCallComplete) override;
+    virtual void wait_for(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, MCP::OnToolCallComplete) override;
+    virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
+    virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
     virtual void take_screenshot(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void list_flows(MCP::OnToolCallComplete) override;
@@ -874,11 +886,47 @@ private:
         RefPtr<Core::Timer> timer;
         MCP::OnToolCallComplete on_complete;
     };
+    struct PendingMCPConditionWait {
+        AK_ALLOC_WITH_KMALLOC;
+        u64 view_id { 0 };
+        Optional<String> ref;
+        Optional<String> selector;
+        Optional<String> text;
+        MonotonicTime deadline;
+        RefPtr<Core::Timer> timer;
+        MCP::OnToolCallComplete on_complete;
+    };
+    struct MCPConsoleEntry {
+        i64 timestamp_ms { 0 };
+        String kind;
+        String level;
+        String text;
+        Optional<String> location;
+    };
+    struct MCPNetworkEntry {
+        u64 request_id { 0 };
+        String url;
+        String method;
+        Optional<String> initiator_type;
+        Optional<u32> status_code;
+        Optional<String> reason_phrase;
+        u64 body_size { 0 };
+        Optional<String> error;
+        i64 started_at_ms { 0 };
+        Optional<i64> finished_at_ms;
+        bool finished { false };
+    };
+
+    void poll_mcp_condition_wait(u64 wait_id);
+    void finish_mcp_condition_wait(u64 wait_id, MCP::ToolCallResult);
 
     HashMap<u64, OwnPtr<MCPViewQueue>> m_mcp_content_queues;
     HashMap<u64, u64> m_mcp_command_to_view;
     HashMap<u64, OwnPtr<PendingMCPNavigationWait>> m_mcp_nav_waits;
     HashMap<u64, OwnPtr<PendingMCPTreeWait>> m_mcp_tree_waits;
+    HashMap<u64, OwnPtr<PendingMCPConditionWait>> m_mcp_condition_waits;
+    HashMap<u64, Vector<MCPConsoleEntry>> m_mcp_console_logs;
+    HashMap<u64, Vector<MCPNetworkEntry>> m_mcp_network_requests;
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
 };

@@ -40,6 +40,7 @@ target_link_libraries(requestserverservice PUBLIC LibCore LibDNS LibHTTP LibIPC 
 target_link_libraries(requestserverservice PRIVATE OpenSSL::Crypto OpenSSL::SSL)
 
 if (WIN32)
+    target_link_libraries(requestserverservice PRIVATE crypt32)
     ladybird_windows_bin(RequestServer CONSOLE)
 endif()
 
