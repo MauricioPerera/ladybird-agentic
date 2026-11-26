@@ -57,6 +57,8 @@ public:
     WebIDL::ExceptionOr<void> reload() const;
     WebIDL::ExceptionOr<void> assign(Utf16String const& url);
 
+    WebIDL::ExceptionOr<GC::Ref<DOMStringList>> ancestor_origins();
+
 private:
     explicit Location(Window&);
     explicit Location(RemoteWindow&);
@@ -70,6 +72,7 @@ private:
     WebIDL::ExceptionOr<void> navigate(URL::URL, NavigationHistoryBehavior = NavigationHistoryBehavior::Auto);
 
     Variant<GC::Ref<Window>, GC::Ref<RemoteWindow>> m_window;
+    GC::Ptr<DOMStringList> m_ancestor_origins;
 };
 
 }

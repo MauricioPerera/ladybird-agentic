@@ -55,6 +55,54 @@ impl StorageManager {
         allocate(vm, |_| StorageManager { realm })
     }
 
+    // https://storage.spec.whatwg.org/#dom-storagemanager-persisted
+    pub(crate) fn persisted(&self, cx: &mut CallContext) -> WebIdlResult<WebIdlPromise> {
+        let vm = cx.vm();
+        let promise = create_promise(vm, self.realm);
+        let global = relevant_global_object(self);
+        let shelf = obtain_a_local_storage_shelf(vm, &relevant_settings_object(global));
+
+        if shelf.is_none() {
+            resolve_promise(vm, promise, Value::FALSE);
+            return Ok(promise);
+        }
+
+        in_parallel(vm, self.realm, (promise, global), |vm, (promise, global)| {
+            queue_a_storage_task(vm, global, promise, |vm, promise| {
+                let realm = promise_realm(promise);
+                with_temporary_execution_context_and_callbacks(realm, || {
+                    resolve_promise(vm, promise, Value::FALSE);
+                });
+            });
+        });
+
+        Ok(promise)
+    }
+
+    // https://storage.spec.whatwg.org/#dom-storagemanager-persist
+    pub(crate) fn persist(&self, cx: &mut CallContext) -> WebIdlResult<WebIdlPromise> {
+        let vm = cx.vm();
+        let promise = create_promise(vm, self.realm);
+        let global = relevant_global_object(self);
+        let shelf = obtain_a_local_storage_shelf(vm, &relevant_settings_object(global));
+
+        if shelf.is_none() {
+            resolve_promise(vm, promise, Value::FALSE);
+            return Ok(promise);
+        }
+
+        in_parallel(vm, self.realm, (promise, global), |vm, (promise, global)| {
+            queue_a_storage_task(vm, global, promise, |vm, promise| {
+                let realm = promise_realm(promise);
+                with_temporary_execution_context_and_callbacks(realm, || {
+                    resolve_promise(vm, promise, Value::FALSE);
+                });
+            });
+        });
+
+        Ok(promise)
+    }
+
     // https://storage.spec.whatwg.org/#dom-storagemanager-estimate
     pub(crate) fn estimate(&self, cx: &mut CallContext) -> WebIdlResult<WebIdlPromise> {
         let vm = cx.vm();

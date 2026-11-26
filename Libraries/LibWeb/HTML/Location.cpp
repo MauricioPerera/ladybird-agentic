@@ -22,6 +22,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
+#include <LibWeb/HTML/DOMStringList.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Location.h>
 #include <LibWeb/HTML/Navigation.h>
@@ -72,6 +73,7 @@ void Location::visit_edges(GC::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     m_window.visit([&](auto const& window) { visitor.visit(window); });
+    visitor.visit(m_ancestor_origins);
 }
 
 }
@@ -803,6 +805,32 @@ WebIDL::ExceptionOr<void> Location::assign(Utf16String const& url)
     TRY(navigate(assign_url.release_value()));
 
     return {};
+}
+
+// https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-location-ancestororigins
+WebIDL::ExceptionOr<GC::Ref<DOMStringList>> Location::ancestor_origins()
+{
+    auto const relevant_document = this->relevant_document();
+    if (relevant_document && !relevant_document->origin().is_same_origin_domain(entry_settings_object().origin()))
+        return WebIDL::SecurityError::create("Location's relevant document is not same origin-domain with the entry settings object's origin"_utf16);
+
+    if (!m_ancestor_origins) {
+        Vector<Utf16String> origins;
+        GC::Ptr<Navigable> navigable = relevant_document
+            ? GC::Ptr<Navigable> { relevant_document->navigable() }
+            : (remote_window() ? GC::Ptr<Navigable> { remote_window()->navigable() } : nullptr);
+        if (navigable) {
+            for (auto parent = navigable->parent(); parent; parent = parent->parent()) {
+                if (auto origin = parent->active_document_origin(); origin.has_value()) {
+                    auto serialized = origin->serialize();
+                    origins.append(Utf16String::from_utf8(serialized));
+                }
+            }
+        }
+        m_ancestor_origins = DOMStringList::create(move(origins));
+    }
+
+    return GC::Ref<DOMStringList> { *m_ancestor_origins };
 }
 
 }

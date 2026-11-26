@@ -1,0 +1,11 @@
+ancestorOrigins instanceof DOMStringList: true
+ancestorOrigins SameObject: true
+top-level ancestorOrigins length: 0
+iframe ancestorOrigins length: 1
+iframe ancestorOrigins[0] matches origin: true
+credentials.get(): null
+credentials.create(): null
+credentials.preventSilentAccess(): undefined
+credentials.get(aborted) rejected: cancelled
+storage.persisted(): false
+storage.persist(): false

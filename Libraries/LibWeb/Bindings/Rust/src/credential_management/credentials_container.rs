@@ -9,30 +9,34 @@
 
 use core::ffi::c_void;
 
-use libjs_rust::api::{ErrorKind, ErrorType, Trace, Vm};
+use libjs_rust::api::{Trace, Value, Vm};
 
 use super::credential::{AnyCredential, CredentialMediationRequirement};
 use super::federated_credential::{FederatedCredentialInit, FederatedCredentialRequestOptions};
 use super::password_credential::PasswordCredentialInit;
 use crate::bindings::interface::{Ref, Wrappable, allocate, cell_into_abi};
-use crate::bindings::promise::{WebIdlPromise, reject_promise_with_exception};
-use crate::bindings::{CallContext, Exception, WebIdlResult};
+use crate::bindings::promise::{WebIdlPromise, reject_promise, resolve_promise};
+use crate::bindings::{CallContext, WebIdlResult};
 use crate::dom::abort_signal::AbortSignal;
 
 /// https://w3c.github.io/webappsec-credential-management/#dictdef-credentialrequestoptions
-#[expect(dead_code, reason = "get() does not read the options yet")]
 pub(crate) struct CredentialRequestOptions {
+    #[expect(dead_code, reason = "get() does not read federated options yet")]
     pub(crate) federated: Option<FederatedCredentialRequestOptions>,
+    #[expect(dead_code, reason = "get() does not read mediation yet")]
     pub(crate) mediation: CredentialMediationRequirement,
+    #[expect(dead_code, reason = "get() does not read password yet")]
     pub(crate) password: bool,
     pub(crate) signal: Option<Ref<AbortSignal>>,
 }
 
 /// https://w3c.github.io/webappsec-credential-management/#dictdef-credentialcreationoptions
-#[expect(dead_code, reason = "create() does not read the options yet")]
 pub(crate) struct CredentialCreationOptions {
+    #[expect(dead_code, reason = "create() does not read federated options yet")]
     pub(crate) federated: Option<FederatedCredentialInit>,
+    #[expect(dead_code, reason = "create() does not read mediation yet")]
     pub(crate) mediation: CredentialMediationRequirement,
+    #[expect(dead_code, reason = "create() does not read password yet")]
     pub(crate) password: Option<PasswordCredentialInit>,
     pub(crate) signal: Option<Ref<AbortSignal>>,
 }
@@ -43,30 +47,27 @@ pub(crate) struct CredentialsContainer;
 
 impl Wrappable for CredentialsContainer {}
 
-fn reject_not_implemented_promise(vm: &Vm, promise: WebIdlPromise, operation: &str) {
-    let throw = vm
-        .throw_completion::<()>(ErrorKind::InternalError, ErrorType::NotImplemented, &[&operation])
-        .expect_err("throwing a completion throws");
-    reject_promise_with_exception(vm, promise, Exception::from(throw));
-}
-
 impl CredentialsContainer {
     // https://w3c.github.io/webappsec-credential-management/#dom-credentialscontainer-get
     pub(crate) fn get(
         &self,
         cx: &mut CallContext,
         promise: WebIdlPromise,
-        _: CredentialRequestOptions,
+        options: CredentialRequestOptions,
     ) -> WebIdlResult<()> {
-        eprintln!("FIXME: Unimplemented CredentialsContainer::get()");
-        reject_not_implemented_promise(cx.vm(), promise, "get");
+        if let Some(signal) = options.signal.as_ref()
+            && signal.aborted()
+        {
+            reject_promise(cx.vm(), promise, signal.reason());
+            return Ok(());
+        }
+        resolve_promise(cx.vm(), promise, Value::NULL);
         Ok(())
     }
 
     // https://w3c.github.io/webappsec-credential-management/#dom-credentialscontainer-store
     pub(crate) fn store(&self, cx: &mut CallContext, promise: WebIdlPromise, _: AnyCredential) -> WebIdlResult<()> {
-        eprintln!("FIXME: Unimplemented CredentialsContainer::store()");
-        reject_not_implemented_promise(cx.vm(), promise, "store");
+        resolve_promise(cx.vm(), promise, Value::UNDEFINED);
         Ok(())
     }
 
@@ -75,17 +76,21 @@ impl CredentialsContainer {
         &self,
         cx: &mut CallContext,
         promise: WebIdlPromise,
-        _: CredentialCreationOptions,
+        options: CredentialCreationOptions,
     ) -> WebIdlResult<()> {
-        eprintln!("FIXME: Unimplemented CredentialsContainer::create()");
-        reject_not_implemented_promise(cx.vm(), promise, "create");
+        if let Some(signal) = options.signal.as_ref()
+            && signal.aborted()
+        {
+            reject_promise(cx.vm(), promise, signal.reason());
+            return Ok(());
+        }
+        resolve_promise(cx.vm(), promise, Value::NULL);
         Ok(())
     }
 
     // https://w3c.github.io/webappsec-credential-management/#dom-credentialscontainer-preventsilentaccess
     pub(crate) fn prevent_silent_access(&self, cx: &mut CallContext, promise: WebIdlPromise) -> WebIdlResult<()> {
-        eprintln!("FIXME: Unimplemented CredentialsContainer::prevent_silent_access()");
-        reject_not_implemented_promise(cx.vm(), promise, "prevent silent access");
+        resolve_promise(cx.vm(), promise, Value::UNDEFINED);
         Ok(())
     }
 }

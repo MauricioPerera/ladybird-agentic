@@ -70,6 +70,12 @@ reload descriptor is not undefined: true
 reload enumerable: true
 reload configurable: false
 reload writable: false
+ancestorOrigins exists on location itself: true
+ancestorOrigins does not exist on LocationPrototype: true
+ancestorOrigins descriptor is not undefined: true
+ancestorOrigins enumerable: true
+ancestorOrigins configurable: false
+ancestorOrigins writable: undefined
 toString exists on location itself: true
 toString does not exist on LocationPrototype: true
 toString descriptor is not undefined: true
@@ -148,6 +154,12 @@ reload descriptor is not undefined: true
 reload enumerable: true
 reload configurable: false
 reload writable: false
+ancestorOrigins exists on document.location itself: true
+ancestorOrigins does not exist on LocationPrototype: true
+ancestorOrigins descriptor is not undefined: true
+ancestorOrigins enumerable: true
+ancestorOrigins configurable: false
+ancestorOrigins writable: undefined
 toString exists on document.location itself: true
 toString does not exist on LocationPrototype: true
 toString descriptor is not undefined: true

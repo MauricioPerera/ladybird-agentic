@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<script>
+    promiseTest(async () => {
+        println("ancestorOrigins instanceof DOMStringList: " + (location.ancestorOrigins instanceof DOMStringList));
+        println("ancestorOrigins SameObject: " + (location.ancestorOrigins === location.ancestorOrigins));
+        println("top-level ancestorOrigins length: " + location.ancestorOrigins.length);
+
+        const iframe = document.createElement("iframe");
+        iframe.srcdoc = "<!doctype html><p>child</p>";
+        document.body.appendChild(iframe);
+        await new Promise(resolve => { iframe.onload = resolve; });
+
+        const childAncestors = iframe.contentWindow.location.ancestorOrigins;
+        println("iframe ancestorOrigins length: " + childAncestors.length);
+        println("iframe ancestorOrigins[0] matches origin: " + (childAncestors[0] === location.origin));
+
+        const getResult = await navigator.credentials.get({ password: true });
+        println("credentials.get(): " + getResult);
+
+        const createResult = await navigator.credentials.create({});
+        println("credentials.create(): " + createResult);
+
+        const preventResult = await navigator.credentials.preventSilentAccess();
+        println("credentials.preventSilentAccess(): " + preventResult);
+
+        try {
+            await navigator.credentials.get({ signal: AbortSignal.abort("cancelled") });
+            println("credentials.get(aborted): did not reject");
+        } catch (err) {
+            println("credentials.get(aborted) rejected: " + err);
+        }
+
+        const persistedResult = await navigator.storage.persisted();
+        println("storage.persisted(): " + persistedResult);
+
+        const persistResult = await navigator.storage.persist();
+        println("storage.persist(): " + persistResult);
+    });
+</script>

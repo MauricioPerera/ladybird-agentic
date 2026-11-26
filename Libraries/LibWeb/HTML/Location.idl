@@ -15,8 +15,5 @@ interface Location { // but see also additional creation steps and overridden in
     [LegacyUnforgeable, NeedsCallerRealm] undefined replace(USVString url);
     [LegacyUnforgeable] undefined reload();
 
-    // Intentionally not implemented at this stage due to https://github.com/whatwg/html/issues/1918
-    // This is not currently implemented by Firefox due to the above, and only seems to be used by
-    // ad tech on real sites.
-    [FIXME, LegacyUnforgeable, SameObject] readonly attribute DOMStringList ancestorOrigins;
+    [LegacyUnforgeable, SameObject] readonly attribute DOMStringList ancestorOrigins;
 };
