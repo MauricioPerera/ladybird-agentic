@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/.ghcup
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/.ghcup /usr/local/share/boost /usr/local/share/vcpkg "$HOME/.cargo" "$HOME/.rustup"
           docker image prune -af || true
           df -h /
 
@@ -42,8 +42,15 @@ jobs:
       - name: Install Ubuntu 24.04 build dependencies
         shell: bash
         run: |
+          existing_llvm_pkgs="$(dpkg-query -W -f='${Package}\n' 'clang' 'clang-[0-9]*' 'lld' 'lld-[0-9]*' 'llvm' 'llvm-[0-9]*' 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -n "${existing_llvm_pkgs// /}" ]; then
+            sudo apt-get remove -y ${existing_llvm_pkgs}
+          fi
+          sudo rm -f /usr/bin/clang /usr/bin/clang++ /usr/bin/ld.lld /usr/bin/lld /usr/bin/llvm-symbolizer
           sudo --preserve-env=GITHUB_ENV,GITHUB_PATH ./Meta/Docker/ci/install-build-dependencies.sh
           sudo chown -R "$(id -u):$(id -g)" /opt/cargo /opt/rustup
+          clang --version
+          clang++ --version
 
       - name: Build Ladybird Distribution
         uses: ./.github/actions/build
