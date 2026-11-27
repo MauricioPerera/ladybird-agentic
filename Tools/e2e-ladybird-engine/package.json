@@ -1,0 +1,11 @@
+{
+  "name": "ladybird-engine-protocol-oracle",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.16.0"
+  },
+  "devDependencies": {
+    "e2e": "0.24.0"
+  }
+}
