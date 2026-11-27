@@ -1,0 +1,128 @@
+name: Verify pinned Ladybird e2e candidate
+
+on:
+  push:
+    branches: [codex/ladybird-e2e-verification-0b1d25f]
+    paths: [.github/workflows/kdd-e2e-adapter-verification.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CANDIDATE: 0b1d25fd1e557b9802cb2397ec2a7d403b4dff2c
+      CANDIDATE_TREE: 0a89e97bdfe78276504ecabfce940c8a0cd51a2c
+      APPROVED_BASELINE: 39d7426eeec2713cc2ab3a194783fc518583c388
+      KDD_RUNNER_REF: e318f544bc0f3cc17d8a02ded5f07b2883a385b5
+    steps:
+      - name: Check out the exact Ladybird candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          path: ladybird
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the pinned KDD runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: MauricioPerera/KDD
+          ref: ${{ env.KDD_RUNNER_REF }}
+          path: kdd-runner
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.11'
+      - name: Check the candidate and approved oracles
+        working-directory: ladybird
+        run: |
+          set -euo pipefail
+          test "$(git --no-replace-objects rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git --no-replace-objects rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test "$(git --no-replace-objects rev-parse 'HEAD^')" = "$APPROVED_BASELINE"
+          test "$(git --no-replace-objects -C ../kdd-runner rev-parse HEAD)" = "$KDD_RUNNER_REF"
+          test -z "$(git status --porcelain)"
+          python -B ../kdd-runner/scripts/validate_contracts.py knowledge/contracts
+          python -B ../kdd-runner/scripts/validate_okf.py knowledge
+          python -B ../kdd-runner/scripts/validate_baseline.py --all --approved-ref "$APPROVED_BASELINE" --contracts-dir knowledge/contracts
+      - name: Install the locked Node dependency graph
+        working-directory: ladybird
+        run: npm ci --prefix Tools/e2e-ladybird-engine --ignore-scripts --engine-strict --no-audit --no-fund
+      - name: Verify two instrumented passes and write the receipt
+        working-directory: ladybird
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: ${{ github.workspace }}/kdd-runner
+        run: |
+          python -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          from scripts.oracle_execution import execute_oracle
+          from scripts.validate_contracts import parse_frontmatter
+
+          root = Path.cwd()
+          prefix = root / 'Tools/e2e-ladybird-engine'
+          target = 'Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs'
+          contract = root / 'knowledge/contracts/ladybird-e2e-adapter-oracle.md'
+          metadata, _ = parse_frontmatter(contract.read_text(encoding='utf-8'))
+          protocol = {
+              'tests': target, 'test_runner': 'node-test', 'oracle_files': [target],
+              'test_command': f'node --test {target}',
+          }
+
+          def git(*args):
+              return subprocess.check_output(['git', '--no-replace-objects', *args], text=True).strip()
+
+          def run(spec):
+              result = execute_oracle(spec, root, timeout=60, record_ids=True, allow_node_ids=True)
+              if not result['ok'] or result['exit_code'] != 0 or result['executed_tests'] != 2:
+                  raise SystemExit(f'Oracle rejected: {result}')
+              files = result['evidence']['files']
+              assert all(row['skipped'] == 0 for row in files.values())
+              assert len(result['case_ids']) == 2
+              return {'executed_tests': result['executed_tests'], 'skips': 0, 'case_ids': result['case_ids']}
+
+          node = subprocess.check_output(['node', '--version'], text=True).strip()
+          e2e = json.loads((prefix / 'node_modules/e2e/package.json').read_bytes())['version']
+          assert (node, e2e) == ('v24.16.0', '0.24.0')
+          baseline = os.environ['APPROVED_BASELINE']
+          candidate = os.environ['CANDIDATE']
+          paths = metadata['oracle_files']
+          assert all(git('rev-parse', f'{baseline}:{path}') ==
+                     git('rev-parse', f'{candidate}:{path}') for path in paths)
+          passes = [{'protocol': run(protocol), 'frozen_oracle': run(metadata)} for _ in range(2)]
+          assert passes[0] == passes[1], 'Inventory or results differed between passes'
+          assert git('rev-parse', 'HEAD') == candidate
+          assert git('rev-parse', 'HEAD^{tree}') == os.environ['CANDIDATE_TREE']
+          assert not git('status', '--porcelain')
+          receipt = {
+              'checkout': candidate, 'tree': git('rev-parse', 'HEAD^{tree}'),
+              'approved_ref': baseline, 'kdd_runner_ref': os.environ['KDD_RUNNER_REF'],
+              'probe_sha': os.environ['GITHUB_SHA'], 'runner_os': os.environ['RUNNER_OS'],
+              'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'os_release': Path('/etc/os-release').read_text(encoding='utf-8').splitlines(),
+              'node': node, 'e2e': e2e, 'passes': passes,
+              'oracle_sha256': {path: hashlib.sha256((root / path).read_bytes()).hexdigest()
+                                for path in paths},
+          }
+          payload = json.dumps(receipt, indent=2) + '\n'
+          (Path(os.environ['RUNNER_TEMP']) / 'ladybird-e2e-ubuntu.json').write_text(payload, encoding='utf-8')
+          print(payload)
+          PY
+      - name: Upload Ubuntu receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ladybird-e2e-ubuntu-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ladybird-e2e-ubuntu.json
+          if-no-files-found: error
+          retention-days: 14
