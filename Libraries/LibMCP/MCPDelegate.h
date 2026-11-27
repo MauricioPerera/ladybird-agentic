@@ -91,7 +91,7 @@ public:
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, OnToolCallComplete) = 0;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, OnToolCallComplete) = 0;
     virtual void evaluate_javascript(u64 tab_id, String script, OnToolCallComplete) = 0;
-    virtual void take_screenshot(u64 tab_id, OnToolCallComplete) = 0;
+    virtual void take_screenshot(u64 tab_id, bool redact_media, OnToolCallComplete) = 0;
 
     virtual void list_flows(OnToolCallComplete) = 0;
     virtual void get_flow(String flow_id, OnToolCallComplete) = 0;

@@ -766,7 +766,7 @@ private:
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
-    virtual void take_screenshot(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void take_screenshot(u64 tab_id, bool redact_media, MCP::OnToolCallComplete) override;
     virtual void list_flows(MCP::OnToolCallComplete) override;
     virtual void get_flow(String flow_id, MCP::OnToolCallComplete) override;
     virtual void save_flow(JsonValue flow_json, MCP::OnToolCallComplete) override;

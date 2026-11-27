@@ -546,6 +546,10 @@ void FlowRunner::run_next_step(String const& run_id)
 
     case FlowStep::Action::Screenshot: {
         if (run.require_mcp_permission) {
+            if (m_application.mcp_security_policy().disable_screenshots) {
+                fail_run(run_id, "Flow screenshot step is disabled by --mcp-disable-screenshots policy"_string);
+                return;
+            }
             if (auto err = m_application.check_mcp_read_allowed(run.tab_id, "take screenshot"sv); err.has_value()) {
                 fail_run(run_id, *err);
                 return;
