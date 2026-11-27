@@ -262,3 +262,92 @@ TEST_CASE(upload_file_step_parse_serialize_and_shadow_dom_script)
     EXPECT(script.contains("resolve_upload_input"sv));
     EXPECT(script.contains("shadowRoot"sv));
 }
+
+TEST_CASE(flow_source_provenance_validation_and_roundtrip)
+{
+    EXPECT(WebView::is_valid_flow_source("user"sv));
+    EXPECT(WebView::is_valid_flow_source("mcp"sv));
+    EXPECT(WebView::is_valid_flow_source("unknown"sv));
+    EXPECT(WebView::is_valid_flow_source("extension:my-ext"sv));
+
+    EXPECT(!WebView::is_valid_flow_source(""sv));
+    EXPECT(!WebView::is_valid_flow_source("admin"sv));
+    EXPECT(!WebView::is_valid_flow_source("extension:../bad"sv));
+
+    auto default_json = MUST(JsonValue::from_string(R"JSON({
+        "id": "default-source-flow",
+        "name": "Default Source",
+        "steps": [{ "action": "sleep", "ms": 10 }]
+    })JSON"sv));
+    auto parsed_default = MUST(WebView::parse_flow_definition(default_json));
+    EXPECT_EQ(parsed_default.source, "unknown"sv);
+
+    auto invalid_src_json = MUST(JsonValue::from_string(R"JSON({
+        "id": "invalid-source-flow",
+        "name": "Invalid Source",
+        "source": "admin",
+        "steps": [{ "action": "sleep", "ms": 10 }]
+    })JSON"sv));
+    auto parsed_invalid = MUST(WebView::parse_flow_definition(invalid_src_json));
+    EXPECT_EQ(parsed_invalid.source, "unknown"sv);
+
+    auto mcp_json = MUST(JsonValue::from_string(R"JSON({
+        "id": "mcp-source-flow",
+        "name": "MCP Source",
+        "source": "mcp",
+        "steps": [{ "action": "sleep", "ms": 10 }]
+    })JSON"sv));
+    auto parsed_mcp = MUST(WebView::parse_flow_definition(mcp_json));
+    EXPECT_EQ(parsed_mcp.source, "mcp"sv);
+
+    auto full_serialized = WebView::serialize_flow_definition(parsed_mcp);
+    EXPECT_EQ(full_serialized.get_string("source"sv).value_or(String {}), "mcp"sv);
+
+    auto summary = WebView::serialize_flow_summary(parsed_mcp);
+    EXPECT_EQ(summary.get_string("source"sv).value_or(String {}), "mcp"sv);
+}
+
+TEST_CASE(flow_edits_and_legacy_flows_keep_their_execution_policy)
+{
+    auto directory = make_temp_flows_dir();
+    ScopeGuard cleanup = [&] { (void)FileSystem::remove(directory, FileSystem::RecursionMode::Allowed); };
+    WebView::FlowStore store(directory);
+
+    auto flow = WebView::make_example_flow();
+    flow.source = "mcp"_string;
+    auto saved = MUST(store.save_flow(flow));
+    flow.source = "user"_string;
+    EXPECT(store.requires_mcp_permission(flow));
+    EXPECT_EQ(MUST(store.save_flow_from_ui(flow)).source, "mcp"sv);
+
+    flow.id = "older-flow"_string;
+    auto legacy = WebView::serialize_flow_definition(flow);
+    legacy.remove("source"sv);
+    auto migrated = MUST(WebView::parse_flow_definition(JsonValue { move(legacy) }));
+    EXPECT(store.requires_mcp_permission(migrated));
+    EXPECT_EQ(MUST(store.save_flow(migrated)).source, "unknown"sv);
+    EXPECT_EQ(MUST(store.save_flow_from_ui(flow)).source, "unknown"sv);
+
+    flow.id = "local-flow"_string;
+    auto user_flow = MUST(store.save_flow_from_ui(flow));
+    EXPECT_EQ(user_flow.source, "user"sv);
+    EXPECT(!store.requires_mcp_permission(user_flow));
+
+    flow.id = "fresh-import"_string;
+    flow.source = "extension:unknown-owner"_string;
+    auto import = MUST(store.save_flow_from_ui(flow));
+    EXPECT_EQ(import.source, "unknown"sv);
+    EXPECT(store.requires_mcp_permission(import));
+
+    store.reload();
+    EXPECT_EQ(store.get_flow(saved.id)->source, "mcp"sv);
+    EXPECT_EQ(store.get_flow(migrated.id)->source, "unknown"sv);
+}
+
+TEST_CASE(extract_flow_template_variables_detects_placeholders)
+{
+    auto vars = WebView::extract_flow_template_variables("{{ host }}/path?q={{ token }}&dup={{host}}&bad={{unclosed"sv);
+    EXPECT_EQ(vars.size(), 2u);
+    EXPECT_EQ(vars[0], "host"sv);
+    EXPECT_EQ(vars[1], "token"sv);
+}

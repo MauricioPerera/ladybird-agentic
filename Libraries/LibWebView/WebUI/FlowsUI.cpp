@@ -204,7 +204,7 @@ void FlowsUI::save_flow(JsonValue const& data)
         return;
     }
 
-    auto saved = Application::the().flow_store().save_flow(parsed.release_value());
+    auto saved = Application::the().flow_store().save_flow_from_ui(parsed.release_value());
     if (saved.is_error()) {
         send_action_result(false, MUST(String::formatted("Failed to save flow: {}", saved.error())));
         return;
@@ -233,6 +233,7 @@ void FlowsUI::create_example_flow()
 {
     auto& store = Application::the().flow_store();
     auto flow = make_example_flow();
+    flow.source = "user"_string;
 
     if (store.get_flow(flow.id).has_value()) {
         for (size_t suffix = 2; suffix < 100; ++suffix) {

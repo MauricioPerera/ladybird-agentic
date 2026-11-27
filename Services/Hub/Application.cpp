@@ -144,11 +144,11 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     return view;
 }
 
-Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab, String container_id) const
+Optional<WebView::ViewImplementation&> Application::open_automation_view(Web::HTML::ActivateTab activate_tab, WebView::MCPAccessMode access_mode, String container_id) const
 {
     auto* ui = ConnectionFromUI::the();
     if (!ui)
-        return WebView::Application::open_mcp_new_tab(activate_tab, move(container_id));
+        return WebView::Application::open_automation_view(activate_tab, access_mode, move(container_id));
 
     View::InitialState initial_state;
     if (auto active_view = active_web_view(); active_view.has_value() && active_view->is_private() == WebView::IsPrivate::No) {
@@ -168,7 +168,7 @@ Optional<WebView::ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::
     initial_state.is_tab = true;
 
     auto& view = const_cast<Application&>(*this).create_view(move(initial_state));
-    view.set_mcp_access_allowed(true);
+    view.set_mcp_access_mode(access_mode);
     ui->async_app_open_view_in_new_tab(view.view_id(), {}, WebView::IsPrivate::No, activate_tab);
     return view;
 }

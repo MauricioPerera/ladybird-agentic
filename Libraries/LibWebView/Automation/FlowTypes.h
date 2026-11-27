@@ -79,6 +79,7 @@ struct WEBVIEW_API FlowDefinition {
     String id;
     String name;
     String description;
+    String source { "user"_string };
     HashMap<String, String> variables;
     u32 default_timeout_ms { 10000 };
     i64 created_at_ms { 0 };
@@ -114,12 +115,14 @@ struct WEBVIEW_API FlowRunRecord {
 };
 
 WEBVIEW_API bool is_valid_flow_id(StringView id);
+WEBVIEW_API bool is_valid_flow_source(StringView source);
 WEBVIEW_API StringView flow_action_name(FlowStep::Action action);
 WEBVIEW_API StringView flow_locator_kind_name(FlowLocator::Kind kind);
 WEBVIEW_API ErrorOr<FlowDefinition> parse_flow_definition(JsonValue const& value);
 WEBVIEW_API JsonObject serialize_flow_definition(FlowDefinition const& flow);
 WEBVIEW_API JsonObject serialize_flow_summary(FlowDefinition const& flow);
 WEBVIEW_API JsonObject serialize_flow_run(FlowRunRecord const& run);
+WEBVIEW_API Vector<String> extract_flow_template_variables(StringView input);
 WEBVIEW_API String interpolate_flow_variables(StringView input, HashMap<String, String> const& vars);
 WEBVIEW_API String build_locator_action_script(StringView operation, FlowLocator const& locator, JsonObject const& params = {});
 WEBVIEW_API FlowDefinition make_example_flow();

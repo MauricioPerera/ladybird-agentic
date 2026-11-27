@@ -9,6 +9,7 @@
 #include <AK/Error.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
+#include <AK/HashTable.h>
 #include <AK/Optional.h>
 #include <AK/RefPtr.h>
 #include <AK/String.h>
@@ -55,6 +56,7 @@ private:
         String run_id;
         FlowDefinition flow;
         HashMap<String, String> runtime_vars;
+        HashTable<String> tainted_runtime_vars;
         FlowRunRecord record;
         u64 tab_id { 0 };
         bool require_mcp_permission { false };

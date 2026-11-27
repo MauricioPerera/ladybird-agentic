@@ -83,7 +83,7 @@ private:
     virtual Optional<pid_t> ui_process_id() const override;
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
     virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, WebView::ViewImplementation const* related_view = nullptr) const override;
-    virtual Optional<WebView::ViewImplementation&> open_mcp_new_tab(Web::HTML::ActivateTab, String container_id = {}) const override;
+    virtual Optional<WebView::ViewImplementation&> open_automation_view(Web::HTML::ActivateTab, WebView::MCPAccessMode, String container_id) const override;
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, WebView::ViewImplementation const* source_view = nullptr) const override;
     virtual void activate_or_open_tab_with_url(URL::URL const&) const override;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const override;

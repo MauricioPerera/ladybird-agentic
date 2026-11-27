@@ -9,6 +9,7 @@
 #include <LibGC/Timer.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
+#include <LibJS/Runtime/PrimitiveString.h>
 #include <LibJS/Runtime/PromiseConstructor.h>
 #include <LibJS/ScriptCompilation.h>
 #include <LibWeb/Bindings/Window.h>
@@ -160,7 +161,7 @@ GC::Ref<GC::Timer> execute_script(HTML::BrowsingContext const& browsing_context,
 }
 
 // https://w3c.github.io/webdriver/#execute-async-script
-GC::Ref<GC::Timer> execute_async_script(HTML::BrowsingContext const& browsing_context, String body, GC::RootVector<JS::Value> arguments, Optional<u64> const& timeout_ms, GC::Ref<OnScriptComplete> on_complete)
+GC::Ref<GC::Timer> execute_async_script(HTML::BrowsingContext const& browsing_context, String body, GC::RootVector<JS::Value> arguments, Optional<u64> const& timeout_ms, GC::Ref<OnScriptComplete> on_complete, Optional<HTML::CrossProcessId> expected_document_id)
 {
     auto const* document = browsing_context.active_document();
     auto& realm = document->relevant_settings_object().realm();
@@ -183,8 +184,16 @@ GC::Ref<GC::Timer> execute_async_script(HTML::BrowsingContext const& browsing_co
     auto promise = WebIDL::create_promise(realm);
 
     // 8. Run the following substeps in parallel:
-    Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), GC::captures(realm, browsing_context, promise, move(body), move(arguments)), [](auto& realm, auto& browsing_context, auto& promise, auto& body, auto& arguments) {
+    Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), GC::captures(realm, browsing_context, promise, move(body), move(arguments), expected_document_id), [](auto& realm, auto& browsing_context, auto& promise, auto& body, auto& arguments, auto& expected_document_id) {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+        if (expected_document_id.has_value()) {
+            auto* current_document = browsing_context.active_document();
+            if (!current_document || current_document->id() != *expected_document_id) {
+                WebIDL::reject_promise(promise, JS::PrimitiveString::create(realm.vm(), "WebMCP document changed before execution"_utf16));
+                return;
+            }
+        }
 
         // 1. Let resolvingFunctions be CreateResolvingFunctions(promise).
         auto resolving_functions = as<JS::Promise>(*promise->promise()).create_resolving_functions();

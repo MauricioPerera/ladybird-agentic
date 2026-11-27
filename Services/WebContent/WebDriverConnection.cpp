@@ -2143,11 +2143,20 @@ Web::WebDriver::Response WebDriverConnection::execute_async_script(JsonValue pay
     // 1. Let body and arguments by the result of trying to extract the script arguments from a request with argument parameters.
     auto [body, arguments] = TRY(extract_the_script_arguments_from_a_request(payload));
 
+    Optional<Web::HTML::CrossProcessId> expected_document_id;
+    if (auto document_id = payload.as_object().get_object("expected_document_id"sv); document_id.has_value()) {
+        auto namespace_id = document_id->get_u64("namespace_id"sv);
+        auto local_id = document_id->get_u64("local_id"sv);
+        if (!namespace_id.has_value() || !local_id.has_value())
+            return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Invalid expected document ID"sv);
+        expected_document_id = Web::HTML::CrossProcessId { *namespace_id, *local_id };
+    }
+
     // 2. If the current browsing context is no longer open, return error with error code no such window.
     TRY(ensure_current_browsing_context_is_open());
 
     // 3. Handle any user prompts, and return its value if it is an error.
-    handle_any_user_prompts(GC::create_function(GC::Heap::the(), GC::captures(make_weak_ptr(), move(body), move(arguments)), [](auto& connection, auto& body, auto& arguments) {
+    handle_any_user_prompts(GC::create_function(GC::Heap::the(), GC::captures(make_weak_ptr(), move(body), move(arguments), expected_document_id), [](auto& connection, auto& body, auto& arguments, auto& expected_document_id) {
         if (!connection)
             return;
         auto script_execution_id = connection->m_script_execution_id_counter++;
@@ -2162,7 +2171,7 @@ Web::WebDriver::Response WebDriverConnection::execute_async_script(JsonValue pay
                 return;
             dbgln_if(WEBDRIVER_DEBUG, "Executing async script returned: {}", result.value);
             connection->handle_script_response(result, script_execution_id);
-        }));
+        }), expected_document_id);
     }));
 
     return JsonValue {};

@@ -108,6 +108,7 @@ void ExtensionManager::sync_bundled_flows()
                 continue;
             }
             auto parsed_flow = parsed.release_value();
+            parsed_flow.source = MUST(String::formatted("extension:{}", ext.manifest.id));
             bool owned_by_ext = prev_owned.has_value() && prev_owned->contains_slow(parsed_flow.id);
             if (!owned_by_ext && m_flow_store.get_flow(parsed_flow.id).has_value()) {
                 m_store.set_last_error(ext.manifest.id, MUST(String::formatted("Bundled flow '{}' collides with existing flow id '{}'", rel_path, parsed_flow.id)), false);

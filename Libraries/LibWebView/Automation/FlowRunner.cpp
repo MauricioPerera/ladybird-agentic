@@ -34,15 +34,41 @@ static ErrorOr<URL::URL> validate_automation_url(StringView raw_url)
     return Error::from_string_literal("Only http:, https:, and about:blank URLs are allowed in automation flows");
 }
 
-static FlowLocator interpolate_locator(FlowLocator const& locator, HashMap<String, String> const& vars)
+static bool uses_tainted_var(StringView tmpl, HashTable<String> const& tainted)
+{
+    if (tainted.is_empty() || tmpl.is_empty())
+        return false;
+    for (auto const& key : extract_flow_template_variables(tmpl)) {
+        if (tainted.contains(key))
+            return true;
+    }
+    return false;
+}
+
+static ErrorOr<void> validate_interpolated_locator_field(StringView value)
+{
+    if (value.contains('\0'))
+        return Error::from_string_literal("Interpolated locator field contains invalid NUL byte");
+    if (value.length() > 2048)
+        return Error::from_string_literal("Interpolated locator field exceeds maximum length of 2048 bytes");
+    return {};
+}
+
+static ErrorOr<FlowLocator> interpolate_locator(FlowLocator const& locator, HashMap<String, String> const& vars)
 {
     FlowLocator out = locator;
-    if (!out.value.is_empty())
+    if (!out.value.is_empty()) {
         out.value = interpolate_flow_variables(out.value, vars);
-    if (!out.role.is_empty())
+        TRY(validate_interpolated_locator_field(out.value));
+    }
+    if (!out.role.is_empty()) {
         out.role = interpolate_flow_variables(out.role, vars);
-    if (out.name.has_value())
+        TRY(validate_interpolated_locator_field(out.role));
+    }
+    if (out.name.has_value()) {
         out.name = interpolate_flow_variables(*out.name, vars);
+        TRY(validate_interpolated_locator_field(*out.name));
+    }
     return out;
 }
 
@@ -89,6 +115,8 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
 
     if (flow->steps.is_empty())
         return Error::from_string_literal("Flow has no steps");
+
+    request.require_mcp_permission |= m_store.requires_mcp_permission(*flow);
 
     u64 resolved_tab_id = 0;
     bool opened_tab = false;
@@ -232,12 +260,23 @@ void FlowRunner::run_next_step(String const& run_id)
     switch (step.action) {
     case FlowStep::Action::Open: {
         auto raw_url = interpolate_flow_variables(*step.url, run.runtime_vars);
+        auto raw_url_view = raw_url.bytes_as_string_view();
+        if (raw_url_view.contains('\r') || raw_url_view.contains('\n') || raw_url_view.contains('\0')) {
+            fail_run(run_id, "Refusing URL containing control characters"_string);
+            return;
+        }
         auto parsed = validate_automation_url(raw_url);
         if (parsed.is_error()) {
             fail_run(run_id, MUST(String::formatted("{}", parsed.error())));
             return;
         }
         auto url = parsed.release_value();
+        if (uses_tainted_var(*step.url, run.tainted_runtime_vars)) {
+            if (view->url().scheme().is_one_of("http"sv, "https"sv) && !view->url().origin().is_opaque() && !url.origin().is_same_origin(view->url().origin())) {
+                fail_run(run_id, "Refusing cross-origin navigation derived from untrusted page-extracted variable"_string);
+                return;
+            }
+        }
         if (run.require_mcp_permission) {
             if (auto policy_check = mcp_validate_url_against_policy(url, m_application.mcp_security_policy()); policy_check.is_error()) {
                 fail_run(run_id, MUST(String::formatted("{}", policy_check.error())));
@@ -419,7 +458,12 @@ void FlowRunner::run_next_step(String const& run_id)
                 m_application.record_mcp_sensitive_read(*view);
             }
         }
-        auto locator = interpolate_locator(*step.locator, run.runtime_vars);
+        auto locator_or_err = interpolate_locator(*step.locator, run.runtime_vars);
+        if (locator_or_err.is_error()) {
+            fail_run(run_id, MUST(String::formatted("{}", locator_or_err.error())));
+            return;
+        }
+        auto locator = locator_or_err.release_value();
         JsonObject params;
         if (step.action == FlowStep::Action::Fill) {
             params.set("text"sv, interpolate_flow_variables(*step.text, run.runtime_vars));
@@ -454,9 +498,19 @@ void FlowRunner::run_next_step(String const& run_id)
             }
         }
         auto key = interpolate_flow_variables(*step.key, run.runtime_vars);
+        auto key_view = key.bytes_as_string_view();
+        if (key_view.is_empty() || key_view.length() > 32 || key_view.contains('\0') || key_view.contains('\r') || key_view.contains('\n')) {
+            fail_run(run_id, "Invalid interpolated press key value"_string);
+            return;
+        }
         String script;
         if (step.locator.has_value()) {
-            auto locator = interpolate_locator(*step.locator, run.runtime_vars);
+            auto locator_or_err = interpolate_locator(*step.locator, run.runtime_vars);
+            if (locator_or_err.is_error()) {
+                fail_run(run_id, MUST(String::formatted("{}", locator_or_err.error())));
+                return;
+            }
+            auto locator = locator_or_err.release_value();
             JsonObject params;
             params.set("key"sv, key);
             script = build_locator_action_script("press"sv, locator, params);
@@ -613,6 +667,10 @@ void FlowRunner::run_next_step(String const& run_id)
         Vector<String> validated_paths;
         validated_paths.ensure_capacity(step.paths.size());
         for (auto const& raw_path : step.paths) {
+            if (uses_tainted_var(raw_path, run.tainted_runtime_vars)) {
+                fail_run(run_id, "Refusing to interpolate untrusted page-extracted variable into upload_file path"_string);
+                return;
+            }
             auto interpolated = interpolate_flow_variables(raw_path, run.runtime_vars);
             auto validated = resolve_and_validate_upload_path(interpolated, upload_root);
             if (validated.is_error()) {
@@ -621,7 +679,12 @@ void FlowRunner::run_next_step(String const& run_id)
             }
             validated_paths.unchecked_append(String::from_utf8_without_validation(validated.value().bytes()));
         }
-        auto locator = interpolate_locator(*step.locator, run.runtime_vars);
+        auto locator_or_err = interpolate_locator(*step.locator, run.runtime_vars);
+        if (locator_or_err.is_error()) {
+            fail_run(run_id, MUST(String::formatted("{}", locator_or_err.error())));
+            return;
+        }
+        auto locator = locator_or_err.release_value();
         auto script = build_locator_action_script("resolve_upload_input"sv, locator, {});
         if (run.require_mcp_permission) {
             StringBuilder files_summary;
@@ -959,6 +1022,8 @@ void FlowRunner::complete_current_step(String const& run_id, size_t step_index, 
             run.runtime_vars.set(key, step_res.output.as_string());
         else if (step_res.output.is_number() || step_res.output.is_bool())
             run.runtime_vars.set(key, step_res.output.serialized());
+        if (step_def.action == FlowStep::Action::Extract || step_def.action == FlowStep::Action::Eval)
+            run.tainted_runtime_vars.set(key);
     }
 
     run.step_index += 1;

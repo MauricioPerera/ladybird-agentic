@@ -8,6 +8,7 @@
 #pragma once
 
 #include <AK/Forward.h>
+#include <AK/Optional.h>
 #include <AK/String.h>
 #include <LibGC/Function.h>
 #include <LibJS/Forward.h>
@@ -15,6 +16,7 @@
 #include <LibJS/Runtime/Value.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
+#include <LibWebCommon/HTML/CrossProcessId.h>
 
 namespace Web::WebDriver {
 
@@ -26,6 +28,6 @@ struct ExecutionResult {
 using OnScriptComplete = GC::Function<void(ExecutionResult)>;
 
 WEB_API GC::Ref<GC::Timer> execute_script(HTML::BrowsingContext const&, String body, GC::RootVector<JS::Value> arguments, Optional<u64> const& timeout_ms, GC::Ref<OnScriptComplete> on_complete);
-WEB_API GC::Ref<GC::Timer> execute_async_script(HTML::BrowsingContext const&, String body, GC::RootVector<JS::Value> arguments, Optional<u64> const& timeout_ms, GC::Ref<OnScriptComplete> on_complete);
+WEB_API GC::Ref<GC::Timer> execute_async_script(HTML::BrowsingContext const&, String body, GC::RootVector<JS::Value> arguments, Optional<u64> const& timeout_ms, GC::Ref<OnScriptComplete> on_complete, Optional<HTML::CrossProcessId> expected_document_id = {});
 
 }

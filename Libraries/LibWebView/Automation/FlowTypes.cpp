@@ -48,6 +48,15 @@ bool is_valid_flow_id(StringView id)
     return true;
 }
 
+bool is_valid_flow_source(StringView source)
+{
+    if (source == "user"sv || source == "mcp"sv || source == "unknown"sv)
+        return true;
+    if (source.starts_with("extension:"sv))
+        return is_valid_flow_id(source.substring_view("extension:"sv.length()));
+    return false;
+}
+
 StringView flow_action_name(FlowStep::Action action)
 {
     switch (action) {
@@ -355,6 +364,11 @@ ErrorOr<FlowDefinition> parse_flow_definition(JsonValue const& value)
     if (auto desc = obj.get_string("description"sv); desc.has_value())
         flow.description = *desc;
 
+    if (auto source = obj.get_string("source"sv); source.has_value() && is_valid_flow_source(*source))
+        flow.source = *source;
+    else
+        flow.source = "unknown"_string;
+
     if (auto timeout_ms = obj.get_integer<i64>("default_timeout_ms"sv); timeout_ms.has_value())
         flow.default_timeout_ms = clamp_timeout_ms(*timeout_ms);
 
@@ -390,6 +404,7 @@ JsonObject serialize_flow_definition(FlowDefinition const& flow)
     obj.set("id"sv, flow.id);
     obj.set("name"sv, flow.name);
     obj.set("description"sv, flow.description);
+    obj.set("source"sv, flow.source);
     obj.set("default_timeout_ms"sv, static_cast<u64>(flow.default_timeout_ms));
     obj.set("created_at_ms"sv, flow.created_at_ms);
     obj.set("updated_at_ms"sv, flow.updated_at_ms);
@@ -449,6 +464,7 @@ JsonObject serialize_flow_summary(FlowDefinition const& flow)
     obj.set("id"sv, flow.id);
     obj.set("name"sv, flow.name);
     obj.set("description"sv, flow.description);
+    obj.set("source"sv, flow.source);
     obj.set("step_count"sv, static_cast<u64>(flow.steps.size()));
     obj.set("default_timeout_ms"sv, static_cast<u64>(flow.default_timeout_ms));
     obj.set("updated_at_ms"sv, flow.updated_at_ms);
@@ -494,6 +510,29 @@ JsonObject serialize_flow_run(FlowRunRecord const& run)
     }
     obj.set("steps"sv, move(steps));
     return obj;
+}
+
+Vector<String> extract_flow_template_variables(StringView input)
+{
+    Vector<String> keys;
+    if (input.is_empty())
+        return keys;
+
+    size_t pos = 0;
+    while (pos < input.length()) {
+        auto open = input.find("{{"sv, pos);
+        if (!open.has_value())
+            break;
+        auto close = input.find("}}"sv, *open + 2);
+        if (!close.has_value())
+            break;
+        auto raw_key = input.substring_view(*open + 2, *close - (*open + 2));
+        auto key = MUST(String::from_utf8(raw_key.trim_whitespace().bytes()));
+        if (!key.is_empty() && !keys.contains_slow(key))
+            keys.append(move(key));
+        pos = *close + 2;
+    }
+    return keys;
 }
 
 String interpolate_flow_variables(StringView input, HashMap<String, String> const& vars)

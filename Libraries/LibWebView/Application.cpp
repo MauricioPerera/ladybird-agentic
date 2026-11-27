@@ -58,6 +58,7 @@
 #include <LibWebView/ContainerStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
 #include <LibWebView/BlobURLStore.h>
+#include <LibWebView/CanonicalDocument.h>
 #include <LibWebView/Extensions/ExtensionManager.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
@@ -615,7 +616,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_allow_eval_js, "Explicitly enable the eval_js MCP tool (disabled by default for prompt-injection hardening)", "mcp-allow-eval-js", 0);
     args_parser.add_option(mcp_disable_screenshots, "Disable MCP take_screenshot tool and flow screenshot steps for visual prompt-injection hardening", "mcp-disable-screenshots", 0);
     args_parser.add_option(mcp_redact_screenshot_media, "Automatically redact untrusted visual media (<img>, <video>, <canvas>, <svg>, CSS backgrounds) during MCP screenshots", "mcp-redact-screenshot-media", 0);
-    args_parser.add_option(mcp_auto_approve, "Auto-approve sensitive MCP actions (uploads, blind logins, consequential WebMCP tools) without UI prompt for unattended runs", "mcp-auto-approve", 0);
+    args_parser.add_option(mcp_auto_approve, "Auto-approve sensitive MCP actions (uploads, blind logins, consequential WebMCP tools, egress decisions, extension installs) without UI prompt in --headless mode only (ignored with GUI)", "mcp-auto-approve", 0);
     args_parser.add_option(mcp_max_tabs, "Maximum concurrent MCP-accessible tabs allowed (default: 16)", "mcp-max-tabs", 0, "count");
 
     args_parser.add_option(Core::ArgsParser::Option {
@@ -662,6 +663,10 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     m_explicit_content_blocker_list_paths = move(content_blocker_list_paths);
 
+    bool effective_mcp_auto_approve = mcp_auto_approve && headless_mode.has_value();
+    if (mcp_auto_approve && !headless_mode.has_value())
+        warnln("WARNING: --mcp-auto-approve is restricted to --headless mode; ignoring in interactive GUI sessions for safety.");
+
     m_browser_options = {
         .urls = {},
         .raw_urls = move(raw_urls),
@@ -692,7 +697,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .mcp_disable_eval_js = !mcp_allow_eval_js || mcp_disable_eval_js,
         .mcp_disable_screenshots = mcp_disable_screenshots,
         .mcp_redact_screenshot_media = mcp_redact_screenshot_media,
-        .mcp_auto_approve = mcp_auto_approve,
+        .mcp_auto_approve = effective_mcp_auto_approve,
         .mcp_max_tabs = mcp_max_tabs.value_or(16),
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
         .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
@@ -2802,13 +2807,13 @@ struct Application::HeadlessSessionState {
     Optional<u64> active_view_id;
 };
 
-HeadlessWebView& Application::register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView> view, bool activate, bool exit_on_last_close)
+HeadlessWebView& Application::register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView> view, MCPAccessMode access_mode, bool activate, bool exit_on_last_close)
 {
     if (!m_headless_state)
         m_headless_state = make<HeadlessSessionState>();
 
     auto view_id = view->view_id();
-    view->set_mcp_access_allowed(true);
+    view->set_mcp_access_mode(access_mode);
     view->on_activate_tab = [this, view_id]() {
         if (m_headless_state)
             m_headless_state->active_view_id = view_id;
@@ -2850,7 +2855,7 @@ Optional<ViewImplementation&> Application::active_web_view() const
     return {};
 }
 
-Optional<ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateTab activate_tab, String container_id) const
+Optional<ViewImplementation&> Application::open_automation_view(Web::HTML::ActivateTab activate_tab, MCPAccessMode access_mode, String container_id) const
 {
     if (m_browser_options.headless_mode != HeadlessMode::Manual
         || !m_browser_options.mcp_port.has_value()
@@ -2866,6 +2871,7 @@ Optional<ViewImplementation&> Application::open_mcp_new_tab(Web::HTML::ActivateT
         move(container_id));
     return const_cast<Application&>(*this).register_headless_mcp_view(
         move(view),
+        access_mode,
         activate_tab == Web::HTML::ActivateTab::Yes,
         false);
 }
@@ -2907,7 +2913,7 @@ ErrorOr<int> Application::execute()
                 if (!m_browser_options.raw_urls.is_empty() && m_browser_options.urls.size() > 1)
                     return Error::from_string_literal("Headless mode currently only supports at most one URL");
                 auto initial_url = m_browser_options.raw_urls.is_empty() ? URL::about_blank() : m_browser_options.urls.first();
-                auto& headless_view = register_headless_mcp_view(view.release_nonnull(), true, false);
+                auto& headless_view = register_headless_mcp_view(view.release_nonnull(), MCPAccessMode::Full, true, false);
                 if (initial_url != URL::about_blank())
                     headless_view.load_from_browser_ui(initial_url);
             } else {
@@ -5413,7 +5419,8 @@ void Application::request_mcp_user_approval(u64 tab_id, String action_kind, Stri
         callback(false);
         return;
     }
-    if (m_browser_options.mcp_auto_approve) {
+    if (m_browser_options.mcp_auto_approve && m_browser_options.headless_mode.has_value()) {
+        record_mcp_audit_event(MUST(String::formatted("auto_approve:{}", action_kind)), tab_id, "auto_approved"_string, summary);
         callback(true);
         return;
     }
@@ -5426,7 +5433,8 @@ void Application::request_mcp_user_approval_any_view(String action_kind, String 
         callback(false);
         return;
     }
-    if (m_browser_options.mcp_auto_approve) {
+    if (m_browser_options.mcp_auto_approve && m_browser_options.headless_mode.has_value()) {
+        record_mcp_audit_event(MUST(String::formatted("auto_approve:{}", action_kind)), OptionalNone {}, "auto_approved"_string, summary);
         callback(true);
         return;
     }
@@ -5950,11 +5958,8 @@ Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::Activa
         resolved_container = container_or_error.release_value();
     }
 
-    auto view = open_mcp_new_tab(activate_tab, move(resolved_container));
-    if (!view.has_value() || view->is_private() == IsPrivate::Yes)
-        return {};
-    view->set_mcp_access_allowed(true);
-    return view;
+    auto access_mode = require_mcp_permission ? MCPAccessMode::Full : MCPAccessMode::Blocked;
+    return open_automation_view(activate_tab, access_mode, move(resolved_container));
 }
 
 u64 Application::start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete)
@@ -6121,7 +6126,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
             cb(mcp_error_result("MCP automation is currently paused by the user"sv));
             return;
         }
-        auto view = open_mcp_new_tab(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, move(resolved_container));
+        auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, MCPAccessMode::Full, move(resolved_container));
         if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
             cb(mcp_error_result("UI unavailable to open non-private tab"sv));
             return;
@@ -6759,6 +6764,9 @@ if (!window.__ladybirdWebMCP) {
     || location.hostname === '[::1]';
 
   const registry = new _Map();
+  // Each inspection gets one use, in the document that resolved the tool.
+  const inspectedTools = [];
+  let nextInspection = 0;
 
   const normalizeAnnotations = (raw, defaults = {}) => {
     const src = (raw && typeof raw === 'object') ? raw : {};
@@ -6812,6 +6820,7 @@ if (!window.__ladybirdWebMCP) {
 
     const entry = {
       name,
+      kind: 'imperative',
       description: String(def.description || ''),
       inputSchema: normalizeSchema(def.inputSchema),
       annotations: normalizeAnnotations(def.annotations),
@@ -6966,7 +6975,36 @@ if (!window.__ladybirdWebMCP) {
     };
   };
 
+  const resolveTool = (name) => {
+    const registered = registry.get(name);
+    if (registered) return registered;
+    for (const { form, name: formName } of collectDeclarativeForms(document)) {
+      if (formName === name) return buildDeclarativeDescriptor(form, formName);
+    }
+    return null;
+  };
+
+  const toolSignature = (tool) => _jsonStringify([
+    tool.description, tool.inputSchema, tool.annotations, tool.method, tool.autosubmit,
+    tool.form?.action, tool.form?.target, tool.form?.enctype,
+  ]);
+
   const api = _freeze({
+    inspectTool: (name, ticket) => {
+      const tool = resolveTool(name);
+      if (!tool) return { found: false };
+
+      inspectedTools[nextInspection] = { ticket, tool, signature: toolSignature(tool), href: location.href };
+      nextInspection = (nextInspection + 1) % 64;
+      return {
+        found: true,
+        description: tool.description,
+        consequential: Boolean(tool.annotations.consequentialHint || tool.annotations.destructiveHint),
+        href: location.href,
+        origin: location.origin,
+      };
+    },
+
     listTools: (opts = {}) => {
       const includeDeclarative = opts.includeDeclarative !== false;
       const tools = [];
@@ -7017,13 +7055,29 @@ if (!window.__ladybirdWebMCP) {
       if (!toolName)
         return { error: 'Tool name must be a non-empty string' };
 
-      const confirmConsequential = Boolean(opts && opts.confirmConsequential);
-      const imperative = registry.get(toolName);
-      if (imperative) {
+      let inspected;
+      for (let i = 0; i < inspectedTools.length; ++i) {
+        if (inspectedTools[i]?.ticket !== opts.inspectionTicket) continue;
+        inspected = inspectedTools[i];
+        inspectedTools[i] = undefined;
+        break;
+      }
+
+      const currentTool = resolveTool(toolName);
+      if (!inspected || !currentTool || inspected.href !== location.href || inspected.tool.name !== toolName
+          || inspected.tool.kind !== currentTool.kind
+          || (currentTool.kind === 'imperative' ? inspected.tool !== currentTool : inspected.tool.form !== currentTool.form)
+          || inspected.signature !== toolSignature(currentTool)) {
+        return { error: 'WebMCP document or tool registration changed before execution' };
+      }
+
+      const confirmConsequential = Boolean(opts.confirmConsequential);
+      if (currentTool.kind === 'imperative') {
+        const imperative = currentTool;
         const ann = normalizeAnnotations(imperative.annotations);
         if ((ann.consequentialHint === true || ann.destructiveHint === true) && !confirmConsequential) {
           return {
-            error: 'Tool "' + toolName + '" is marked consequential/destructive. Confirm with the user and re-invoke call_page_tool with confirm_consequential: true.',
+            error: 'Tool "' + toolName + '" requires native browser approval.',
             requires_confirmation: true,
             tool: toolName,
             annotations: ann,
@@ -7032,7 +7086,7 @@ if (!window.__ladybirdWebMCP) {
         const client = {
           requestUserInteraction: async (cb) => {
             if (!confirmConsequential)
-              throw new Error('Tool requested user interaction; confirm with the user and retry with confirm_consequential: true');
+              throw new Error('Tool requested native browser approval');
             if (typeof cb === 'function')
               return await cb();
             return undefined;
@@ -7047,15 +7101,10 @@ if (!window.__ladybirdWebMCP) {
         };
       }
 
-      const forms = collectDeclarativeForms(document);
-      const match = forms.find((item) => item.name === toolName);
-      if (!match)
-        return { error: 'WebMCP tool not found on this page: ' + toolName };
-
-      const desc = buildDeclarativeDescriptor(match.form, match.name);
+      const desc = currentTool;
       if ((desc.annotations.consequentialHint === true || desc.annotations.destructiveHint === true) && !confirmConsequential) {
         return {
-          error: 'Tool "' + toolName + '" is marked consequential/destructive. Confirm with the user and re-invoke call_page_tool with confirm_consequential: true.',
+          error: 'Tool "' + toolName + '" requires native browser approval.',
           requires_confirmation: true,
           tool: toolName,
           annotations: desc.annotations,
@@ -9718,7 +9767,13 @@ void Application::save_flow(JsonValue flow_json, MCP::OnToolCallComplete on_comp
         on_complete(mcp_error_result(MUST(String::formatted("Invalid flow definition: {}", parsed.error()))));
         return;
     }
-    auto saved = flow_store().save_flow(parsed.release_value());
+    auto flow = parsed.release_value();
+    if (auto existing = flow_store().get_flow(flow.id); existing.has_value() && existing->source.bytes_as_string_view().starts_with("extension:"sv)) {
+        on_complete(mcp_error_result("Cannot overwrite extension-owned flow via MCP"sv));
+        return;
+    }
+    flow.source = "mcp"_string;
+    auto saved = flow_store().save_flow(move(flow));
     if (saved.is_error()) {
         on_complete(mcp_error_result(MUST(String::formatted("Failed to save flow: {}", saved.error()))));
         return;
@@ -10234,12 +10289,21 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         return;
     }
 
-    auto execute_tool = [this, tab_id](String t_name, JsonObject t_args, bool approved_consequential, Function<void(Web::WebDriver::Response)> cb) {
+    auto initial_view = find_allowed_mcp_view(tab_id);
+    if (!initial_view.has_value() || !initial_view->has_traversable()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    auto expected_document_id = initial_view->traversable().active_document().id();
+    auto inspection_ticket = generate_random_uuid();
+
+    auto execute_tool = [this, tab_id, expected_document_id, inspection_ticket](String t_name, JsonObject t_args, bool approved_consequential, Function<void(Web::WebDriver::Response)> cb) {
         JsonObject cfg;
         cfg.set("tab_id"sv, tab_id);
         cfg.set("tool_name"sv, move(t_name));
         cfg.set("arguments"sv, move(t_args));
         cfg.set("confirm_consequential"sv, approved_consequential);
+        cfg.set("inspection_ticket"sv, inspection_ticket);
 
         StringBuilder js;
         js.append("const cfg = arguments[0] || {};\n"sv);
@@ -10248,6 +10312,7 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         js.append(R"WEBMCP(
 (async () => {
   return await window.__ladybirdWebMCP.callTool(cfg.tool_name, cfg.arguments || {}, {
+    inspectionTicket: cfg.inspection_ticket,
     confirmConsequential: Boolean(cfg.confirm_consequential),
   });
 })().then(
@@ -10259,44 +10324,50 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         JsonArray args;
         args.must_append(move(cfg));
 
+        JsonObject document_id;
+        document_id.set("namespace_id"sv, expected_document_id.namespace_id);
+        document_id.set("local_id"sv, expected_document_id.local_id);
         JsonObject payload;
         payload.set("script"sv, MUST(js.to_string()));
         payload.set("args"sv, move(args));
+        payload.set("expected_document_id"sv, move(document_id));
 
         enqueue_mcp_webdriver_command(tab_id, "execute_async_script"_string, move(payload), {}, move(cb));
     };
 
     JsonObject inspect_cfg;
     inspect_cfg.set("tool_name"sv, tool_name);
+    inspect_cfg.set("inspection_ticket"sv, move(inspection_ticket));
     StringBuilder inspect_js;
     inspect_js.append("const cfg = arguments[0] || {};\n"sv);
     inspect_js.append(mcp_webmcp_shim_js);
     inspect_js.append(R"WEBMCP(
-const list = window.__ladybirdWebMCP.listTools({ includeDeclarative: true });
-const found = Array.isArray(list.tools) ? list.tools.find(t => t && t.name === cfg.tool_name) : null;
-const ann = found && found.annotations ? found.annotations : {};
-return {
-  found: Boolean(found),
-  consequential: Boolean(ann.consequentialHint || ann.destructiveHint),
-  origin: window.location.origin || '',
-  description: found && found.description ? String(found.description) : ''
-};
+return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket);
 )WEBMCP"sv);
 
-    execute_mcp_js_json(*this, tab_id, MUST(inspect_js.to_string()), move(inspect_cfg), [this, tab_id, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](MCP::ToolCallResult inspect_res) mutable {
+    execute_mcp_js_json(*this, tab_id, MUST(inspect_js.to_string()), move(inspect_cfg), [this, tab_id, expected_document_id, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](MCP::ToolCallResult inspect_res) mutable {
         if (inspect_res.is_error) {
             on_complete(move(inspect_res));
             return;
         }
-        bool is_consequential = false;
-        String origin;
-        String description;
-        if (auto parsed = JsonValue::from_string(inspect_res.text); !parsed.is_error() && parsed.value().is_object()) {
-            auto const& obj = parsed.value().as_object();
-            is_consequential = obj.get_bool("consequential"sv).value_or(false);
-            origin = obj.get_string("origin"sv).value_or(String {});
-            description = obj.get_string("description"sv).value_or(String {});
+        auto parsed = JsonValue::from_string(inspect_res.text);
+        if (parsed.is_error() || !parsed.value().is_object()) {
+            on_complete(mcp_error_result("Invalid WebMCP inspection response"sv));
+            return;
         }
+        auto const& obj = parsed.value().as_object();
+        if (!obj.get_bool("found"sv).value_or(false)) {
+            on_complete(mcp_error_result("WebMCP tool not found on this page"sv));
+            return;
+        }
+        auto is_consequential = obj.get_bool("consequential"sv);
+        auto expected_href = obj.get_string("href"sv).value_or(String {});
+        if (!is_consequential.has_value() || expected_href.is_empty()) {
+            on_complete(mcp_error_result("Incomplete WebMCP inspection response"sv));
+            return;
+        }
+        auto origin = obj.get_string("origin"sv).value_or(String {});
+        auto description = obj.get_string("description"sv).value_or(String {});
 
         auto handle_response = [this, tab_id, on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
             if (response.is_error()) {
@@ -10326,14 +10397,23 @@ return {
         };
 
         auto cur_view_before_call = find_allowed_mcp_view(tab_id);
-        if (!cur_view_before_call.has_value()) {
-            on_complete(mcp_error_result(mcp_denied_message));
+        if (!cur_view_before_call.has_value() || !cur_view_before_call->has_traversable()
+            || cur_view_before_call->traversable().active_document().id() != expected_document_id) {
+            on_complete(mcp_error_result("WebMCP document changed during tool inspection"sv));
+            return;
+        }
+        if (auto error = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv); error.has_value()) {
+            on_complete(mcp_error_result(*error));
+            return;
+        }
+        if (is_view_mcp_secret_tainted(tab_id)) {
+            on_complete(mcp_error_result(mcp_vault_quarantine_message));
             return;
         }
         record_mcp_sensitive_read(*cur_view_before_call);
 
         bool needs_egress_approval = mcp_egress_requires_approval(cur_view_before_call->url(), cur_view_before_call->url());
-        if (is_consequential || needs_egress_approval) {
+        if (*is_consequential || needs_egress_approval) {
             auto expected_origin = cur_view_before_call->url().origin().is_opaque() ? String {} : cur_view_before_call->url().origin().serialize();
             auto origin_display = origin.is_empty() ? expected_origin : origin;
             auto kind = needs_egress_approval ? "egress_call_page_tool"_string : "call_page_tool"_string;
@@ -10341,7 +10421,7 @@ return {
                 ? MUST(String::formatted("Run page tool '{}' on unapproved origin {} (egress guard active)", tool_name, origin_display))
                 : MUST(String::formatted("Run consequential page tool '{}' on {}", tool_name, origin_display));
             auto details = description.is_empty() ? JsonValue { arguments }.serialized() : MUST(String::formatted("{}\nArguments: {}", description, JsonValue { arguments }.serialized()));
-            request_mcp_user_approval(tab_id, move(kind), move(summary), move(details), [this, tab_id, expected_origin = move(expected_origin), needs_egress_approval, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), handle_response = move(handle_response)](bool approved) mutable {
+            request_mcp_user_approval(tab_id, move(kind), move(summary), move(details), [this, tab_id, expected_origin = move(expected_origin), expected_href = move(expected_href), expected_document_id, needs_egress_approval, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), handle_response = move(handle_response)](bool approved) mutable {
                 if (m_mcp_paused) {
                     handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "MCP automation is currently paused by the user"sv));
                     return;
@@ -10368,10 +10448,20 @@ return {
                     handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "Tab origin changed during WebMCP tool approval prompt (aborting for safety)"sv));
                     return;
                 }
-                if (needs_egress_approval)
-                    approve_mcp_egress_origin(cur_view->url());
+                if (!cur_view->has_traversable() || cur_view->traversable().active_document().id() != expected_document_id
+                    || cur_view->url().to_string() != expected_href) {
+                    handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "Tab document URL changed during WebMCP tool approval prompt (aborting for safety)"sv));
+                    return;
+                }
+                auto approved_url = cur_view->url();
                 record_mcp_sensitive_read(*cur_view);
-                execute_tool(move(tool_name), move(arguments), true, move(handle_response));
+                execute_tool(move(tool_name), move(arguments), true, [this, needs_egress_approval, approved_url = move(approved_url), handle_response = move(handle_response)](Web::WebDriver::Response response) mutable {
+                    if (needs_egress_approval && !response.is_error() && response.value().is_object()
+                        && response.value().as_object().get_bool("ok"sv).value_or(false)) {
+                        approve_mcp_egress_origin(approved_url);
+                    }
+                    handle_response(move(response));
+                });
             });
             return;
         }

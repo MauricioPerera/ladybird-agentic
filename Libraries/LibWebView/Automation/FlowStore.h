@@ -36,6 +36,8 @@ public:
     Vector<FlowDefinition> list_flows() const;
     Optional<FlowDefinition> get_flow(StringView id) const;
     ErrorOr<FlowDefinition> save_flow(FlowDefinition flow);
+    ErrorOr<FlowDefinition> save_flow_from_ui(FlowDefinition flow);
+    bool requires_mcp_permission(FlowDefinition const&) const;
     ErrorOr<void> delete_flow(StringView id);
 
     void upsert_run(FlowRunRecord run, bool persist_to_disk = false);

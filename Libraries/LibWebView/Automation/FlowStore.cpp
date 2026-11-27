@@ -189,6 +189,24 @@ ErrorOr<FlowDefinition> FlowStore::save_flow(FlowDefinition flow)
     return flow;
 }
 
+ErrorOr<FlowDefinition> FlowStore::save_flow_from_ui(FlowDefinition flow)
+{
+    if (auto existing = m_flows.get(flow.id); existing.has_value())
+        flow.source = existing->source;
+    else if (flow.source != "user"sv)
+        flow.source = "unknown"_string;
+    return save_flow(move(flow));
+}
+
+bool FlowStore::requires_mcp_permission(FlowDefinition const& flow) const
+{
+    auto is_restricted = [](StringView source) { return source.is_one_of("mcp"sv, "unknown"sv); };
+    if (is_restricted(flow.source))
+        return true;
+    auto existing = m_flows.get(flow.id);
+    return existing.has_value() && is_restricted(existing->source);
+}
+
 ErrorOr<void> FlowStore::delete_flow(StringView id)
 {
     if (!is_valid_flow_id(id))

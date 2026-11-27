@@ -5,10 +5,10 @@ Connects the [`e2e`](https://github.com/e2e-inc/e2e) agentic testing framework t
 ## 1. Start Ladybird with MCP enabled
 
 ```powershell
-./Build/release/bin/Ladybird --mcp --mcp-token "my-local-dev-token"
+./Build/release/bin/Ladybird --mcp --mcp-allow-eval-js --mcp-token "my-local-dev-token"
 ```
 
-Default MCP endpoint when port is omitted: `http://127.0.0.1:7331/mcp`.
+Default MCP endpoint when port is omitted: `http://127.0.0.1:7331/mcp`. Note that `eval_js` starts **disabled by default** in Ladybird for prompt-injection hardening; `--mcp-allow-eval-js` is required because this adapter currently uses `eval_js` for `data-e2e-ref` stamping and DOM/action helpers.
 
 ## 2. Configure `e2e.config.ts`
 
@@ -32,5 +32,13 @@ export default {
   ],
 } satisfies E2EConfig;
 ```
+
+## 3. Running Adapter Tests
+
+```powershell
+node --test Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs
+```
+
+The protocol & mocked-MCP test runs out of the box; the second end-to-end integration test activates when `E2E_REPO_PATH` points to a built `e2e` checkout containing its compiled client/transport bundles.
 
 Alternatively, without `e2e`, open `about:flows` directly inside Ladybird or call Ladybird's native MCP flow tools (`list_flows`, `save_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`).

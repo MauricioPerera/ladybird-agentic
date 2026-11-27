@@ -579,6 +579,7 @@
                 return {
                     schema_version: 1,
                     id: "new-flow",
+                    source: "user",
                     name: "New Automation Flow",
                     description: "",
                     default_timeout_ms: 10000,
@@ -919,10 +920,19 @@
                     const name = document.createElement("span");
                     name.className = "flow-item-name";
                     name.textContent = flow.name;
+                    const metaRight = document.createElement("span");
+                    metaRight.style.display = "inline-flex";
+                    metaRight.style.alignItems = "center";
+                    metaRight.style.gap = "6px";
+                    const srcPill = document.createElement("span");
+                    srcPill.className = "pill";
+                    const src = flow.source || "unknown";
+                    srcPill.textContent = src === "mcp" ? "MCP" : (src.startsWith("extension:") ? `Ext: ${src.slice(10)}` : (src === "user" ? "User" : "Unknown"));
                     const count = document.createElement("span");
                     count.className = "flow-item-steps";
                     count.textContent = `${flow.steps.length} step${flow.steps.length === 1 ? "" : "s"}`;
-                    top.append(name, count);
+                    metaRight.append(srcPill, count);
+                    top.append(name, metaRight);
 
                     const idLine = document.createElement("div");
                     idLine.className = "flow-item-id";
@@ -1139,6 +1149,23 @@
             }
 
             function triggerRun(source) {
+                const savedFlow = state.flows.find(f => f.id === (source.flow?.id || source.flowId));
+                const targetFlow = source.flow || savedFlow || draft;
+                const savedSource = savedFlow?.source;
+                const draftSource = typeof targetFlow?.source === "string"
+                    && (targetFlow.source === "user" || targetFlow.source === "mcp" || targetFlow.source.startsWith("extension:"))
+                    ? targetFlow.source : "unknown";
+                const flowSource = savedSource === "mcp" || savedSource === "unknown" ? savedSource
+                    : draftSource === "mcp" || draftSource === "unknown" ? draftSource
+                    : savedSource || draftSource;
+                if (flowSource !== "user") {
+                    const label = targetFlow ? (targetFlow.name || targetFlow.id) : (source.flowId || "flow");
+                    const msg = flowSource === "mcp" || flowSource === "unknown"
+                        ? `The flow "${label}" has ${flowSource === "mcp" ? "MCP" : "unknown"} provenance and will run under MCP security policies. Continue?`
+                        : `The flow "${label}" was bundled by "${flowSource}". Continue executing?`;
+                    if (!window.confirm(msg))
+                        return;
+                }
                 const tabId = Number(document.getElementById("run-tab-select").value) || 0;
                 const payload = { ...source };
                 if (tabId > 0) payload.tabId = tabId;

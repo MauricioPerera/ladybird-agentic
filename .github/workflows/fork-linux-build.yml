@@ -19,8 +19,8 @@ on:
           - deb-only
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ladybird-linux-release
+  cancel-in-progress: false
 
 jobs:
   build-ubuntu-2404-x86_64:
@@ -28,9 +28,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     permissions:
-      contents: write
+      contents: read
 
     steps:
+      - name: Validate release version input
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.~-][0-9A-Za-z._-]+)?$ ]]; then
+            echo "Invalid version input: '$RELEASE_VERSION' (expected semver-like string such as 0.1.0-agentic)" >&2
+            exit 1
+          fi
+
       - name: Free runner disk space
         shell: bash
         run: |
@@ -40,6 +50,9 @@ jobs:
           df -h /
 
       - uses: actions/checkout@v7.0.1
+
+      - name: Test Linux release publishing
+        run: python3 -B Meta/test_publish_linux_release.py
 
       - name: Install Ubuntu 24.04 build dependencies
         shell: bash
@@ -183,7 +196,9 @@ jobs:
         if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'appimage-only' }}
         working-directory: ${{ github.workspace }}
         shell: bash
-        run: ./Meta/package-appimage.sh Build "${{ inputs.version }}" x86_64 Build/packages
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./Meta/package-appimage.sh Build "$RELEASE_VERSION" x86_64 Build/packages
 
       - name: Package DEB
         if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'deb-only' }}
@@ -193,29 +208,50 @@ jobs:
           cpack -G DEB -B packages \
             -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_SystemIntegration"
 
-      - name: Publish packages to GitHub Release
-        working-directory: ${{ github.workspace }}
+      - name: Generate SHA-256 checksums
+        working-directory: ${{ github.workspace }}/Build/packages
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: linux-ubuntu-2404-latest
         run: |
           shopt -s nullglob
-          assets=(Build/packages/*.AppImage Build/packages/*.deb)
+          assets=(*.AppImage *.deb)
           if [ ${#assets[@]} -eq 0 ]; then
             echo "No packaged assets found in Build/packages" >&2
             exit 1
           fi
-          ls -lh "${assets[@]}"
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-            gh release edit "$RELEASE_TAG" \
-              --title "Ladybird Linux Ubuntu 24.04 (${{ inputs.version }})" \
-              --notes "Automated Ubuntu 24.04 x86_64 Distribution build from commit \`${GITHUB_SHA}\` (workflow run ${GITHUB_RUN_ID}). Headless multi-tab MCP smoke test passed."
-          else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --prerelease \
-              --target "$GITHUB_SHA" \
-              --title "Ladybird Linux Ubuntu 24.04 (${{ inputs.version }})" \
-              --notes "Automated Ubuntu 24.04 x86_64 Distribution build from commit \`${GITHUB_SHA}\` (workflow run ${GITHUB_RUN_ID}). Headless multi-tab MCP smoke test passed."
-          fi
+          sha256sum "${assets[@]}" > SHA256SUMS-linux-ubuntu-2404.txt
+          cat SHA256SUMS-linux-ubuntu-2404.txt
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-ubuntu-2404-packages
+          path: |
+            Build/packages/*.AppImage
+            Build/packages/*.deb
+            Build/packages/SHA256SUMS-linux-ubuntu-2404.txt
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Ubuntu 24.04 Release
+    needs: build-ubuntu-2404-x86_64
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-ubuntu-2404-packages
+          path: packages
+
+      - name: Verify and publish Linux packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          PACKAGE_FORMAT: ${{ inputs.package_format }}
+        run: python3 Meta/publish-linux-release.py packages "$PACKAGE_FORMAT" "$RELEASE_VERSION"
