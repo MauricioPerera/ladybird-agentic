@@ -58,7 +58,7 @@ def github_json(endpoint):
         with urlopen(request, timeout=30) as response:
             return json.load(response)
     except HTTPError as error:
-        if error.code == 404:
+        if error.code == 404 or (error.code == 422 and "/commits/" in endpoint):
             return None
         raise
 

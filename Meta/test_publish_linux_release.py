@@ -5,10 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 
 SCRIPT = runpy.run_path(Path(__file__).with_name("publish-linux-release.py"))
 publish = SCRIPT["publish"]
+github_json = SCRIPT["github_json"]
 CHECKSUMS = SCRIPT["CHECKSUMS"]
 digest = SCRIPT["digest"]
 COMMIT = "a" * 40
@@ -73,6 +75,16 @@ class PublishLinuxReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different metadata or assets"):
                 self.release("deb-only", run_id="14")
             command.assert_not_called()
+
+    def test_missing_commit_ref_http_422_returns_none(self):
+        def raise_422(request, timeout=30):
+            raise HTTPError(request.full_url, 422, "Unprocessable Entity", hdrs=None, fp=None)
+
+        with patch.dict(github_json.__globals__, urlopen=raise_422), patch.dict("os.environ", {"GH_TOKEN": "token"}):
+            self.assertIsNone(github_json("repos/example/ladybird/commits/missing-tag"))
+            with self.assertRaises(HTTPError) as raised:
+                github_json("repos/example/ladybird/releases/tags/foo")
+            self.assertEqual(raised.exception.code, 422)
 
 
 if __name__ == "__main__":
