@@ -115,14 +115,7 @@ jobs:
               'oracle_sha256': {path: hashlib.sha256((root / path).read_bytes()).hexdigest()
                                 for path in paths},
           }
-          payload = json.dumps(receipt, indent=2) + '\n'
-          (Path(os.environ['RUNNER_TEMP']) / 'ladybird-e2e-ubuntu.json').write_text(payload, encoding='utf-8')
-          print(payload)
+          payload = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
+          print('KDD_LADYBIRD_UBUNTU_RECEIPT ' + payload)
+          print('KDD_LADYBIRD_UBUNTU_SHA256 ' + hashlib.sha256(payload.encode('utf-8')).hexdigest())
           PY
-      - name: Upload Ubuntu receipt
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: ladybird-e2e-ubuntu-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ladybird-e2e-ubuntu.json
-          if-no-files-found: error
-          retention-days: 14
