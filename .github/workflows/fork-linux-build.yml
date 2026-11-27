@@ -27,6 +27,8 @@ jobs:
     name: Ubuntu 24.04, x86_64, Distribution, Clang
     runs-on: ubuntu-24.04
     timeout-minutes: 355
+    permissions:
+      contents: write
 
     steps:
       - name: Free runner disk space
@@ -191,20 +193,29 @@ jobs:
           cpack -G DEB -B packages \
             -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_SystemIntegration"
 
-      - name: Upload AppImage artifact
-        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'appimage-only' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ladybird-linux-x86_64-appimage
-          path: Build/packages/*.AppImage
-          retention-days: 14
-          if-no-files-found: error
-
-      - name: Upload DEB artifact
-        if: ${{ inputs.package_format == 'appimage-and-deb' || inputs.package_format == 'deb-only' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ladybird-linux-x86_64-deb
-          path: Build/packages/*.deb
-          retention-days: 14
-          if-no-files-found: error
+      - name: Publish packages to GitHub Release
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: linux-ubuntu-2404-latest
+        run: |
+          shopt -s nullglob
+          assets=(Build/packages/*.AppImage Build/packages/*.deb)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "No packaged assets found in Build/packages" >&2
+            exit 1
+          fi
+          ls -lh "${assets[@]}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --title "Ladybird Linux Ubuntu 24.04 (${{ inputs.version }})" \
+              --notes "Automated Ubuntu 24.04 x86_64 Distribution build from commit \`${GITHUB_SHA}\` (workflow run ${GITHUB_RUN_ID}). Headless multi-tab MCP smoke test passed."
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Ladybird Linux Ubuntu 24.04 (${{ inputs.version }})" \
+              --notes "Automated Ubuntu 24.04 x86_64 Distribution build from commit \`${GITHUB_SHA}\` (workflow run ${GITHUB_RUN_ID}). Headless multi-tab MCP smoke test passed."
+          fi
