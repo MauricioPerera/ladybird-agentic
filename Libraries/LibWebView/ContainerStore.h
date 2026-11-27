@@ -26,8 +26,12 @@ struct TabContainer {
     bool operator==(TabContainer const&) const = default;
 };
 
+constexpr StringView EPHEMERAL_AGENT_CONTAINER_PREFIX = "agent-ephemeral-"sv;
+
 WEBVIEW_API bool is_valid_container_id(StringView id);
 WEBVIEW_API bool is_valid_container_color(StringView color);
+WEBVIEW_API bool is_ephemeral_container_id(StringView id);
+WEBVIEW_API bool is_agent_isolated_container_id(StringView id);
 WEBVIEW_API Vector<TabContainer> default_tab_containers();
 
 class ContainerStoreObserver;

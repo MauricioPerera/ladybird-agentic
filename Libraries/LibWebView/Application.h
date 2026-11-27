@@ -255,6 +255,7 @@ public:
     static NonnullRefPtr<BrowsingSession> session_for_new_view(IsPrivate, StringView container_id = {});
     static ContainerStore& container_store() { return *the().m_container_store; }
     ErrorOr<void> delete_container(StringView container_id);
+    ByteString const& instance_data_directory() const { return m_instance_data_directory; }
 
     // Whether the windows and tabs of this run are kept for the next one. A headless run, a browser that WebDriver drives,
     // and one that logs process statistics never join a browser already running on their profile, so they keep none.
@@ -740,7 +741,14 @@ private:
     // ^MCP::MCPDelegate
     virtual Vector<MCP::TabInfo> list_allowed_tabs() const override;
     virtual Optional<MCP::TabInfo> active_allowed_tab() const override;
+    virtual Vector<MCP::ContainerInfo> list_containers() const override;
+    virtual String active_profile_name() const override;
+    virtual Optional<String> active_ephemeral_container_id() const override;
+    virtual bool ephemeral_default_enabled() const override;
+    virtual void on_mcp_session_closed() override;
+    virtual void create_container_tool(String name, Optional<String> color, Optional<String> id, MCP::OnToolCallComplete) override;
     virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete) override;
+    virtual void migrate_tab_container(u64 tab_id, String target_container_id, bool activate, bool wait_for_load, bool close_source_tab, bool create_if_missing, Optional<String> target_name, Optional<String> target_color, MCP::OnToolCallComplete) override;
     virtual void switch_tab(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void close_tab(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::OnToolCallComplete) override;
@@ -897,11 +905,16 @@ private:
     u64 m_next_cross_process_id_namespace { 1 };
     Web::HTML::CrossProcessIdAllocator m_ui_process_cross_process_id_allocator;
 
+    String ensure_mcp_ephemeral_container_id() const;
+    bool destroy_ephemeral_container(StringView container_id);
+    void cleanup_unused_ephemeral_containers(Optional<u64> ignore_view_id = {});
+
     OwnPtr<DownloadStore> m_download_store;
     OwnPtr<ContainerStore> m_container_store;
     RefPtr<BrowsingSession> m_default_session;
     WeakPtr<BrowsingSession> m_private_session;
     HashMap<String, NonnullRefPtr<BrowsingSession>> m_container_sessions;
+    mutable Optional<String> m_mcp_ephemeral_container_id;
     HashMap<int, WeakPtr<BrowsingSession>> m_request_server_client_sessions;
 
     // The RequestServer clients of the UI process itself, which may use the cookies of any site.

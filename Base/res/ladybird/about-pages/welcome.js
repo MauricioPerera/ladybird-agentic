@@ -21,12 +21,47 @@ const defaultBrowserDescription = document.querySelector("#default-browser-descr
 const makeDefaultBrowser = document.querySelector("#make-default-browser");
 const saveStatus = document.querySelector("#save-status");
 
+const containersList = document.querySelector("#containers-list");
+const customContainerName = document.querySelector("#custom-container-name");
+const customContainerColor = document.querySelector("#custom-container-color");
+const createContainerBtn = document.querySelector("#create-container-btn");
+const containerStatus = document.querySelector("#container-status");
+
+const mcpStatusPill = document.querySelector("#mcp-status-pill");
+const enableMcpNow = document.querySelector("#enable-mcp-now");
+const enableMcpAutoStart = document.querySelector("#enable-mcp-auto-start");
+const mcpConfigBox = document.querySelector("#mcp-config-box");
+const mcpConfigPreview = document.querySelector("#mcp-config-preview");
+const copyMcpConfig = document.querySelector("#copy-mcp-config");
+const mcpActionStatus = document.querySelector("#mcp-action-status");
+const uploadDirInput = document.querySelector("#upload-dir-input");
+const uploadDirSave = document.querySelector("#upload-dir-save");
+const uploadDirReset = document.querySelector("#upload-dir-reset");
+const uploadDirOpen = document.querySelector("#upload-dir-open");
+const uploadDirStatus = document.querySelector("#upload-dir-status");
+const uaPresetSelect = document.querySelector("#ua-preset-select");
+
+const recMicrophone = document.querySelector("#rec-microphone");
+const recSystemAudio = document.querySelector("#rec-system-audio");
+const recShowCursor = document.querySelector("#rec-show-cursor");
+const recSpeakerTimeline = document.querySelector("#rec-speaker-timeline");
+const recFps = document.querySelector("#rec-fps");
+const recBatchDuration = document.querySelector("#rec-batch-duration");
+
+const BUILTIN_CONTAINERS = new Set(["personal", "work", "banking", "shopping", "agent"]);
+
 let settings;
 let engines;
 let features;
 let initialized = false;
 // Why the last attempt to make Ladybird the default browser failed, which is shown in place of the row's description.
 let defaultBrowserFailure = null;
+let uaPresetsRendered = false;
+
+function showInlineStatus(element, text) {
+    element.textContent = text || "";
+    element.classList.toggle("hidden", !text);
+}
 
 function setSearchEngineSettings(name, suggestions) {
     // NB: Keep our copy current, as the settings update for this change can arrive after the next one is made.
@@ -128,6 +163,88 @@ function updateUpdateChecks() {
     else enableUpdateChecks.closest(".switch-row").remove();
 }
 
+function updateContainers() {
+    const containers = Array.isArray(settings.containers) ? settings.containers : [];
+    containersList.replaceChildren();
+    for (const container of containers) {
+        const chip = document.createElement("span");
+        chip.className = "container-chip";
+
+        const dot = document.createElement("span");
+        dot.className = "container-dot";
+        dot.style.backgroundColor = container.color || "#3b82f6";
+
+        const label = document.createElement("span");
+        label.textContent = `${container.name} (${container.id})`;
+
+        chip.append(dot, label);
+        if (!BUILTIN_CONTAINERS.has(container.id)) {
+            const removeBtn = document.createElement("button");
+            removeBtn.type = "button";
+            removeBtn.className = "container-delete";
+            removeBtn.title = `Remove ${container.name}`;
+            removeBtn.textContent = "×";
+            removeBtn.addEventListener("click", () => {
+                if (!initialized) return;
+                showInlineStatus(containerStatus, "");
+                ladybird.sendMessage("deleteContainer", container.id);
+            });
+            chip.append(removeBtn);
+        }
+        containersList.append(chip);
+    }
+}
+
+function updateMcpSection() {
+    const mcp = settings.mcp || {};
+    const enabled = Boolean(mcp.enabled);
+    const port = mcp.port || 7331;
+    enableMcpNow.checked = enabled;
+    enableMcpAutoStart.checked = Boolean(mcp.autoStart);
+    mcpStatusPill.textContent = enabled ? `Listening on 127.0.0.1:${port}` : "Off";
+    mcpStatusPill.classList.toggle("pill-on", enabled);
+
+    const hasConfig = enabled && typeof mcp.configJson === "string" && mcp.configJson.length > 0;
+    mcpConfigBox.classList.toggle("hidden", !hasConfig);
+    mcpConfigPreview.textContent = hasConfig ? mcp.configJson : "";
+}
+
+function updateUploadDirectory() {
+    const overridden = Boolean(settings.uploadDirectoryOverriddenByCli);
+    if (document.activeElement !== uploadDirInput) {
+        uploadDirInput.value = settings.effectiveUploadDirectory || settings.defaultUploadDirectory || "";
+    }
+    uploadDirInput.disabled = overridden;
+    uploadDirSave.disabled = overridden;
+    uploadDirReset.disabled = overridden;
+    if (overridden)
+        showInlineStatus(uploadDirStatus, "Managed by --mcp-upload-dir for this session.");
+}
+
+function updateUserAgentPreset() {
+    if (!uaPresetsRendered) {
+        uaPresetsRendered = true;
+        const presets = Array.isArray(settings.availableUserAgentPresets) ? settings.availableUserAgentPresets : [];
+        for (const name of presets) {
+            const opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            uaPresetSelect.append(opt);
+        }
+    }
+    uaPresetSelect.value = settings.userAgentPreset || "";
+}
+
+function updateTabRecorder() {
+    const rec = settings.tabRecorder || {};
+    recMicrophone.checked = rec.recordMicrophone !== false;
+    recSystemAudio.checked = rec.recordSystemAudio !== false;
+    recShowCursor.checked = rec.showCursor !== false;
+    recSpeakerTimeline.checked = rec.exportSpeakerTimeline !== false;
+    recFps.value = String(rec.fps || 30);
+    recBatchDuration.value = String(rec.batchDurationSeconds || 300);
+}
+
 function initialize() {
     if (initialized || !settings || !engines || !features) return;
     initialized = true;
@@ -142,6 +259,12 @@ function initialize() {
 
     enableContentBlocking.checked = settings.contentBlockers.enabled;
     updateUpdateChecks();
+    updateContainers();
+    updateMcpSection();
+    updateUploadDirectory();
+    updateUserAgentPreset();
+    updateTabRecorder();
+
     setupOptions.disabled = false;
     startBrowsing.disabled = false;
 }
@@ -203,6 +326,107 @@ makeDefaultBrowser.addEventListener("click", () => {
     ladybird.sendMessage("makeDefaultBrowser");
 });
 
+createContainerBtn.addEventListener("click", () => {
+    if (!initialized) return;
+    const name = customContainerName.value.trim();
+    if (!name) {
+        showInlineStatus(containerStatus, "Enter a container name first.");
+        return;
+    }
+    showInlineStatus(containerStatus, "");
+    createContainerBtn.disabled = true;
+    ladybird.sendMessage("createContainer", {
+        name,
+        color: customContainerColor.value,
+    });
+});
+
+customContainerName.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+        event.preventDefault();
+        createContainerBtn.click();
+    }
+});
+
+enableMcpNow.addEventListener("change", () => {
+    if (!initialized) return;
+    showInlineStatus(mcpActionStatus, "");
+    ladybird.sendMessage("setMcpEnabled", enableMcpNow.checked);
+});
+
+enableMcpAutoStart.addEventListener("change", () => {
+    if (!initialized) return;
+    ladybird.sendMessage("setMcpAutoStart", enableMcpAutoStart.checked);
+});
+
+copyMcpConfig.addEventListener("click", async () => {
+    const text = mcpConfigPreview.textContent;
+    if (!text) return;
+    let copied = false;
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+        }
+    } catch {
+        copied = false;
+    }
+    if (!copied) {
+        const tmp = document.createElement("textarea");
+        tmp.value = text;
+        tmp.style.position = "fixed";
+        tmp.style.opacity = "0";
+        document.body.append(tmp);
+        tmp.select();
+        copied = document.execCommand("copy");
+        tmp.remove();
+    }
+    copyMcpConfig.textContent = copied ? "Copied!" : "Copy failed";
+    setTimeout(() => {
+        copyMcpConfig.textContent = "Copy Config";
+    }, 1500);
+});
+
+uploadDirSave.addEventListener("click", () => {
+    if (!initialized) return;
+    showInlineStatus(uploadDirStatus, "");
+    ladybird.sendMessage("setUploadDirectory", uploadDirInput.value);
+});
+
+uploadDirReset.addEventListener("click", () => {
+    if (!initialized) return;
+    showInlineStatus(uploadDirStatus, "");
+    uploadDirInput.value = "";
+    ladybird.sendMessage("setUploadDirectory", "");
+});
+
+uploadDirOpen.addEventListener("click", () => {
+    if (!initialized) return;
+    ladybird.sendMessage("openUploadDirectory");
+});
+
+uaPresetSelect.addEventListener("change", () => {
+    if (!initialized) return;
+    ladybird.sendMessage("setUserAgentPreset", uaPresetSelect.value);
+});
+
+function sendTabRecorderPatch(patch) {
+    if (!initialized) return;
+    settings.tabRecorder = { ...settings.tabRecorder, ...patch };
+    ladybird.sendMessage("setTabRecorderSettings", patch);
+}
+
+recMicrophone.addEventListener("change", () => sendTabRecorderPatch({ recordMicrophone: recMicrophone.checked }));
+recSystemAudio.addEventListener("change", () => sendTabRecorderPatch({ recordSystemAudio: recSystemAudio.checked }));
+recShowCursor.addEventListener("change", () => sendTabRecorderPatch({ showCursor: recShowCursor.checked }));
+recSpeakerTimeline.addEventListener("change", () =>
+    sendTabRecorderPatch({ exportSpeakerTimeline: recSpeakerTimeline.checked })
+);
+recFps.addEventListener("change", () => sendTabRecorderPatch({ fps: Number(recFps.value) }));
+recBatchDuration.addEventListener("change", () =>
+    sendTabRecorderPatch({ batchDurationSeconds: Number(recBatchDuration.value) })
+);
+
 form.addEventListener("submit", event => {
     event.preventDefault();
     if (!initialized || startBrowsing.disabled) return;
@@ -240,6 +464,17 @@ document.addEventListener("WebUIMessage", event => {
                 defaultBrowserFailure = null;
                 updateDefaultBrowser();
             }
+            if (Object.hasOwn(data, "containers")) updateContainers();
+            if (Object.hasOwn(data, "mcp")) updateMcpSection();
+            if (
+                Object.hasOwn(data, "uploadDirectory") ||
+                Object.hasOwn(data, "effectiveUploadDirectory") ||
+                Object.hasOwn(data, "uploadDirectoryOverriddenByCli")
+            ) {
+                updateUploadDirectory();
+            }
+            if (Object.hasOwn(data, "userAgentPreset")) updateUserAgentPreset();
+            if (Object.hasOwn(data, "tabRecorder")) updateTabRecorder();
         }
     } else if (name === "loadEngines") {
         engines = data;
@@ -249,6 +484,18 @@ document.addEventListener("WebUIMessage", event => {
         makeDefaultBrowser.disabled = false;
         defaultBrowserFailure = data;
         updateDefaultBrowser();
+    } else if (name === "containerActionResult") {
+        createContainerBtn.disabled = false;
+        if (data?.ok) {
+            if (data.container) customContainerName.value = "";
+            showInlineStatus(containerStatus, "");
+        } else {
+            showInlineStatus(containerStatus, data?.error || "Container update failed.");
+        }
+    } else if (name === "mcpActionResult") {
+        showInlineStatus(mcpActionStatus, data?.ok ? "" : data?.error || "MCP action failed.");
+    } else if (name === "uploadDirectoryStatus") {
+        showInlineStatus(uploadDirStatus, data || "");
     } else if (name === "firstRunCompleted") {
         location.replace(data);
     } else if (name === "firstRunError") {

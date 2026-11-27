@@ -261,6 +261,10 @@ Application::~Application()
     m_vault_store.clear();
     m_mcp_secret_tainted_views.clear();
     m_mcp_active_secrets.clear();
+    m_mcp_ephemeral_container_id.clear();
+    m_container_sessions.remove_all_matching([](auto const& key, auto const&) {
+        return is_ephemeral_container_id(key);
+    });
     m_flow_runner.clear();
     m_flow_store.clear();
     m_headless_state.clear();
@@ -1407,6 +1411,20 @@ NonnullRefPtr<BrowsingSession> Application::session_for_new_view(IsPrivate is_pr
 
     auto id = MUST(String::from_utf8(container_id));
     auto session = BrowsingSession::create(IsPrivate::No, id);
+
+    if (is_ephemeral_container_id(container_id)) {
+        session->cookie_jar = CookieJar::create();
+        session->hsts_store = HSTSStore::create();
+        session->storage_jar = StorageJar::create();
+        session->blob_url_store = make<BlobURLStore>();
+        session->permission_manager = PermissionManager::create_for_private_session(*the().m_default_session->permission_manager);
+        session->permission_manager->register_observer(*the().m_permission_manager_observer);
+        session->permission_manager->on_deadlines_changed = [] { the().schedule_permission_expiry(); };
+
+        the().m_container_sessions.set(id, session);
+        return session;
+    }
+
     auto container_data_dir = LexicalPath::join(profile().paths().data, "Containers"sv, container_id).string();
 
     bool opened_persisted = false;
@@ -2245,7 +2263,13 @@ ErrorOr<void> Application::launch_services()
         });
     }
 
-    if (m_browser_options.mcp_port.has_value()) {
+    bool should_auto_start_mcp = !m_browser_options.headless_mode.has_value()
+        && m_web_content_options.is_test_mode == IsTestMode::No
+        && !m_browser_options.webdriver_browser_endpoint.has_value()
+        && m_settings
+        && m_settings->mcp_auto_start();
+
+    if (m_browser_options.mcp_port.has_value() || should_auto_start_mcp) {
         // Defer launching MCP until the entire application is initialized.
         Core::deferred_invoke([this]() {
             if (auto result = launch_mcp_server(); result.is_error())
@@ -5044,6 +5068,10 @@ ErrorOr<void> Application::toggle_mcp_enabled()
         m_mcp_egress_tainted = false;
         m_mcp_egress_source_origins.clear();
         m_mcp_egress_allowed_origins.clear();
+        m_mcp_ephemeral_container_id.clear();
+        m_container_sessions.remove_all_matching([](auto const& key, auto const&) {
+            return is_ephemeral_container_id(key);
+        });
         if (m_mcp_paused) {
             m_mcp_paused = false;
             on_mcp_paused_changed(false);
@@ -5161,7 +5189,7 @@ void Application::clear_mcp_audit_log()
 
 void Application::record_mcp_sensitive_read(ViewImplementation const& view)
 {
-    if (view.container_id() == "agent"sv)
+    if (is_agent_isolated_container_id(view.container_id()))
         return;
     if (!view.url().scheme().is_one_of("http"sv, "https"sv) || view.url().origin().is_opaque())
         return;
@@ -5476,6 +5504,10 @@ void Application::did_close_mcp_view(u64 view_id)
     m_mcp_console_logs.remove(view_id);
     m_mcp_network_requests.remove(view_id);
     m_mcp_notifications.remove_all_matching([view_id](auto const& entry) { return entry.tab_id == view_id; });
+    Core::deferred_invoke([this] {
+        if (Application::is_initialized())
+            cleanup_unused_ephemeral_containers();
+    });
 }
 
 void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
@@ -5704,6 +5736,8 @@ void Application::wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete o
             result.set("tab_id"sv, allowed_view->view_id());
             result.set("url"sv, allowed_view->url().to_string());
             result.set("title"sv, allowed_view->title().to_well_formed_utf8());
+            result.set("container_id"sv, allowed_view->container_id());
+            result.set("ephemeral"sv, is_ephemeral_container_id(allowed_view->container_id()));
             result.set("is_loading"sv, allowed_view->is_loading());
             if (auto hints = matching_skills_json_for_url(allowed_view->url()); !hints.is_empty())
                 result.set("matching_skills"sv, move(hints));
@@ -5792,6 +5826,7 @@ SkillStore& Application::skill_store()
         auto base_dir = m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory;
         auto skills_dir = LexicalPath::join(base_dir, "skills"sv).string();
         m_skill_store = make<SkillStore>(move(skills_dir));
+        m_skill_store->ensure_builtin_skills();
     }
     return *m_skill_store;
 }
@@ -5952,10 +5987,14 @@ Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::Activa
         auto const& policy = mcp_security_policy();
         if (list_allowed_tabs().size() >= policy.max_tabs)
             return {};
-        auto container_or_error = mcp_resolve_container_against_policy(OptionalNone {}, policy);
-        if (container_or_error.is_error())
-            return {};
-        resolved_container = container_or_error.release_value();
+        if (policy.allowed_containers.is_empty()) {
+            resolved_container = ensure_mcp_ephemeral_container_id();
+        } else {
+            auto container_or_error = mcp_resolve_container_against_policy(OptionalNone {}, policy);
+            if (container_or_error.is_error())
+                return {};
+            resolved_container = container_or_error.release_value();
+        }
     }
 
     auto access_mode = require_mcp_permission ? MCPAccessMode::Full : MCPAccessMode::Blocked;
@@ -6084,6 +6123,159 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     return info;
 }
 
+String Application::active_profile_name() const
+{
+    if (!m_profile.has_value())
+        return {};
+    return String::from_utf8_with_replacement_character(m_profile->identifier());
+}
+
+Optional<String> Application::active_ephemeral_container_id() const
+{
+    return m_mcp_ephemeral_container_id;
+}
+
+bool Application::ephemeral_default_enabled() const
+{
+    return mcp_security_policy().allowed_containers.is_empty();
+}
+
+String Application::ensure_mcp_ephemeral_container_id() const
+{
+    if (m_mcp_ephemeral_container_id.has_value() && is_ephemeral_container_id(*m_mcp_ephemeral_container_id))
+        return *m_mcp_ephemeral_container_id;
+
+    Array<u8, 6> random_bytes;
+    fill_with_random(random_bytes);
+    auto id = MUST(String::formatted("{}{}", EPHEMERAL_AGENT_CONTAINER_PREFIX, encode_hex(random_bytes)));
+    m_mcp_ephemeral_container_id = id;
+    return id;
+}
+
+bool Application::destroy_ephemeral_container(StringView container_id)
+{
+    if (!is_ephemeral_container_id(container_id))
+        return false;
+
+    bool destroyed = false;
+    if (auto taken = m_container_sessions.take(container_id); taken.has_value()) {
+        auto earliest = UnixDateTime::earliest();
+        if (taken.value()->cookie_jar)
+            taken.value()->cookie_jar->expire_cookies_accessed_since(earliest);
+        if (taken.value()->storage_jar)
+            taken.value()->storage_jar->remove_items_accessed_since(earliest);
+        if (taken.value()->hsts_store)
+            taken.value()->hsts_store->remove_policies_observed_since(earliest);
+        destroyed = true;
+    }
+    if (m_mcp_ephemeral_container_id.has_value() && *m_mcp_ephemeral_container_id == container_id) {
+        m_mcp_ephemeral_container_id.clear();
+        destroyed = true;
+    }
+    return destroyed;
+}
+
+void Application::cleanup_unused_ephemeral_containers(Optional<u64> ignore_view_id)
+{
+    HashTable<String> active_ephemerals;
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (ignore_view_id.has_value() && view.view_id() == *ignore_view_id)
+            return IterationDecision::Continue;
+        if (is_ephemeral_container_id(view.container_id()))
+            active_ephemerals.set(view.container_id());
+        return IterationDecision::Continue;
+    });
+
+    Vector<String> to_destroy;
+    for (auto const& [container_id, _] : m_container_sessions) {
+        if (is_ephemeral_container_id(container_id) && !active_ephemerals.contains(container_id))
+            to_destroy.append(container_id);
+    }
+    if (m_mcp_ephemeral_container_id.has_value() && !active_ephemerals.contains(*m_mcp_ephemeral_container_id))
+        to_destroy.append(*m_mcp_ephemeral_container_id);
+
+    for (auto const& container_id : to_destroy)
+        destroy_ephemeral_container(container_id);
+}
+
+void Application::on_mcp_session_closed()
+{
+    cleanup_unused_ephemeral_containers();
+    m_mcp_ephemeral_container_id.clear();
+}
+
+Vector<MCP::ContainerInfo> Application::list_containers() const
+{
+    auto policy = mcp_security_policy();
+    auto default_container = policy.allowed_containers.is_empty()
+        ? m_mcp_ephemeral_container_id.value_or("agent"_string)
+        : mcp_resolve_container_against_policy(OptionalNone {}, policy).value_or("agent"_string);
+
+    Vector<MCP::ContainerInfo> containers;
+    auto append_container = [&](String id, String name, String color, bool is_ephemeral) {
+        auto policy_id = is_ephemeral ? "agent"sv : id.bytes_as_string_view();
+        if (!policy.allowed_containers.is_empty() && !mcp_container_is_allowed_by_policy(policy_id, policy))
+            return;
+        auto is_default = id == default_container;
+        containers.append({
+            .id = move(id),
+            .name = move(name),
+            .color = move(color),
+            .is_default_mcp = is_default,
+            .mcp_allowed = true,
+            .ephemeral = is_ephemeral,
+        });
+    };
+
+    if (m_mcp_ephemeral_container_id.has_value())
+        append_container(*m_mcp_ephemeral_container_id, "Agent (Ephemeral)"_string, "#a855f7"_string, true);
+    append_container("agent"_string, "Agent"_string, "#6366f1"_string, false);
+    if (m_container_store) {
+        for (auto const& container : m_container_store->list_containers()) {
+            if (container.id == "agent"sv)
+                continue;
+            append_container(container.id, container.name, container.color, false);
+        }
+    }
+    return containers;
+}
+
+void Application::create_container_tool(String name, Optional<String> color, Optional<String> id, MCP::OnToolCallComplete on_complete)
+{
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
+    if (!m_container_store) {
+        on_complete(mcp_error_result("Container store is unavailable"sv));
+        return;
+    }
+    auto policy = mcp_security_policy();
+    if (!policy.allowed_containers.is_empty()) {
+        if (!id.has_value() || !mcp_container_is_allowed_by_policy(*id, policy)) {
+            on_complete(mcp_error_result("Creating custom containers rejected by MCP container isolation policy (--mcp-allowed-containers)"sv));
+            return;
+        }
+    }
+
+    auto created = m_container_store->create_container(move(name), color.value_or("#3b82f6"_string), move(id));
+    if (created.is_error()) {
+        on_complete(mcp_error_result(created.error().string_literal()));
+        return;
+    }
+
+    JsonObject container_obj;
+    container_obj.set("id"sv, created.value().id);
+    container_obj.set("name"sv, created.value().name);
+    container_obj.set("color"sv, created.value().color);
+    container_obj.set("ephemeral"sv, false);
+
+    JsonObject payload;
+    payload.set("created"sv, true);
+    payload.set("container"sv, move(container_obj));
+    on_complete(mcp_ok_json(JsonValue { move(payload) }));
+}
+
 void Application::open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete on_complete)
 {
     if (m_mcp_paused) {
@@ -6114,8 +6306,25 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         on_complete(mcp_error_result("Invalid container_id (expected lowercase alphanumeric, '-' or '_')"sv));
         return;
     }
+    if (container_id.has_value()
+        && container_id->bytes_as_string_view().starts_with(EPHEMERAL_AGENT_CONTAINER_PREFIX)
+        && (!m_mcp_ephemeral_container_id.has_value() || *container_id != *m_mcp_ephemeral_container_id)) {
+        on_complete(mcp_error_result("Container ID prefix 'agent-ephemeral-' is reserved (omit container_id or pass 'ephemeral')"sv));
+        return;
+    }
 
-    auto resolved_container = mcp_resolve_container_against_policy(container_id, policy);
+    ErrorOr<String> resolved_container = String {};
+    bool use_ephemeral_default = !container_id.has_value() || container_id->is_empty();
+    bool requested_ephemeral = container_id.has_value() && *container_id == "ephemeral"sv;
+    if ((use_ephemeral_default && policy.allowed_containers.is_empty())
+        || (requested_ephemeral && (policy.allowed_containers.is_empty() || mcp_container_is_allowed_by_policy("agent"sv, policy)))) {
+        resolved_container = ensure_mcp_ephemeral_container_id();
+    } else if (requested_ephemeral) {
+        resolved_container = Error::from_string_literal("Ephemeral container rejected by MCP container isolation policy (--mcp-allowed-containers)");
+    } else {
+        resolved_container = mcp_resolve_container_against_policy(container_id, policy);
+    }
+
     if (resolved_container.is_error()) {
         on_complete(mcp_error_result(resolved_container.error().string_literal()));
         return;
@@ -6140,6 +6349,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
             result.set("url"sv, view->url().to_string());
             result.set("title"sv, sanitize_mcp_untrusted_text(view->title().to_well_formed_utf8()).text);
             result.set("container_id"sv, view->container_id());
+            result.set("ephemeral"sv, is_ephemeral_container_id(view->container_id()));
             result.set("mcp_access_allowed"sv, true);
             result.set("mcp_access_mode"sv, "full"sv);
             cb(mcp_ok_json(JsonValue { move(result) }));
@@ -6157,6 +6367,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         result.set("tab_id"sv, view->view_id());
         result.set("url"sv, parsed_url->to_string());
         result.set("container_id"sv, view->container_id());
+        result.set("ephemeral"sv, is_ephemeral_container_id(view->container_id()));
         result.set("mcp_access_allowed"sv, true);
         result.set("mcp_access_mode"sv, "full"sv);
         result.set("is_loading"sv, true);
@@ -6228,6 +6439,187 @@ void Application::close_tab(u64 tab_id, MCP::OnToolCallComplete on_complete)
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
+void Application::migrate_tab_container(u64 tab_id, String target_container_id, bool activate, bool wait_for_load, bool close_source_tab, bool create_if_missing, Optional<String> target_name, Optional<String> target_color, MCP::OnToolCallComplete on_complete)
+{
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
+    if (auto err = check_mcp_mutation_allowed(tab_id, "migrate tab container"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
+        return;
+    }
+    auto source_view = find_allowed_mcp_view(tab_id);
+    if (!source_view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+
+    auto policy = mcp_security_policy();
+    if (!close_source_tab && list_allowed_tabs().size() >= policy.max_tabs) {
+        on_complete(mcp_error_result("Maximum concurrent MCP tabs limit reached (--mcp-max-tabs)"sv));
+        return;
+    }
+
+    auto source_url = source_view->url();
+    auto source_container = source_view->container_id();
+    if (source_url != URL::about_blank()) {
+        if (auto url_check = validate_mcp_url(source_url.to_string()); url_check.is_error()) {
+            on_complete(mcp_error_result("Source tab URL is not eligible for MCP migration (expected http:, https:, or about:blank)"sv));
+            return;
+        }
+        if (auto policy_check = mcp_validate_url_against_policy(source_url, policy); policy_check.is_error()) {
+            on_complete(mcp_error_result(policy_check.error().string_literal()));
+            return;
+        }
+    }
+
+    if (!is_valid_container_id(target_container_id)) {
+        on_complete(mcp_error_result("Invalid target_container_id (expected lowercase alphanumeric, '-' or '_')"sv));
+        return;
+    }
+    if (target_container_id.bytes_as_string_view().starts_with(EPHEMERAL_AGENT_CONTAINER_PREFIX)
+        && (!m_mcp_ephemeral_container_id.has_value() || target_container_id != *m_mcp_ephemeral_container_id)) {
+        on_complete(mcp_error_result("Container ID prefix 'agent-ephemeral-' is reserved (pass 'ephemeral' instead)"sv));
+        return;
+    }
+
+    ErrorOr<String> resolved_target = String {};
+    if (target_container_id == "ephemeral"sv) {
+        if (policy.allowed_containers.is_empty() || mcp_container_is_allowed_by_policy("agent"sv, policy))
+            resolved_target = ensure_mcp_ephemeral_container_id();
+        else
+            resolved_target = Error::from_string_literal("Ephemeral container rejected by MCP container isolation policy (--mcp-allowed-containers)");
+    } else {
+        resolved_target = mcp_resolve_container_against_policy(target_container_id, policy);
+    }
+    if (resolved_target.is_error()) {
+        on_complete(mcp_error_result(resolved_target.error().string_literal()));
+        return;
+    }
+
+    auto target_id = resolved_target.release_value();
+    if (target_id != "agent"sv && !is_ephemeral_container_id(target_id)) {
+        bool exists = m_container_store && m_container_store->get_container(target_id).has_value();
+        if (!exists) {
+            if (!create_if_missing) {
+                on_complete(mcp_error_result("Target container does not exist (call list_containers, create_container, or pass create_if_missing: true)"sv));
+                return;
+            }
+            if (!m_container_store) {
+                on_complete(mcp_error_result("Container store is unavailable"sv));
+                return;
+            }
+            auto created = m_container_store->create_container(target_name.value_or(target_id), target_color.value_or("#3b82f6"_string), target_id);
+            if (created.is_error()) {
+                on_complete(mcp_error_result(created.error().string_literal()));
+                return;
+            }
+        }
+    }
+
+    auto perform_migrate = [this, tab_id, source_url, source_container, target_id, activate, wait_for_load, close_source_tab](MCP::OnToolCallComplete cb) mutable {
+        if (m_mcp_paused) {
+            cb(mcp_error_result("MCP automation is currently paused by the user"sv));
+            return;
+        }
+        auto cur_source = find_allowed_mcp_view(tab_id);
+        if (!cur_source.has_value()) {
+            cb(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        auto source_access_mode = cur_source->mcp_access_mode();
+        auto new_view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, source_access_mode, target_id);
+        if (!new_view.has_value() || new_view->is_private() == IsPrivate::Yes) {
+            cb(mcp_error_result("UI unavailable to open migrated tab"sv));
+            return;
+        }
+
+        new_view->set_mcp_access_mode(source_access_mode);
+        auto new_tab_id = new_view->view_id();
+
+        bool ephemeral_destroyed = false;
+        if (close_source_tab) {
+            cur_source->force_close();
+            if (target_id != source_container && is_ephemeral_container_id(source_container)) {
+                bool still_used = false;
+                ViewImplementation::for_each_view([&](ViewImplementation& view) {
+                    if (view.view_id() == tab_id)
+                        return IterationDecision::Continue;
+                    if (view.container_id() == source_container) {
+                        still_used = true;
+                        return IterationDecision::Break;
+                    }
+                    return IterationDecision::Continue;
+                });
+                if (!still_used)
+                    ephemeral_destroyed = destroy_ephemeral_container(source_container);
+            }
+        }
+
+        auto merge_migration_fields = [tab_id, new_tab_id, source_container, target_id, source_access_mode, close_source_tab, ephemeral_destroyed](JsonObject& obj) {
+            obj.set("migrated"sv, true);
+            obj.set("old_tab_id"sv, tab_id);
+            obj.set("new_tab_id"sv, new_tab_id);
+            obj.set("tab_id"sv, new_tab_id);
+            obj.set("from_container_id"sv, source_container);
+            obj.set("container_id"sv, target_id);
+            obj.set("ephemeral"sv, is_ephemeral_container_id(target_id));
+            obj.set("mcp_access_mode"sv, mcp_access_mode_name(source_access_mode));
+            obj.set("source_tab_closed"sv, close_source_tab);
+            obj.set("ephemeral_destroyed"sv, ephemeral_destroyed);
+        };
+
+        if (source_url == URL::about_blank() || !wait_for_load) {
+            if (source_url != URL::about_blank())
+                new_view->load_from_browser_ui(source_url);
+            JsonObject result;
+            merge_migration_fields(result);
+            result.set("url"sv, source_url.to_string());
+            result.set("title"sv, sanitize_mcp_untrusted_text(new_view->title().to_well_formed_utf8()).text);
+            result.set("is_loading"sv, source_url != URL::about_blank());
+            cb(mcp_ok_json(JsonValue { move(result) }));
+            return;
+        }
+
+        wait_for_mcp_navigation(new_tab_id, [cb = move(cb), merge_migration_fields = move(merge_migration_fields)](MCP::ToolCallResult nav_res) mutable {
+            if (nav_res.is_error) {
+                cb(move(nav_res));
+                return;
+            }
+            auto parsed = JsonValue::from_string(nav_res.text);
+            if (!parsed.is_error() && parsed.value().is_object()) {
+                auto obj = parsed.value().as_object();
+                merge_migration_fields(obj);
+                nav_res.text = JsonValue { move(obj) }.serialized();
+            }
+            cb(move(nav_res));
+        });
+        new_view->load_from_browser_ui(source_url);
+    };
+
+    if (source_url != URL::about_blank() && mcp_egress_requires_approval(source_url)) {
+        auto target_origin = source_url.origin().serialize();
+        auto summary = MUST(String::formatted("Migrate tab {} ({}) to container '{}'", tab_id, target_origin, target_id));
+        auto details = MUST(String::formatted("Source Container: {}\nTarget Container: {}\nURL: {}\nNote: A sensitive non-'agent' tab was read in this MCP session. Approve migrating this tab?", source_container, target_id, source_url.to_string()));
+        request_mcp_user_approval(tab_id, "egress_migrate_tab"_string, move(summary), move(details), [this, source_url, perform_migrate = move(perform_migrate), on_complete = move(on_complete)](bool approved) mutable {
+            if (m_mcp_paused) {
+                on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+                return;
+            }
+            if (!approved) {
+                on_complete(mcp_error_result("Container migration rejected by egress guard (sensitive non-'agent' tab was read in this session)"sv));
+                return;
+            }
+            approve_mcp_egress_origin(source_url);
+            perform_migrate(move(on_complete));
+        });
+        return;
+    }
+
+    perform_migrate(move(on_complete));
+}
+
 void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::OnToolCallComplete on_complete)
 {
     auto view = find_allowed_mcp_view(tab_id);
@@ -6280,7 +6672,7 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
 
     bool needs_egress_approval = mcp_egress_requires_approval(parsed_url, view->url());
     bool needs_cross_origin_approval = !needs_egress_approval
-        && view->container_id() != "agent"sv
+        && !is_agent_isolated_container_id(view->container_id())
         && view->url().scheme().is_one_of("http"sv, "https"sv)
         && parsed_url.scheme().is_one_of("http"sv, "https"sv)
         && !parsed_url.origin().is_same_origin(view->url().origin())

@@ -57,6 +57,7 @@ private:
     virtual void global_privacy_control_changed() override { broadcast_settings_change(); }
     virtual void user_agent_preset_changed() override { broadcast_settings_change(); }
     virtual void upload_directory_changed() override { broadcast_settings_change(); }
+    virtual void mcp_auto_start_changed() override { broadcast_settings_change(); }
     virtual void crash_report_sending_changed() override { broadcast_settings_change(); }
     virtual void crash_reports_changed() override;
     virtual void dns_settings_changed() override { broadcast_settings_change(); }
@@ -103,6 +104,11 @@ private:
     void set_user_agent_preset(JsonValue const&);
     void set_upload_directory(JsonValue const&);
     void open_upload_directory(JsonValue const&);
+    void set_mcp_auto_start(JsonValue const&);
+    void set_mcp_enabled(JsonValue const&);
+    void create_container(JsonValue const&);
+    void delete_container(JsonValue const&);
+    void set_tab_recorder_settings(JsonValue const&);
     void set_crash_report_sending(JsonValue const&);
 
     void set_services_network_access_enabled(JsonValue const&);

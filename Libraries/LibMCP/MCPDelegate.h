@@ -40,6 +40,15 @@ struct TabInfo {
     Vector<CredentialMatchHint> matching_credentials {};
 };
 
+struct ContainerInfo {
+    String id {};
+    String name {};
+    String color {};
+    bool is_default_mcp { false };
+    bool mcp_allowed { true };
+    bool ephemeral { false };
+};
+
 struct ToolCallResult {
     bool is_error { false };
     String text {};
@@ -62,8 +71,15 @@ public:
 
     virtual Vector<TabInfo> list_allowed_tabs() const = 0;
     virtual Optional<TabInfo> active_allowed_tab() const = 0;
+    virtual Vector<ContainerInfo> list_containers() const = 0;
+    virtual String active_profile_name() const { return {}; }
+    virtual Optional<String> active_ephemeral_container_id() const { return {}; }
+    virtual bool ephemeral_default_enabled() const { return true; }
+    virtual void on_mcp_session_closed() { }
+    virtual void create_container_tool(String name, Optional<String> color, Optional<String> id, OnToolCallComplete) = 0;
 
     virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, OnToolCallComplete) = 0;
+    virtual void migrate_tab_container(u64 tab_id, String target_container_id, bool activate, bool wait_for_load, bool close_source_tab, bool create_if_missing, Optional<String> target_name, Optional<String> target_color, OnToolCallComplete) = 0;
     virtual void switch_tab(u64 tab_id, OnToolCallComplete) = 0;
     virtual void close_tab(u64 tab_id, OnToolCallComplete) = 0;
     virtual void navigate_tab(u64 tab_id, String url, bool wait_for_load, OnToolCallComplete) = 0;

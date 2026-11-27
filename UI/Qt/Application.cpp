@@ -1881,6 +1881,15 @@ Optional<Hub::TabContainerInfo> Application::find_container(StringView id) const
         if (container.id == id)
             return container;
     }
+    if (WebView::is_ephemeral_container_id(id)) {
+        if (auto ak_id = String::from_utf8(id); !ak_id.is_error()) {
+            return Hub::TabContainerInfo {
+                .id = ak_id.release_value(),
+                .name = "Ephemeral"_string,
+                .color = "#a855f7"_string,
+            };
+        }
+    }
     return {};
 }
 

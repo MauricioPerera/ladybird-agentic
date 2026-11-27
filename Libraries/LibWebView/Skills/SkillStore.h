@@ -37,6 +37,7 @@ public:
     ~SkillStore();
 
     void reload();
+    void ensure_builtin_skills();
 
     Vector<SkillDefinition> list_skills(bool include_disabled = false) const;
     Vector<SkillDefinition> matching_skills_for_url(URL::URL const& url) const;

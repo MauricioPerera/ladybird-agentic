@@ -12,7 +12,7 @@
 | [`Forward.h`](Forward.h) | Forward declarations (`MCPServer`, `MCPDelegate`, `TabInfo`, `ToolCallResult`) |
 | [`MCPDelegate.h`](MCPDelegate.h) | Pure-virtual delegate interface (`TabInfo`, `SkillMatchHint`, `CredentialMatchHint`, `ProtocolCallResult`, `OnProtocolCallComplete`) bridging `MCPServer` requests to `WebView::Application` |
 | [`MCPServer.h`](MCPServer.h) | Public server lifecycle and notification broadcast helpers (`create`, `local_port`, `auth_token`, `session_id`, `broadcast_notification`, `notify_resource_updated`, `close_all_sse_streams`, `sse_client_count`) |
-| [`MCPServer.cpp`](MCPServer.cpp) | Loopback TCP listener, HTTP + SSE (`GET /mcp`) transport/validation, JSON-RPC 2.0 + SEP-2640 + resource subscription router, schema definitions for 55 tools |
+| [`MCPServer.cpp`](MCPServer.cpp) | Loopback TCP listener, HTTP + SSE (`GET /mcp`) transport/validation, JSON-RPC 2.0 + SEP-2640 + resource subscription router, schema definitions for 58 tools |
 | [`CMakeLists.txt`](CMakeLists.txt) | Builds `LibMCP` linking `PRIVATE` targets `LibCore`, `LibHTTP`, and `LibURL` |
 
 ## 2. Quickstart
@@ -38,15 +38,15 @@
    {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
    ```
 
-## 3. Transport, Authentication, and Protocol (`55` Tools + `9` Protocol Methods + SSE)
+## 3. Transport, Authentication, and Protocol (`58` Tools + `9` Protocol Methods + SSE)
 
 - **Endpoint & JSON-RPC 2.0 (`MCPServer::Connection`)**: Serves `POST /mcp` (`Content-Type: application/json`), persistent `GET /mcp` SSE streams (`Accept: text/event-stream`, returning `200 text/event-stream; charset=utf-8`, `Cache-Control: no-cache`, `Connection: keep-alive`, `: connected\n\n`, and `25 s` `: keepalive\n\n`; missing `Accept` returns `406 Not Acceptable`), and `DELETE /mcp` (closes active SSE streams, clears subscriptions, returns `200 {"ok":true}`); non-`/mcp` paths return `404`; other HTTP methods return `405` (`Allow: GET, POST, DELETE`). `initialize` negotiates `protocolVersion` `"2025-03-26"` or `"2026-07-28"` (with `tools.listChanged: false`, `resources.subscribe: true`, `resources.listChanged: false`, `logging: {}`, and `extensions["io.modelcontextprotocol/skills"].directoryRead: true`), returns `instructions`, and sets header `Mcp-Session-Id: <uuid>`. Notifications (no `"id"`) return `202 Accepted`; `"id": null` returns JSON-RPC error `-32600` (`Invalid Request`).
 - **Protocol & Discovery JSON-RPC Methods (9) + SSE Push**: `ping`, `server/discover`, `skills/list`, `skills/get`, `resources/list`, `resources/subscribe`, `resources/unsubscribe`, `resources/read` (skills + `ladybird://notifications`, `ladybird://notifications/tab/<id>`, `ladybird://notifications/origin/<origin>`), and `resources/directory/read`, plus server-pushed SSE `notifications/resources/updated` and `notifications/message`.
-- **55 Registered Tools (`tools/list` / `tools/call`, top-level `additionalProperties: false`)**:
+- **58 Registered Tools (`tools/list` / `tools/call`, top-level `additionalProperties: false`)**:
 
 | Group | Count | Tools |
 | :--- | :---: | :--- |
-| Tabs & Navigation | 9 | `list_tabs`, `get_active_tab`, `open_tab` (supports `container_id`), `switch_tab`, `close_tab`, `navigate`, `reload`, `go_back`, `go_forward` |
+| Tabs & Navigation | 12 | `list_tabs`, `get_active_tab`, `list_containers`, `create_container`, `open_tab` (ephemeral in-memory agent container by default, or explicit `container_id`), `migrate_tab_container`, `switch_tab`, `close_tab`, `navigate`, `reload`, `go_back`, `go_forward` |
 | DOM, Input, Notifications & Diagnostics | 22 | `get_accessibility_tree`, `get_dom_tree`, `get_page_source`, `find_elements`, `click` (elements, coordinates, `button`, `click_count`, `modifiers`), `type_text` (`use_keyboard` trusted mode), `get_page_snapshot` (`@e1` handles across open Shadow DOM & same-origin frames, modal prioritization, optional `root_selector`), `press_key` (`modifiers`), `scroll`, `wheel`, `hover` (elements or coordinates), `drag` (coordinates/deltas, `modifiers`), `upload_file`, `list_upload_files`, `select_option`, `wait_for`, `list_notifications`, `wait_for_notification`, `get_console_logs`, `get_network_requests`, `eval_js`, `take_screenshot` (paired Base64 PNG `image` + `text` `security_envelope` visual warning) |
 | Automation Flows | 8 | `list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run` |
 | Extensions | 6 | `list_extensions`, `install_unpacked_extension`, `set_extension_enabled`, `reload_extension`, `remove_extension`, `inject_extension` |
@@ -54,7 +54,7 @@
 | Agent Skills | 4 | `list_skills`, `read_skill`, `save_skill` (`--mcp-allow-skill-write`), `delete_skill` (`--mcp-allow-skill-write`) |
 | Blind Credential Vault | 3 | `list_credentials`, `fill_credential`, `login_with_credential` |
 
-  For compatibility with clients that serialize nested objects as strings, `save_flow` (`flow`) and `call_page_tool` (`arguments`) accept both JSON objects and JSON-encoded strings. `TabInfo` exposes `container_id`, `mcp_access_mode` (`blocked`, `read_only`, `same_origin`, `full`), `matching_skills`, and `matching_credentials`.
+  For compatibility with clients that serialize nested objects as strings, `save_flow` (`flow`) and `call_page_tool` (`arguments`) accept both JSON objects and JSON-encoded strings. `TabInfo` exposes `container_id`, `mcp_access_mode` (`blocked`, `read_only`, `same_origin`, `full`), `matching_skills`, and `matching_credentials`. On first profile initialization, Ladybird also seeds the built-in `ladybird-agentic-guide` Agent Skill into `<profile>/skills/` (discoverable via `list_skills`, `read_skill`, SEP-2640 `skills/list`, and `about:skills`).
 
 ## 4. Security Boundaries and Known Caveats
 
@@ -72,10 +72,10 @@
 
 ## 5. Testing
 
-Run the unit test suite (`20` test cases):
+Run the unit test suite (`24` test cases):
 
 ```powershell
 ./Build/release/bin/TestLibWebView[.exe] --suite TestMCPAutomation
 ```
 
-Covers: `mcp_auth_and_origin_guards`, `mcp_initialize_and_tools_list_schemas`, `mcp_automation_flow_lifecycle`, `mcp_extensions_lifecycle`, `mcp_agentic_tools_roundtrip`, `mcp_upload_path_security_guards`, `mcp_skills_store_and_url_matching`, `mcp_skills_sep2640_protocol`, `mcp_skills_tools_and_write_gate`, `mcp_vault_crypto_totp_and_origin_pinning`, `mcp_vault_blind_fill_and_quarantine`, `mcp_security_policy_guards`, `settings_user_agent_preset_roundtrip`, `settings_upload_directory_roundtrip`, `mcp_sse_notifications_and_resource_subscriptions`, `mcp_content_shield_anti_injection_and_nonce`, `mcp_pause_kill_switch_blocks_tools_and_resources`, `mcp_audit_hook_records_tool_calls_and_blocks`, `mcp_screenshot_visual_shield_and_redact_media`, and `mcp_inspect_site_manifests_trust_boundary`. Note that `TestMCPAutomation` tests `MCPServer` against `FakeMCPDelegate` plus `MCPContentShield`, `NotificationManager`, `VaultStore`, `SkillStore`, `Settings`, and policy/upload helpers directly; full end-to-end `WebView::Application` UI/page paths run against `Ladybird --mcp`.
+Covers: `mcp_auth_and_origin_guards`, `mcp_initialize_and_tools_list_schemas`, `mcp_automation_flow_lifecycle`, `mcp_extensions_lifecycle`, `mcp_agentic_tools_roundtrip`, `mcp_upload_path_security_guards`, `mcp_skills_store_and_url_matching`, `mcp_skills_sep2640_protocol`, `mcp_skills_tools_and_write_gate`, `mcp_builtin_agentic_guide_skill`, `mcp_vault_crypto_totp_and_origin_pinning`, `mcp_vault_blind_fill_and_quarantine`, `mcp_security_policy_guards`, `settings_user_agent_preset_roundtrip`, `settings_upload_directory_roundtrip`, `settings_mcp_auto_start_roundtrip`, `mcp_sse_notifications_and_resource_subscriptions`, `mcp_content_shield_anti_injection_and_nonce`, `mcp_pause_kill_switch_blocks_tools_and_resources`, `mcp_audit_hook_records_tool_calls_and_blocks`, `mcp_screenshot_visual_shield_and_redact_media`, `mcp_inspect_site_manifests_trust_boundary`, `mcp_list_containers_and_open_tab_container`, and `mcp_custom_containers_ephemeral_and_migration`. Note that `TestMCPAutomation` tests `MCPServer` against `FakeMCPDelegate` plus `MCPContentShield`, `NotificationManager`, `VaultStore`, `SkillStore`, `Settings`, and policy/upload helpers directly; full end-to-end `WebView::Application` UI/page paths run against `Ladybird --mcp`.

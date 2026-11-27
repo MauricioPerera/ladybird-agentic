@@ -25,6 +25,7 @@
 #include <LibURL/Parser.h>
 #include <LibWebView/Automation/FlowStore.h>
 #include <LibWebView/Automation/FlowTypes.h>
+#include <LibWebView/ContainerStore.h>
 #include <LibWebView/Extensions/ExtensionStore.h>
 #include <LibWebView/Extensions/ExtensionTypes.h>
 #include <LibWebView/MCPContentShield.h>
@@ -75,7 +76,18 @@ public:
     WebView::VaultStore& vault_store() { return m_vault_store; }
     HashTable<u64>& tainted_tabs() { return m_tainted_tabs; }
     bool allow_skill_write { false };
+    bool allow_mock_open_tab { false };
     Vector<MCP::TabInfo> mock_tabs;
+    Vector<MCP::ContainerInfo> mock_containers;
+    String mock_profile_name { "developer"_string };
+    Optional<String> mock_ephemeral_container_id { "agent-ephemeral-mock01"_string };
+    bool mock_ephemeral_default { true };
+    size_t session_closed_count { 0 };
+    Optional<String> last_open_tab_container;
+    Optional<String> last_created_container;
+    Optional<String> last_migration_target;
+    bool last_migration_close_source { false };
+    bool last_migration_create_if_missing { false };
 
     struct LastRunCall {
         Optional<String> flow_id;
@@ -148,8 +160,83 @@ public:
         }
         return {};
     }
+    virtual Vector<MCP::ContainerInfo> list_containers() const override
+    {
+        if (!mock_containers.is_empty())
+            return mock_containers;
+        return {
+            { .id = "agent"_string, .name = "Agent"_string, .color = "#6366f1"_string, .is_default_mcp = true, .mcp_allowed = true },
+            { .id = "personal"_string, .name = "Personal"_string, .color = "#3b82f6"_string, .is_default_mcp = false, .mcp_allowed = true },
+            { .id = "work"_string, .name = "Work"_string, .color = "#f97316"_string, .is_default_mcp = false, .mcp_allowed = true },
+        };
+    }
+    virtual String active_profile_name() const override
+    {
+        return mock_profile_name;
+    }
+    virtual Optional<String> active_ephemeral_container_id() const override
+    {
+        return mock_ephemeral_container_id;
+    }
+    virtual bool ephemeral_default_enabled() const override
+    {
+        return mock_ephemeral_default;
+    }
+    virtual void on_mcp_session_closed() override
+    {
+        ++session_closed_count;
+    }
+    virtual void create_container_tool(String name, Optional<String> color, Optional<String> id, MCP::OnToolCallComplete cb) override
+    {
+        auto resolved_id = id.value_or(name.to_ascii_lowercase());
+        last_created_container = resolved_id;
+        MCP::ContainerInfo info {
+            .id = resolved_id,
+            .name = move(name),
+            .color = color.value_or("#3b82f6"_string),
+            .is_default_mcp = false,
+            .mcp_allowed = true,
+            .ephemeral = false,
+        };
+        mock_containers.append(info);
+        JsonObject cobj;
+        cobj.set("id"sv, info.id);
+        cobj.set("name"sv, info.name);
+        cobj.set("color"sv, info.color);
+        cobj.set("ephemeral"sv, false);
+        JsonObject out;
+        out.set("created"sv, true);
+        out.set("container"sv, move(cobj));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
 
-    virtual void open_tab(Optional<String>, bool, bool, Optional<String>, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
+    virtual void open_tab(Optional<String> url, bool, bool, Optional<String> container_id, MCP::OnToolCallComplete cb) override
+    {
+        last_open_tab_container = container_id;
+        if (!allow_mock_open_tab) {
+            cb(error_result("unsupported"sv));
+            return;
+        }
+        JsonObject out;
+        out.set("tab_id"sv, 100);
+        out.set("url"sv, url.value_or("about:blank"_string));
+        out.set("container_id"sv, container_id.value_or(mock_ephemeral_container_id.value_or("agent"_string)));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void migrate_tab_container(u64 tab_id, String target_container_id, bool, bool, bool close_source_tab, bool create_if_missing, Optional<String>, Optional<String>, MCP::OnToolCallComplete cb) override
+    {
+        last_migration_target = target_container_id;
+        last_migration_close_source = close_source_tab;
+        last_migration_create_if_missing = create_if_missing;
+        JsonObject out;
+        out.set("migrated"sv, true);
+        out.set("old_tab_id"sv, tab_id);
+        out.set("new_tab_id"sv, tab_id + 1);
+        out.set("tab_id"sv, tab_id + 1);
+        out.set("container_id"sv, target_container_id);
+        out.set("source_tab_closed"sv, close_source_tab);
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
     virtual void switch_tab(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void close_tab(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void navigate_tab(u64, String, bool, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
@@ -1037,12 +1124,12 @@ struct HttpResponse {
     String body;
 };
 
-HttpResponse send_mcp_http(u16 port, Optional<StringView> bearer_token, StringView body, Optional<StringView> origin_header = {}, Optional<StringView> session_id_header = {})
+HttpResponse send_mcp_http(u16 port, Optional<StringView> bearer_token, StringView body, Optional<StringView> origin_header = {}, Optional<StringView> session_id_header = {}, StringView method = "POST"sv)
 {
     auto socket = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
 
     StringBuilder req;
-    req.append("POST /mcp HTTP/1.1\r\n"sv);
+    req.appendff("{} /mcp HTTP/1.1\r\n", method);
     req.appendff("Host: 127.0.0.1:{}\r\n", port);
     req.append("Content-Type: application/json\r\n"sv);
     if (bearer_token.has_value())
@@ -1257,7 +1344,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 55u);
+    EXPECT_EQ(tools->size(), 58u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -2290,6 +2377,90 @@ TEST_CASE(mcp_skills_tools_and_write_gate)
     }
 }
 
+TEST_CASE(mcp_builtin_agentic_guide_skill)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    EXPECT(delegate.skill_store().list_skills(true).is_empty());
+
+    delegate.skill_store().ensure_builtin_skills();
+    EXPECT_EQ(delegate.skill_store().list_skills(false).size(), 1uz);
+
+    delegate.mock_tabs.append({
+        .id = 20,
+        .title = "Example"_string,
+        .url = "https://example.com/"_string,
+        .is_active = true,
+    });
+
+    auto token = "builtin-skill-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = server->local_port().value();
+
+    {
+        auto res = call_mcp_tool(port, token, 1, "list_skills"sv, JsonObject {});
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+        auto skills = payload.get_array("skills"sv);
+        EXPECT(skills.has_value());
+        EXPECT_EQ(skills->size(), 1uz);
+        auto fm = skills->at(0).as_object().get_object("frontmatter"sv);
+        EXPECT(fm.has_value());
+        EXPECT_EQ(fm->get_string("name"sv).value_or(String {}), "ladybird-agentic-guide"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 20);
+        auto res = call_mcp_tool(port, token, 2, "list_skills"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(1), 0u);
+    }
+
+    {
+        JsonObject args;
+        args.set("name"sv, "ladybird-agentic-guide"sv);
+        auto res = call_mcp_tool(port, token, 3, "read_skill"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        auto content = payload.get_string("content"sv).value_or(String {});
+        EXPECT(content.contains("agent-ephemeral-"sv));
+        EXPECT(content.contains("list_containers"sv));
+        EXPECT(content.contains("create_container"sv));
+        EXPECT(content.contains("migrate_tab_container"sv));
+        EXPECT(content.contains("about:welcome"sv));
+        EXPECT(content.contains("Tab Recorder"sv));
+    }
+
+    {
+        auto list_resp = call_mcp_rpc(port, token, 4, "skills/list"sv, JsonObject {});
+        auto skills = list_resp.get_object("result"sv)->get_array("skills"sv);
+        EXPECT(skills.has_value());
+        EXPECT_EQ(skills->size(), 1uz);
+        EXPECT_EQ(skills->at(0).as_object().get_string("uri"sv).value_or(String {}), "skill://ladybird-agentic-guide/SKILL.md"sv);
+    }
+
+    {
+        auto existing = delegate.skill_store().get_skill("ladybird-agentic-guide"sv, true).value();
+        existing.body = "# Custom\n\nUSER_CUSTOM_MARKER\n"_string;
+        MUST(delegate.skill_store().save_skill(move(existing)));
+
+        delegate.skill_store().ensure_builtin_skills();
+        auto after_edit = delegate.skill_store().get_skill("ladybird-agentic-guide"sv, true).value();
+        EXPECT(after_edit.body.contains("USER_CUSTOM_MARKER"sv));
+
+        MUST(delegate.skill_store().delete_skill("ladybird-agentic-guide"sv));
+        delegate.skill_store().ensure_builtin_skills();
+        EXPECT(!delegate.skill_store().get_skill("ladybird-agentic-guide"sv, true).has_value());
+    }
+}
+
 TEST_CASE(mcp_vault_crypto_totp_and_origin_pinning)
 {
     auto temp_dir = make_temp_mcp_dir();
@@ -3185,4 +3356,171 @@ TEST_CASE(mcp_inspect_site_manifests_trust_boundary)
     EXPECT_EQ(cleaned.stripped_html_comments, 1uz);
     EXPECT(!cleaned.text.contains("ignore previous instructions"sv));
     EXPECT(cleaned.text.contains("Allowed summary"sv));
+}
+
+TEST_CASE(mcp_list_containers_and_open_tab_container)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup([&] { (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed); });
+
+    FakeMCPDelegate delegate(temp_dir);
+    delegate.allow_mock_open_tab = true;
+    auto token = "test-containers-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    EXPECT(server->local_port().has_value());
+    auto port = *server->local_port();
+
+    // 1. Verify tools/list exposes list_containers
+    auto list_resp = call_mcp_rpc(port, token, 1, "tools/list"sv, JsonObject {});
+    auto tools = list_resp.get_object("result"sv)->get_array("tools"sv).value();
+    bool saw_list_containers = false;
+    for (size_t i = 0; i < tools.size(); ++i) {
+        if (tools[i].as_object().get_string("name"sv) == "list_containers"sv) {
+            saw_list_containers = true;
+            break;
+        }
+    }
+    EXPECT(saw_list_containers);
+
+    // 2. Verify list_containers returns profile and available containers
+    {
+        auto res = call_mcp_tool(port, token, 2, "list_containers"sv, JsonObject {});
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto content = res.get_array("content"sv).value();
+        EXPECT_EQ(content.size(), 1uz);
+        auto payload = JsonValue::from_string(content[0].as_object().get_string("text"sv).value()).release_value().as_object();
+        EXPECT_EQ(payload.get_string("profile"sv).value_or(String {}), "developer"sv);
+        EXPECT_EQ(payload.get_string("default_mcp_container"sv).value_or(String {}), "agent"sv);
+        auto containers = payload.get_array("containers"sv).value();
+        EXPECT_EQ(containers.size(), 3uz);
+        Vector<String> ids;
+        for (size_t i = 0; i < containers.size(); ++i)
+            ids.append(containers[i].as_object().get_string("id"sv).value_or(String {}));
+        EXPECT(ids.contains_slow("agent"_string));
+        EXPECT(ids.contains_slow("personal"_string));
+        EXPECT(ids.contains_slow("work"_string));
+    }
+
+    // 3. Verify open_tab forwards explicit container_id='personal'
+    {
+        JsonObject args;
+        args.set("url"sv, "https://www.producthunt.com"sv);
+        args.set("container_id"sv, "personal"sv);
+        auto res = call_mcp_tool(port, token, 3, "open_tab"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        EXPECT_EQ(delegate.last_open_tab_container.value_or(String {}), "personal"sv);
+    }
+}
+
+TEST_CASE(mcp_custom_containers_ephemeral_and_migration)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup([&] { (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed); });
+
+    // 1. Verify ephemeral container helper predicates and reserved ContainerStore prefix
+    EXPECT(WebView::is_ephemeral_container_id("agent-ephemeral-abc123"sv));
+    EXPECT(!WebView::is_ephemeral_container_id("agent-ephemeral-"sv));
+    EXPECT(!WebView::is_ephemeral_container_id("personal"sv));
+    EXPECT(WebView::is_agent_isolated_container_id("agent"sv));
+    EXPECT(WebView::is_agent_isolated_container_id("agent-ephemeral-abc123"sv));
+    EXPECT(!WebView::is_agent_isolated_container_id("personal"sv));
+
+    {
+        auto store_path = LexicalPath::join(temp_dir, "Containers.json"sv).string();
+        WebView::ContainerStore store(store_path);
+        auto reserved = store.create_container("Reserved"_string, "#3b82f6"_string, "agent-ephemeral-bad"_string);
+        EXPECT(reserved.is_error());
+        auto custom = store.create_container("Product Hunt"_string, "#f97316"_string);
+        EXPECT(!custom.is_error());
+        EXPECT_EQ(custom.value().id, "product-hunt"sv);
+    }
+
+    FakeMCPDelegate delegate(temp_dir);
+    delegate.allow_mock_open_tab = true;
+    auto token = "test-custom-migrate-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    EXPECT(server->local_port().has_value());
+    auto port = *server->local_port();
+
+    // 2. Verify create_container and migrate_tab_container are advertised in tools/list
+    auto list_resp = call_mcp_rpc(port, token, 1, "tools/list"sv, JsonObject {});
+    auto tools = list_resp.get_object("result"sv)->get_array("tools"sv).value();
+    bool saw_create = false;
+    bool saw_migrate = false;
+    for (size_t i = 0; i < tools.size(); ++i) {
+        auto name = tools[i].as_object().get_string("name"sv).value_or(String {});
+        if (name == "create_container"sv)
+            saw_create = true;
+        else if (name == "migrate_tab_container"sv)
+            saw_migrate = true;
+    }
+    EXPECT(saw_create);
+    EXPECT(saw_migrate);
+
+    // 3. Verify list_containers includes ephemeral_default & active_ephemeral_container
+    {
+        auto res = call_mcp_tool(port, token, 2, "list_containers"sv, JsonObject {});
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("ephemeral_default"sv).value_or(false));
+        EXPECT_EQ(payload.get_string("active_ephemeral_container"sv).value_or(String {}), "agent-ephemeral-mock01"sv);
+    }
+
+    // 4. Verify create_container roundtrip
+    {
+        JsonObject args;
+        args.set("name"sv, "Custom Auth"_string);
+        args.set("color"sv, "#10b981"_string);
+        args.set("id"sv, "custom-auth"_string);
+        auto res = call_mcp_tool(port, token, 3, "create_container"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        EXPECT_EQ(delegate.last_created_container.value_or(String {}), "custom-auth"sv);
+    }
+
+    // 5. Verify migrate_tab_container roundtrip
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 2);
+        args.set("target_container_id"sv, "personal"_string);
+        args.set("close_source_tab"sv, true);
+        args.set("create_if_missing"sv, false);
+        auto res = call_mcp_tool(port, token, 4, "migrate_tab_container"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        EXPECT_EQ(delegate.last_migration_target.value_or(String {}), "personal"sv);
+        EXPECT(delegate.last_migration_close_source);
+        EXPECT(!delegate.last_migration_create_if_missing);
+    }
+
+    // 6. Verify DELETE /mcp notifies delegate to clean up unused ephemeral containers
+    auto del_http = send_mcp_http(port, token, ""sv, {}, {}, "DELETE"sv);
+    EXPECT_EQ(del_http.status_code, 200);
+    EXPECT_EQ(delegate.session_closed_count, 1uz);
+}
+
+TEST_CASE(settings_mcp_auto_start_roundtrip)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup([&] { (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed); });
+    auto settings_path = LexicalPath::join(temp_dir, "Settings.json"sv).string();
+
+    {
+        auto settings = WebView::Settings::create(settings_path);
+        EXPECT(!settings.mcp_auto_start());
+        settings.set_mcp_auto_start(true);
+        EXPECT(settings.mcp_auto_start());
+    }
+
+    {
+        auto reloaded = WebView::Settings::create(settings_path);
+        EXPECT(reloaded.mcp_auto_start());
+        reloaded.set_mcp_auto_start(false);
+        EXPECT(!reloaded.mcp_auto_start());
+    }
+
+    {
+        auto reloaded_again = WebView::Settings::create(settings_path);
+        EXPECT(!reloaded_again.mcp_auto_start());
+    }
 }

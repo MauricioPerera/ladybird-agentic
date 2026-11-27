@@ -717,6 +717,7 @@ ErrorOr<void> TabRecorder::start([[maybe_unused]] StringView page_title)
         m_recorder_init_event = nullptr;
     }
 
+    load_settings();
     m_active_settings = settings();
     u32 target_fps = clamp<u32>(m_active_settings.fps, 10, 60);
     m_frame_timer.setInterval(max(16, static_cast<int>(1000 / target_fps)));

@@ -44,6 +44,18 @@ bool is_valid_container_color(StringView color)
     return true;
 }
 
+bool is_ephemeral_container_id(StringView id)
+{
+    return id.starts_with(EPHEMERAL_AGENT_CONTAINER_PREFIX)
+        && id.length() > EPHEMERAL_AGENT_CONTAINER_PREFIX.length()
+        && is_valid_container_id(id);
+}
+
+bool is_agent_isolated_container_id(StringView id)
+{
+    return id == "agent"sv || is_ephemeral_container_id(id);
+}
+
 Vector<TabContainer> default_tab_containers()
 {
     return {
@@ -160,6 +172,8 @@ ErrorOr<TabContainer> ContainerStore::create_container(String name, String color
     if (requested_id.has_value() && !requested_id->is_empty()) {
         if (!is_valid_container_id(*requested_id))
             return Error::from_string_literal("Invalid container ID");
+        if (requested_id->bytes_as_string_view().starts_with(EPHEMERAL_AGENT_CONTAINER_PREFIX))
+            return Error::from_string_literal("Container ID prefix 'agent-ephemeral-' is reserved for ephemeral sessions");
         if (get_container(*requested_id).has_value())
             return Error::from_string_literal("A container with that ID already exists");
         id = *requested_id;

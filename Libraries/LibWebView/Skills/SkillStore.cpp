@@ -239,6 +239,28 @@ void SkillStore::reload()
         warnln("Failed scanning skill storage directory {}: {}", m_storage_directory, result.error());
 }
 
+void SkillStore::ensure_builtin_skills()
+{
+    if (m_storage_directory.is_empty() || FileSystem::is_link(m_storage_directory))
+        return;
+
+    auto sentinel_path = LexicalPath::join(m_storage_directory, ".builtin-seeded-v1"sv).string();
+    if (FileSystem::exists(sentinel_path))
+        return;
+
+    auto builtin_skill = make_builtin_agentic_guide_skill();
+    auto skill_name = builtin_skill.name;
+    if (!get_skill(skill_name, true).has_value()) {
+        if (auto saved = save_skill(move(builtin_skill)); saved.is_error()) {
+            warnln("Failed seeding built-in skill {}: {}", skill_name, saved.error());
+            return;
+        }
+    }
+
+    if (auto sentinel_result = write_utf8_file(sentinel_path, "1\n"sv); sentinel_result.is_error())
+        warnln("Failed writing built-in skills sentinel {}: {}", sentinel_path, sentinel_result.error());
+}
+
 Vector<SkillDefinition> SkillStore::list_skills(bool include_disabled) const
 {
     Vector<SkillDefinition> skills;

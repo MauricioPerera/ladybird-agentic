@@ -89,6 +89,7 @@ static constexpr auto AUTOPLAY_KEY = "autoplay"sv;
 static constexpr auto GLOBAL_PRIVACY_CONTROL_KEY = "globalPrivacyControl"sv;
 static constexpr auto USER_AGENT_PRESET_KEY = "userAgentPreset"sv;
 static constexpr auto UPLOAD_DIRECTORY_KEY = "uploadDirectory"sv;
+static constexpr auto MCP_AUTO_START_KEY = "mcpAutoStart"sv;
 static constexpr auto CRASH_REPORT_SENDING_KEY = "crashReportSending"sv;
 
 static constexpr auto BACKGROUND_NETWORKING_KEY = "backgroundNetworking"sv;
@@ -557,6 +558,8 @@ void Settings::load_from_json(JsonValue const& json_value)
             m_upload_directory = validated.release_value();
     }
 
+    m_mcp_auto_start = json.get_bool(MCP_AUTO_START_KEY).value_or(false);
+
     if (auto crash_report_sending = json.get_string(CRASH_REPORT_SENDING_KEY); crash_report_sending.has_value())
         m_crash_report_sending = crash_report_sending_from_string(*crash_report_sending);
 
@@ -671,6 +674,7 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
     auto global_privacy_control_changed = changed(GLOBAL_PRIVACY_CONTROL_KEY);
     auto user_agent_preset_changed = changed(USER_AGENT_PRESET_KEY);
     auto upload_directory_changed = changed(UPLOAD_DIRECTORY_KEY);
+    auto mcp_auto_start_changed = changed(MCP_AUTO_START_KEY);
     auto crash_report_sending_changed = changed(CRASH_REPORT_SENDING_KEY);
     auto dns_settings_changed = changed(DNS_SETTINGS_KEY);
     auto background_networking_settings_changed = changed(BACKGROUND_NETWORKING_KEY);
@@ -709,6 +713,8 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
             observer.user_agent_preset_changed();
         if (upload_directory_changed)
             observer.upload_directory_changed();
+        if (mcp_auto_start_changed)
+            observer.mcp_auto_start_changed();
         if (crash_report_sending_changed)
             observer.crash_report_sending_changed();
         if (dns_settings_changed)
@@ -966,6 +972,7 @@ JsonValue Settings::serialize_json() const
     settings.set(GLOBAL_PRIVACY_CONTROL_KEY, m_global_privacy_control == GlobalPrivacyControl::Yes);
     settings.set(USER_AGENT_PRESET_KEY, m_user_agent_preset.has_value() ? JsonValue { *m_user_agent_preset } : JsonValue { String {} });
     settings.set(UPLOAD_DIRECTORY_KEY, m_upload_directory.has_value() ? JsonValue { *m_upload_directory } : JsonValue { String {} });
+    settings.set(MCP_AUTO_START_KEY, m_mcp_auto_start);
     settings.set(CRASH_REPORT_SENDING_KEY, crash_report_sending_to_string(m_crash_report_sending));
 
     JsonObject background_network_features;
@@ -1646,6 +1653,18 @@ ErrorOr<void> Settings::set_upload_directory(Optional<String> directory)
         observer.upload_directory_changed();
 
     return {};
+}
+
+void Settings::set_mcp_auto_start(bool enabled)
+{
+    if (m_mcp_auto_start == enabled)
+        return;
+
+    m_mcp_auto_start = enabled;
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.mcp_auto_start_changed();
 }
 
 void Settings::set_crash_report_sending(CrashReportSending crash_report_sending)

@@ -5,6 +5,7 @@
  */
 
 #include <AK/JsonArray.h>
+#include <AK/LexicalPath.h>
 #include <AK/Platform.h>
 #include <AK/Utf16String.h>
 #include <LibCore/BrowserVersion.h>
@@ -12,16 +13,19 @@
 #include <LibCore/EventLoop.h>
 #include <LibCore/GeolocationProvider.h>
 #include <LibCore/Promise.h>
+#include <LibCore/StandardPaths.h>
 #include <LibURL/Parser.h>
 #include <LibWebCommon/HTML/AutoplayPolicy.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
+#include <LibWebView/ContainerStore.h>
 #include <LibWebView/CrashReport.h>
 #include <LibWebView/CrashReportStore.h>
 #include <LibWebView/DefaultBrowser.h>
 #include <LibWebView/PermissionManager.h>
 #include <LibWebView/SearchEngine.h>
 #include <LibWebView/UserAgent.h>
+#include <LibWebView/Utilities.h>
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebUI/SettingsUI.h>
 
@@ -126,6 +130,30 @@ void SettingsUI::register_interfaces()
     register_interface("makeDefaultBrowser"sv, [this](auto const& data) {
         make_default_browser(data);
     });
+    register_interface("setUserAgentPreset"sv, [this](auto const& data) {
+        set_user_agent_preset(data);
+    });
+    register_interface("setUploadDirectory"sv, [this](auto const& data) {
+        set_upload_directory(data);
+    });
+    register_interface("openUploadDirectory"sv, [this](auto const& data) {
+        open_upload_directory(data);
+    });
+    register_interface("setMcpAutoStart"sv, [this](auto const& data) {
+        set_mcp_auto_start(data);
+    });
+    register_interface("setMcpEnabled"sv, [this](auto const& data) {
+        set_mcp_enabled(data);
+    });
+    register_interface("createContainer"sv, [this](auto const& data) {
+        create_container(data);
+    });
+    register_interface("deleteContainer"sv, [this](auto const& data) {
+        delete_container(data);
+    });
+    register_interface("setTabRecorderSettings"sv, [this](auto const& data) {
+        set_tab_recorder_settings(data);
+    });
 
     if (host() == "welcome"sv) {
         register_interface("completeFirstRun"sv, [this](auto const& data) {
@@ -200,15 +228,6 @@ void SettingsUI::register_interfaces()
     register_interface("setGlobalPrivacyControl"sv, [this](auto const& data) {
         set_global_privacy_control(data);
     });
-    register_interface("setUserAgentPreset"sv, [this](auto const& data) {
-        set_user_agent_preset(data);
-    });
-    register_interface("setUploadDirectory"sv, [this](auto const& data) {
-        set_upload_directory(data);
-    });
-    register_interface("openUploadDirectory"sv, [this](auto const& data) {
-        open_upload_directory(data);
-    });
     register_interface("setCrashReportSending"sv, [this](auto const& data) {
         set_crash_report_sending(data);
     });
@@ -248,6 +267,43 @@ void SettingsUI::load_features()
     features.set("geolocation"_string, Core::GeolocationProvider::is_available());
 
     async_send_message("loadFeatures"sv, move(features));
+}
+
+static ByteString tab_recorder_settings_directory()
+{
+#if defined(AK_OS_WINDOWS)
+    auto const& instance_dir = Application::the().instance_data_directory();
+    if (!instance_dir.is_empty())
+        return instance_dir;
+    return Core::StandardPaths::user_data_directory();
+#else
+    return LexicalPath::join(Core::StandardPaths::config_directory(), "Ladybird"sv).string();
+#endif
+}
+
+static ByteString tab_recorder_settings_path()
+{
+    return LexicalPath::join(tab_recorder_settings_directory(), "tab_recorder_settings.json"sv).string();
+}
+
+static JsonObject read_tab_recorder_settings_raw()
+{
+    auto parsed = read_json_file(tab_recorder_settings_path());
+    if (!parsed.is_error())
+        return parsed.release_value();
+    return {};
+}
+
+static JsonObject serialize_tab_recorder_settings(JsonObject const& raw)
+{
+    JsonObject out;
+    out.set("recordMicrophone"sv, raw.get_bool("record_microphone"sv).value_or(true));
+    out.set("recordSystemAudio"sv, raw.get_bool("record_system_audio"sv).value_or(true));
+    out.set("showCursor"sv, raw.get_bool("show_cursor"sv).value_or(true));
+    out.set("exportSpeakerTimeline"sv, raw.get_bool("export_speaker_timeline"sv).value_or(true));
+    out.set("fps"sv, clamp<u32>(raw.get_u32("fps"sv).value_or(30), 10, 60));
+    out.set("batchDurationSeconds"sv, clamp<u32>(raw.get_u32("batch_duration_seconds"sv).value_or(300), 30, 3600));
+    return out;
 }
 
 JsonObject SettingsUI::serialize_settings() const
@@ -346,6 +402,35 @@ JsonObject SettingsUI::serialize_settings() const
     }
     settings.set("contentBlockerLists"sv, move(lists));
     settings.set("contentBlockerListUpdateInProgress"sv, Application::the().content_blocker_list_update_in_progress());
+
+    auto& app = Application::the();
+    JsonObject mcp;
+    mcp.set("enabled"sv, app.mcp_enabled());
+    mcp.set("port"sv, app.mcp_port().value_or(WebView::default_mcp_port));
+    mcp.set("autoStart"sv, Application::settings().mcp_auto_start());
+    mcp.set("ephemeralDefault"sv, static_cast<MCP::MCPDelegate const&>(app).ephemeral_default_enabled());
+    if (app.mcp_enabled() && app.mcp_token().has_value() && !app.mcp_token()->is_empty()) {
+        JsonObject headers;
+        headers.set("Authorization"sv, MUST(String::formatted("Bearer {}", *app.mcp_token())));
+        JsonObject cfg;
+        cfg.set("url"sv, MUST(String::formatted("http://127.0.0.1:{}/mcp", app.mcp_port().value_or(WebView::default_mcp_port))));
+        cfg.set("headers"sv, move(headers));
+        mcp.set("configJson"sv, JsonValue { move(cfg) }.serialized());
+    } else {
+        mcp.set("configJson"sv, JsonValue {});
+    }
+    settings.set("mcp"sv, move(mcp));
+
+    JsonArray containers;
+    for (auto const& container : Application::container_store().list_containers()) {
+        JsonObject obj;
+        obj.set("id"sv, container.id);
+        obj.set("name"sv, container.name);
+        obj.set("color"sv, container.color);
+        containers.must_append(move(obj));
+    }
+    settings.set("containers"sv, move(containers));
+    settings.set("tabRecorder"sv, serialize_tab_recorder_settings(read_tab_recorder_settings_raw()));
 
     return settings;
 }
@@ -802,6 +887,129 @@ void SettingsUI::open_upload_directory(JsonValue const&)
         async_send_message("uploadDirectoryStatus"sv, MUST(String::formatted("Could not open upload folder: {}", res.error())));
     else
         async_send_message("uploadDirectoryStatus"sv, String {});
+}
+
+void SettingsUI::set_mcp_auto_start(JsonValue const& value)
+{
+    if (!value.is_bool())
+        return;
+
+    Application::settings().set_mcp_auto_start(value.as_bool());
+}
+
+void SettingsUI::set_mcp_enabled(JsonValue const& value)
+{
+    if (!value.is_bool())
+        return;
+
+    bool desired = value.as_bool();
+    auto& app = Application::the();
+    JsonObject result;
+    if (desired != app.mcp_enabled()) {
+        if (auto res = app.toggle_mcp_enabled(); res.is_error()) {
+            result.set("ok"sv, false);
+            result.set("error"sv, MUST(String::formatted("Could not update MCP server: {}", res.error())));
+            async_send_message("mcpActionResult"sv, move(result));
+            broadcast_settings_change();
+            return;
+        }
+    }
+
+    result.set("ok"sv, true);
+    async_send_message("mcpActionResult"sv, move(result));
+    broadcast_settings_change();
+}
+
+void SettingsUI::create_container(JsonValue const& value)
+{
+    if (!value.is_object())
+        return;
+
+    auto name = value.as_object().get_string("name"sv).value_or(String {});
+    auto color = value.as_object().get_string("color"sv).value_or("#3b82f6"_string);
+    auto created = Application::container_store().create_container(move(name), move(color));
+    JsonObject result;
+    if (created.is_error()) {
+        result.set("ok"sv, false);
+        result.set("error"sv, MUST(String::formatted("Could not create container: {}", created.error())));
+        async_send_message("containerActionResult"sv, move(result));
+        return;
+    }
+
+    JsonObject container_obj;
+    container_obj.set("id"sv, created.value().id);
+    container_obj.set("name"sv, created.value().name);
+    container_obj.set("color"sv, created.value().color);
+    result.set("ok"sv, true);
+    result.set("container"sv, move(container_obj));
+    async_send_message("containerActionResult"sv, move(result));
+    broadcast_settings_change();
+}
+
+void SettingsUI::delete_container(JsonValue const& value)
+{
+    if (!value.is_string())
+        return;
+
+    auto res = Application::the().delete_container(value.as_string());
+    JsonObject result;
+    if (res.is_error()) {
+        result.set("ok"sv, false);
+        result.set("error"sv, MUST(String::formatted("Could not delete container: {}", res.error())));
+        async_send_message("containerActionResult"sv, move(result));
+        return;
+    }
+
+    result.set("ok"sv, true);
+    async_send_message("containerActionResult"sv, move(result));
+    broadcast_settings_change();
+}
+
+void SettingsUI::set_tab_recorder_settings(JsonValue const& value)
+{
+    if (!value.is_object())
+        return;
+
+    auto const& input = value.as_object();
+    auto raw = read_tab_recorder_settings_raw();
+    auto merged = serialize_tab_recorder_settings(raw);
+
+    if (auto v = input.get_bool("recordMicrophone"sv); v.has_value())
+        raw.set("record_microphone"sv, *v);
+    else if (!raw.has("record_microphone"sv))
+        raw.set("record_microphone"sv, merged.get_bool("recordMicrophone"sv).value_or(true));
+
+    if (auto v = input.get_bool("recordSystemAudio"sv); v.has_value())
+        raw.set("record_system_audio"sv, *v);
+    else if (!raw.has("record_system_audio"sv))
+        raw.set("record_system_audio"sv, merged.get_bool("recordSystemAudio"sv).value_or(true));
+
+    if (auto v = input.get_bool("showCursor"sv); v.has_value())
+        raw.set("show_cursor"sv, *v);
+    else if (!raw.has("show_cursor"sv))
+        raw.set("show_cursor"sv, merged.get_bool("showCursor"sv).value_or(true));
+
+    if (auto v = input.get_bool("exportSpeakerTimeline"sv); v.has_value())
+        raw.set("export_speaker_timeline"sv, *v);
+    else if (!raw.has("export_speaker_timeline"sv))
+        raw.set("export_speaker_timeline"sv, merged.get_bool("exportSpeakerTimeline"sv).value_or(true));
+
+    if (auto v = input.get_u32("fps"sv); v.has_value())
+        raw.set("fps"sv, clamp<u32>(*v, 10, 60));
+    else if (!raw.has("fps"sv))
+        raw.set("fps"sv, merged.get_u32("fps"sv).value_or(30));
+
+    if (auto v = input.get_u32("batchDurationSeconds"sv); v.has_value())
+        raw.set("batch_duration_seconds"sv, clamp<u32>(*v, 30, 3600));
+    else if (!raw.has("batch_duration_seconds"sv))
+        raw.set("batch_duration_seconds"sv, merged.get_u32("batchDurationSeconds"sv).value_or(300));
+
+    if (!raw.has("microphone_device_id"sv))
+        raw.set("microphone_device_id"sv, String {});
+
+    (void)Core::Directory::create(tab_recorder_settings_directory(), Core::Directory::CreateDirectories::Yes);
+    (void)write_json_file(tab_recorder_settings_path(), JsonValue { move(raw) });
+    broadcast_settings_change();
 }
 
 void SettingsUI::crash_reports_changed()

@@ -87,5 +87,6 @@ WEBVIEW_API JsonObject serialize_skill_for_ui(SkillDefinition const& skill, Vect
 
 WEBVIEW_API ErrorOr<SkillDefinition> parse_skill_json(JsonValue const& value, Vector<SkillSupportingFile>& out_supporting_files);
 WEBVIEW_API SkillDefinition make_example_skill(Optional<String> site_url = {});
+WEBVIEW_API SkillDefinition make_builtin_agentic_guide_skill();
 
 }
