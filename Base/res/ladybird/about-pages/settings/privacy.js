@@ -24,24 +24,47 @@ const clearBrowsingDataTimeRange = document.querySelector("#clear-browsing-data-
 
 const globalPrivacyControlToggle = document.querySelector("#global-privacy-control-toggle");
 const userAgentPresetSelect = document.querySelector("#user-agent-preset");
+const uploadDirectoryInput = document.querySelector("#upload-directory-input");
+const uploadDirectorySave = document.querySelector("#upload-directory-save");
+const uploadDirectoryReset = document.querySelector("#upload-directory-reset");
+const uploadDirectoryOpen = document.querySelector("#upload-directory-open");
+const uploadDirectoryStatus = document.querySelector("#upload-directory-status");
 
 function loadSettings(settings) {
     if (Object.hasOwn(settings, "globalPrivacyControl")) {
         globalPrivacyControlToggle.checked = settings.globalPrivacyControl;
     }
-    if (userAgentPresetSelect && Array.isArray(settings.availableUserAgentPresets)) {
-        userAgentPresetSelect.innerHTML = "";
-        const defaultOption = document.createElement("option");
-        defaultOption.value = "";
-        defaultOption.textContent = "Default (Ladybird)";
-        userAgentPresetSelect.appendChild(defaultOption);
-        for (const preset of settings.availableUserAgentPresets) {
-            const opt = document.createElement("option");
-            opt.value = preset;
-            opt.textContent = preset;
-            userAgentPresetSelect.appendChild(opt);
+    if (userAgentPresetSelect) {
+        if (Array.isArray(settings.availableUserAgentPresets)) {
+            userAgentPresetSelect.innerHTML = "";
+            const defaultOption = document.createElement("option");
+            defaultOption.value = "";
+            defaultOption.textContent = "Default (Ladybird)";
+            userAgentPresetSelect.appendChild(defaultOption);
+            for (const preset of settings.availableUserAgentPresets) {
+                const opt = document.createElement("option");
+                opt.value = preset;
+                opt.textContent = preset;
+                userAgentPresetSelect.appendChild(opt);
+            }
         }
-        userAgentPresetSelect.value = settings.userAgentPreset || "";
+        if (Object.hasOwn(settings, "userAgentPreset") || Array.isArray(settings.availableUserAgentPresets)) {
+            userAgentPresetSelect.value = settings.userAgentPreset || "";
+        }
+    }
+    if (uploadDirectoryInput && (Object.hasOwn(settings, "effectiveUploadDirectory") || Object.hasOwn(settings, "uploadDirectory") || Object.hasOwn(settings, "uploadDirectoryOverriddenByCli"))) {
+        if (document.activeElement !== uploadDirectoryInput && (Object.hasOwn(settings, "effectiveUploadDirectory") || Object.hasOwn(settings, "uploadDirectory") || Object.hasOwn(settings, "defaultUploadDirectory"))) {
+            uploadDirectoryInput.value = settings.effectiveUploadDirectory || settings.uploadDirectory || settings.defaultUploadDirectory || "";
+        }
+        if (Object.hasOwn(settings, "uploadDirectoryOverriddenByCli")) {
+            const overridden = Boolean(settings.uploadDirectoryOverriddenByCli);
+            uploadDirectoryInput.disabled = overridden;
+            if (uploadDirectorySave) uploadDirectorySave.disabled = overridden;
+            if (uploadDirectoryReset) uploadDirectoryReset.disabled = overridden;
+            if (uploadDirectoryStatus) {
+                uploadDirectoryStatus.innerText = overridden ? "Overridden by --mcp-upload-dir CLI flag." : "";
+            }
+        }
     }
 }
 
@@ -136,6 +159,24 @@ if (userAgentPresetSelect) {
     });
 }
 
+if (uploadDirectorySave && uploadDirectoryInput) {
+    uploadDirectorySave.addEventListener("click", () => {
+        ladybird.sendMessage("setUploadDirectory", uploadDirectoryInput.value.trim());
+    });
+}
+
+if (uploadDirectoryReset) {
+    uploadDirectoryReset.addEventListener("click", () => {
+        ladybird.sendMessage("setUploadDirectory", "");
+    });
+}
+
+if (uploadDirectoryOpen) {
+    uploadDirectoryOpen.addEventListener("click", () => {
+        ladybird.sendMessage("openUploadDirectory");
+    });
+}
+
 document.addEventListener("WebUILoaded", estimateBrowsingDataSizes);
 
 document.addEventListener("WebUIMessage", event => {
@@ -145,5 +186,7 @@ document.addEventListener("WebUIMessage", event => {
         updateBrowsingDataSizes(event.detail.data);
     } else if (event.detail.name === "clearedBrowsingData") {
         estimateBrowsingDataSizes();
+    } else if (event.detail.name === "uploadDirectoryStatus" && uploadDirectoryStatus) {
+        uploadDirectoryStatus.innerText = event.detail.data || "";
     }
 });

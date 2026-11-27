@@ -10,7 +10,7 @@
 | [`FlowTypes.h`](FlowTypes.h), [`FlowTypes.cpp`](FlowTypes.cpp) | `FlowDefinition`, `FlowStep`, `FlowLocator`, `FlowRunRecord`, JSON parser/serializer, `{{var}}` interpolation, JS locator script generator |
 | [`FlowStore.h`](FlowStore.h), [`FlowStore.cpp`](FlowStore.cpp) | Disk persistence (`<id>.json` and `runs/<run_id>.json`), in-memory run cache (`max_in_memory_runs = 50`), observer dispatch |
 | [`FlowRunner.h`](FlowRunner.h), [`FlowRunner.cpp`](FlowRunner.cpp) | Async state machine executing flows against `ViewImplementation` via `Application` |
-| [`../WebUI/FlowsUI.h`](../WebUI/FlowsUI.h), [`../WebUI/FlowsUI.cpp`](../WebUI/FlowsUI.cpp) | `about:flows` WebUI backend (`loadState`, `saveFlow`, `deleteFlow`, `createExampleFlow`, `runFlow`, `cancelRun`) |
+| [`../WebUI/FlowsUI.h`](../WebUI/FlowsUI.h), [`../WebUI/FlowsUI.cpp`](../WebUI/FlowsUI.cpp) | `about:flows` WebUI backend (`loadState`, `saveFlow`, `deleteFlow`, `createExampleFlow`, `runFlow`, `cancelRun`, `setUploadDirectory`, `openUploadDirectory`) |
 | [`Base/res/ladybird/about-pages/flows.html`](../../../Base/res/ladybird/about-pages/flows.html) | Visual flow builder, JSON editor, and run history dashboard |
 | [`Tools/e2e-ladybird-engine/`](../../../Tools/e2e-ladybird-engine/README.md) | External stdio Engine Protocol v1 adapter forwarding `e2e` harness ops to Ladybird MCP |
 
@@ -38,16 +38,16 @@
 - `default_timeout_ms` / `timeout_ms`: Clamped to `[100, 120000]` ms (default `10000` ms). `sleep.ms` clamped to `[0, 60000]` ms (default `250` ms in `FlowRunner`).
 - `variables`: JSON object mapping string keys to string, number, or boolean values (serialized as strings via `val.serialized()`). Interpolated single-pass via `{{var}}` (unresolved `{{key}}` tokens are preserved literally) in `open.url`, `fill.text`, `press.key`, `locator.value`, `locator.name`, `locator.role`, `assert_text.contains`, `assert_text.equals`, `assert_url.contains`, and `assert_url.equals`.
 
-### Supported Actions (15)
+### Supported Actions (16)
 
 - **Navigation**: `open` (`http:`, `https:`, or `about:blank` only; fails if final URL is an `about:` error page when `wait_for_load` defaults to `true`), `reload` (waits for load by default and fails if the landed page is an `about:` error page), `back`, `forward` (`back` and `forward` wait a fixed `250 ms` timer rather than page-load completion events).
-- **Interaction & Sync**: `click`, `fill` (clears by default; invokes native `HTMLInputElement` / `HTMLTextAreaElement` value setters and dispatches `input`/`change` events for React compatibility, and writes `textContent` on `isContentEditable` elements), `press` (`KeyboardEvent` dispatch), `wait_for`, `sleep`.
-- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`; results from `extract`, `eval`, and `screenshot` when `save_as` — or fallback alias `name` — is set update `record.outputs` and `runtime_vars` for downstream `{{var}}` interpolation).
+- **Interaction & Sync**: `click`, `fill` (clears by default; invokes native `HTMLInputElement` / `HTMLTextAreaElement` value setters and dispatches `input`/`change` events for React compatibility, and writes `textContent` on `isContentEditable` elements), `press` (`KeyboardEvent` dispatch), `upload_file` (`path` or `paths` with `{{var}}` interpolation, resolved and sandboxed against the browser-configured Upload Directory in `about:flows` / `about:settings` or `--mcp-upload-dir`, resolving `<input type="file">` or associated labels/Shadow DOM triggers), `wait_for`, `sleep`.
+- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`; results from `extract`, `eval`, `screenshot`, and `upload_file` when `save_as` — or fallback alias `name` — is set update `record.outputs` and `runtime_vars` for downstream `{{var}}` interpolation).
 - **Capture**: `screenshot` (writes decoded PNG to `<storage_dir>/runs/<run_id>_step_<index>.png`, populates `step.output` / `step.screenshot_path`, and stores `step.output` into `record.outputs` / `runtime_vars` when `save_as` is set).
 
 ### Supported Locators (7)
 
-`css`, `xpath`, `role` (`role` + optional accessible `name`, or alias `value`), `label`, `placeholder`, `text`, and `test_id` (`data-testid`, also accepts `"testId"`), with optional `exact` (default `false`) and zero-based `nth` index (`0..1000` enforced in both `FlowTypes` and MCP JSON Schema).
+`css`, `xpath`, `role` (`role` + optional accessible `name`, or alias `value`), `label`, `placeholder`, `text`, and `test_id` (`data-testid`, also accepts `"testId"`), with optional `exact` (default `false`) and zero-based `nth` index (`0..1000` enforced in both `FlowTypes` and MCP JSON Schema). All DOM/ARIA locators except `xpath` traverse open `shadowRoot` trees automatically.
 
 ## 3. Execution State Machine (`FlowRunner`)
 
@@ -78,10 +78,10 @@ flowchart LR
 
 ## 5. Testing
 
-Run the unit test suite (`6` test cases):
+Run the unit test suite (`7` test cases):
 
 ```powershell
 ./Build/release/bin/TestLibWebView[.exe] --suite TestAutomationFlows
 ```
 
-Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, `flow_store_persistence_and_observers`, and `flow_store_prunes_evicted_runs_from_disk`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.
+Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, `flow_store_persistence_and_observers`, `flow_store_prunes_evicted_runs_from_disk`, and `upload_file_step_parse_serialize_and_shadow_dom_script`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.

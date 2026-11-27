@@ -8,6 +8,7 @@
 
 #include <AK/Error.h>
 #include <AK/HashTable.h>
+#include <AK/JsonValue.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
@@ -30,6 +31,11 @@ public:
     String const& auth_token() const { return m_auth_token; }
     String const& session_id() const { return m_session_id; }
 
+    void broadcast_notification(StringView method, JsonValue params);
+    void notify_resource_updated(StringView uri);
+    void close_all_sse_streams();
+    size_t sse_client_count() const;
+
     class Connection;
 
 private:
@@ -43,6 +49,7 @@ private:
     String m_auth_token;
     String m_session_id;
     HashTable<NonnullRefPtr<Connection>> m_connections;
+    HashTable<String> m_subscribed_resources;
     bool m_is_shutting_down { false };
 };
 

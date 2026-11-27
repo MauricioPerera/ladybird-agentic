@@ -6,9 +6,16 @@
 
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/LexicalPath.h>
+#include <AK/QuickSort.h>
+#include <LibCore/Directory.h>
+#include <LibCore/File.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
 #include <LibWebView/Automation/FlowTypes.h>
+#include <LibWebView/Settings.h>
+#include <LibWebView/Utilities.h>
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebUI/FlowsUI.h>
 
@@ -27,7 +34,7 @@ void FlowsUI::register_interfaces()
     m_store = store.make_weak_ptr();
 
     register_interface("loadState"sv, [this](auto const&) {
-        send_state();
+        send_state(true);
     });
     register_interface("saveFlow"sv, [this](auto const& data) {
         save_flow(data);
@@ -44,6 +51,12 @@ void FlowsUI::register_interfaces()
     register_interface("cancelRun"sv, [this](auto const& data) {
         cancel_run(data);
     });
+    register_interface("setUploadDirectory"sv, [this](auto const& data) {
+        set_upload_directory(data);
+    });
+    register_interface("openUploadDirectory"sv, [this](auto const&) {
+        open_upload_directory();
+    });
 }
 
 void FlowsUI::flows_changed()
@@ -58,7 +71,59 @@ void FlowsUI::flow_runs_changed()
         send_state();
 }
 
-void FlowsUI::send_state()
+void FlowsUI::upload_directory_changed()
+{
+    m_has_cached_upload_files = false;
+    if (has_client())
+        send_state(true);
+}
+
+void FlowsUI::refresh_upload_files_cache()
+{
+    auto upload_dir = Application::the().effective_upload_directory();
+    struct UploadFileCandidate {
+        String name;
+        u64 size_bytes { 0 };
+    };
+    Vector<UploadFileCandidate> upload_candidates;
+    if (FileSystem::is_directory(upload_dir)) {
+        (void)Core::Directory::for_each_entry(upload_dir, Core::DirIterator::SkipParentAndBaseDir, [&](Core::DirectoryEntry const& entry, Core::Directory const&) -> ErrorOr<IterationDecision> {
+            if (entry.type != Core::DirectoryEntry::Type::File)
+                return IterationDecision::Continue;
+            if (entry.name.starts_with('.'))
+                return IterationDecision::Continue;
+            auto full_path = LexicalPath::join(upload_dir, entry.name).string();
+            if (FileSystem::is_link(full_path))
+                return IterationDecision::Continue;
+            auto name_str = String::from_utf8(entry.name.view());
+            if (name_str.is_error())
+                return IterationDecision::Continue;
+            u64 size_bytes = 0;
+            if (auto file_or = Core::File::open(full_path, Core::File::OpenMode::Read); !file_or.is_error()) {
+                if (auto sz = file_or.value()->size(); !sz.is_error())
+                    size_bytes = sz.value();
+            }
+            upload_candidates.append({ name_str.release_value(), size_bytes });
+            if (upload_candidates.size() >= 200)
+                return IterationDecision::Break;
+            return IterationDecision::Continue;
+        });
+    }
+    quick_sort(upload_candidates, [](UploadFileCandidate const& a, UploadFileCandidate const& b) {
+        return a.name < b.name;
+    });
+    JsonArray upload_files_json;
+    for (auto const& candidate : upload_candidates) {
+        JsonObject f;
+        f.set("name"sv, candidate.name);
+        f.set("sizeBytes"sv, candidate.size_bytes);
+        upload_files_json.must_append(move(f));
+    }
+    m_cached_upload_files = move(upload_files_json);
+    m_has_cached_upload_files = true;
+}
+
+void FlowsUI::send_state(bool refresh_upload_files)
 {
     auto& app = Application::the();
     auto& store = app.flow_store();
@@ -98,12 +163,22 @@ void FlowsUI::send_state()
         mcp_json.set("endpoint"sv, MUST(String::formatted("http://127.0.0.1:{}/mcp", *port)));
     }
 
+    auto upload_dir = app.effective_upload_directory();
+    if (refresh_upload_files || !m_has_cached_upload_files)
+        refresh_upload_files_cache();
+    auto upload_files_json = m_cached_upload_files;
+
     JsonObject state;
     state.set("flows"sv, move(flows_json));
     state.set("runs"sv, move(runs_json));
     state.set("tabs"sv, move(tabs_json));
     state.set("mcp"sv, move(mcp_json));
     state.set("storageDirectory"sv, String::from_utf8_without_validation(store.storage_directory().bytes()));
+    state.set("uploadDirectory"sv, String::from_utf8_without_validation(upload_dir.bytes()));
+    state.set("defaultUploadDirectory"sv, Settings::default_upload_directory());
+    state.set("uploadDirectoryCustom"sv, Application::settings().upload_directory().value_or(String {}));
+    state.set("uploadDirectoryOverriddenByCli"sv, app.upload_directory_overridden_by_cli());
+    state.set("uploadFiles"sv, move(upload_files_json));
 
     async_send_message("stateUpdated"sv, move(state));
 }
@@ -233,6 +308,47 @@ void FlowsUI::cancel_run(JsonValue const& data)
     bool cancelled = Application::the().flow_runner().cancel_run(data.as_string());
     if (!cancelled)
         send_action_result(false, "Run is no longer active."_string);
+}
+
+void FlowsUI::set_upload_directory(JsonValue const& data)
+{
+    if (!data.is_string()) {
+        send_action_result(false, "Expected upload directory path string"_string);
+        return;
+    }
+
+    auto raw = data.as_string();
+    auto trimmed = raw.bytes_as_string_view().trim_whitespace();
+    Optional<String> next_value;
+    if (!trimmed.is_empty()) {
+        auto validated = Settings::validate_upload_directory(trimmed);
+        if (validated.is_error()) {
+            send_action_result(false, MUST(String::formatted("Invalid upload directory: {}", validated.error())));
+            return;
+        }
+        if (auto dir_res = Core::Directory::create(validated.value().to_byte_string(), Core::Directory::CreateDirectories::Yes); dir_res.is_error()) {
+            send_action_result(false, MUST(String::formatted("Could not create upload directory: {}", dir_res.error())));
+            return;
+        }
+        next_value = validated.release_value();
+    }
+
+    if (auto res = Application::settings().set_upload_directory(move(next_value)); res.is_error()) {
+        send_action_result(false, MUST(String::formatted("Failed to save upload directory: {}", res.error())));
+        return;
+    }
+
+    auto effective = Application::the().effective_upload_directory();
+    send_action_result(true, MUST(String::formatted("Upload directory set to {}", effective)));
+}
+
+void FlowsUI::open_upload_directory()
+{
+    if (auto res = Application::the().open_upload_directory(); res.is_error()) {
+        send_action_result(false, MUST(String::formatted("Could not open upload directory: {}", res.error())));
+        return;
+    }
+    send_action_result(true, "Opened upload directory."_string);
 }
 
 }

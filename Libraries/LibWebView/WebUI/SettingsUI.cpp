@@ -8,6 +8,7 @@
 #include <AK/Platform.h>
 #include <AK/Utf16String.h>
 #include <LibCore/BrowserVersion.h>
+#include <LibCore/Directory.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/GeolocationProvider.h>
 #include <LibCore/Promise.h>
@@ -202,6 +203,12 @@ void SettingsUI::register_interfaces()
     register_interface("setUserAgentPreset"sv, [this](auto const& data) {
         set_user_agent_preset(data);
     });
+    register_interface("setUploadDirectory"sv, [this](auto const& data) {
+        set_upload_directory(data);
+    });
+    register_interface("openUploadDirectory"sv, [this](auto const& data) {
+        open_upload_directory(data);
+    });
     register_interface("setCrashReportSending"sv, [this](auto const& data) {
         set_crash_report_sending(data);
     });
@@ -249,6 +256,10 @@ JsonObject SettingsUI::serialize_settings() const
     auto settings = move(settings_json.as_object());
 
     settings.set("defaultNewTabPageURL"sv, Settings::default_new_tab_page_url().serialize());
+    settings.set("defaultUploadDirectory"sv, Settings::default_upload_directory());
+    auto effective_upload_dir = Application::the().effective_upload_directory();
+    settings.set("effectiveUploadDirectory"sv, String::from_utf8_without_validation(effective_upload_dir.bytes()));
+    settings.set("uploadDirectoryOverriddenByCli"sv, Application::the().upload_directory_overridden_by_cli());
 
     JsonArray available_ua_presets;
     for (auto const& entry : WebView::user_agents)
@@ -753,6 +764,44 @@ void SettingsUI::set_user_agent_preset(JsonValue const& preset)
         Application::settings().set_user_agent_preset({});
     else
         Application::settings().set_user_agent_preset(move(value));
+}
+
+void SettingsUI::set_upload_directory(JsonValue const& directory)
+{
+    if (!directory.is_string())
+        return;
+
+    auto raw = directory.as_string();
+    auto trimmed = raw.bytes_as_string_view().trim_whitespace();
+    Optional<String> next_value;
+    if (!trimmed.is_empty()) {
+        auto validated = Settings::validate_upload_directory(trimmed);
+        if (validated.is_error()) {
+            async_send_message("uploadDirectoryStatus"sv, MUST(String::formatted("Invalid upload folder: {}", validated.error())));
+            return;
+        }
+        if (auto dir_res = Core::Directory::create(validated.value().to_byte_string(), Core::Directory::CreateDirectories::Yes); dir_res.is_error()) {
+            async_send_message("uploadDirectoryStatus"sv, MUST(String::formatted("Could not create upload folder: {}", dir_res.error())));
+            return;
+        }
+        next_value = validated.release_value();
+    }
+
+    if (auto res = Application::settings().set_upload_directory(move(next_value)); res.is_error()) {
+        async_send_message("uploadDirectoryStatus"sv, MUST(String::formatted("Could not save upload folder: {}", res.error())));
+        return;
+    }
+
+    async_send_message("uploadDirectoryStatus"sv, String {});
+    broadcast_settings_change();
+}
+
+void SettingsUI::open_upload_directory(JsonValue const&)
+{
+    if (auto res = Application::the().open_upload_directory(); res.is_error())
+        async_send_message("uploadDirectoryStatus"sv, MUST(String::formatted("Could not open upload folder: {}", res.error())));
+    else
+        async_send_message("uploadDirectoryStatus"sv, String {});
 }
 
 void SettingsUI::crash_reports_changed()

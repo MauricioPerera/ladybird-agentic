@@ -1947,32 +1947,40 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
         //    multiple is true files are be appended to element's selected files.
         // NB: Each file is opened in the unsandboxed UI process, because the WebContent sandbox blocks this
         //     process from opening arbitrary paths. The UI process opens only the files listed in the command's text.
-        auto read_files_and_apply_selection = [connection = this, command_id = *m_current_command_id, input_element = GC::make_root(input_element)](this auto const& self, Vector<String> paths, size_t index, Vector<Web::HTML::SelectedFile> selected_files) -> void {
+        auto read_files_and_apply_selection = [weak_connection = make_weak_ptr(), command_id = *m_current_command_id, input_element = GC::make_root(input_element)](this auto const& self, Vector<String> paths, size_t index, size_t total_bytes, Vector<Web::HTML::SelectedFile> selected_files) -> void {
+            if (!weak_connection || weak_connection->m_current_command_id != command_id)
+                return;
+
             if (index < paths.size()) {
                 auto path = paths[index].to_byte_string();
 
-                Web::FileRequest file_request(path, [connection, self, paths = move(paths), index, selected_files = move(selected_files), path](ErrorOr<i32> file_descriptor_or_error) mutable {
-                    static constexpr size_t max_webdriver_upload_file_size = 128 * 1024 * 1024;
+                Web::FileRequest file_request(path, [weak_connection, command_id, self, paths = move(paths), index, total_bytes, selected_files = move(selected_files), path](ErrorOr<i32> file_descriptor_or_error) mutable {
+                    if (!weak_connection || weak_connection->m_current_command_id != command_id)
+                        return;
+
+                    static constexpr size_t max_webdriver_upload_total_bytes = 512ULL * 1024 * 1024;
+                    size_t next_total_bytes = total_bytes;
                     auto contents_or_error = [&]() -> ErrorOr<ByteBuffer> {
                         auto opened_file = TRY(Core::File::adopt_fd(TRY(file_descriptor_or_error), Core::File::OpenMode::Read));
                         auto file_size = TRY(opened_file->size());
-                        if (file_size > max_webdriver_upload_file_size)
-                            return Error::from_string_literal("File exceeds maximum upload size (128 MiB)");
+                        if (file_size > max_webdriver_upload_total_bytes || file_size > max_webdriver_upload_total_bytes - total_bytes)
+                            return Error::from_string_literal("File(s) exceed maximum cumulative upload size (512 MiB)");
+                        next_total_bytes = total_bytes + static_cast<size_t>(file_size);
                         return opened_file->read_until_eof();
                     }();
 
                     if (contents_or_error.is_error()) {
-                        connection->driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("Failed to read '{}': {}", path, contents_or_error.error()))));
+                        weak_connection->driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("Failed to read '{}': {}", path, contents_or_error.error()))));
                         return;
                     }
 
                     selected_files.append(Web::HTML::SelectedFile {
                         Utf16String::from_utf8(LexicalPath::basename(path)),
                         contents_or_error.release_value() });
-                    self(move(paths), index + 1, move(selected_files));
+                    self(move(paths), index + 1, next_total_bytes, move(selected_files));
                 });
 
-                connection->m_page_client->request_file_for_webdriver(command_id, move(file_request));
+                weak_connection->m_page_client->request_file_for_webdriver(command_id, move(file_request));
                 return;
             }
 
@@ -1982,10 +1990,10 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
             //     1. input
             //     2. change
             // NOTE: These events are fired synchronously by `did_select_files`.
-            connection->driver_execution_complete(JsonValue {});
+            weak_connection->driver_execution_complete(JsonValue {});
         };
 
-        read_files_and_apply_selection(move(files), 0, {});
+        read_files_and_apply_selection(move(files), 0, 0, {});
 
         // 8. Return success with data null.
         return JsonValue {};

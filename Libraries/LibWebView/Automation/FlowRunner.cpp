@@ -16,6 +16,7 @@
 #include <LibWebCommon/HTML/ActivateTab.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
+#include <LibWebView/Utilities.h>
 #include <LibWebView/Vault/VaultTypes.h>
 #include <LibWebView/ViewImplementation.h>
 
@@ -302,6 +303,10 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::AssertUrl: {
+        if (run.require_mcp_permission && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+            fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab URL until navigation commits to a new document"_string);
+            return;
+        }
         Optional<String> contains;
         Optional<String> equals;
         if (step.contains.has_value())
@@ -318,9 +323,14 @@ void FlowRunner::run_next_step(String const& run_id)
     case FlowStep::Action::Fill:
     case FlowStep::Action::AssertText:
     case FlowStep::Action::Extract: {
+        bool locator_reads_text = step.locator.has_value()
+            && (step.locator->kind == FlowLocator::Kind::Text
+                || (step.locator->kind == FlowLocator::Kind::Role && step.locator->name.has_value() && !step.locator->name->is_empty()));
         if (run.require_mcp_permission
-            && (step.action == FlowStep::Action::Extract || step.action == FlowStep::Action::AssertText)
-            && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+            && m_application.is_view_mcp_secret_tainted(run.tab_id)
+            && (step.action == FlowStep::Action::Extract
+                || step.action == FlowStep::Action::AssertText
+                || ((step.action == FlowStep::Action::WaitFor || step.action == FlowStep::Action::AssertVisible) && locator_reads_text))) {
             fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab until navigation commits to a new document"_string);
             return;
         }
@@ -447,7 +457,123 @@ void FlowRunner::run_next_step(String const& run_id)
         });
         return;
     }
+
+    case FlowStep::Action::UploadFile: {
+        if (!step.locator.has_value() || step.paths.is_empty()) {
+            fail_run(run_id, "Step 'upload_file' requires both 'locator' and 'paths'"_string);
+            return;
+        }
+        auto upload_root = m_application.effective_upload_directory();
+        Vector<String> validated_paths;
+        validated_paths.ensure_capacity(step.paths.size());
+        for (auto const& raw_path : step.paths) {
+            auto interpolated = interpolate_flow_variables(raw_path, run.runtime_vars);
+            auto validated = resolve_and_validate_upload_path(interpolated, upload_root);
+            if (validated.is_error()) {
+                fail_run(run_id, MUST(String::formatted("{}: {}", validated.error(), interpolated)));
+                return;
+            }
+            validated_paths.unchecked_append(String::from_utf8_without_validation(validated.value().bytes()));
+        }
+        auto locator = interpolate_locator(*step.locator, run.runtime_vars);
+        auto script = build_locator_action_script("resolve_upload_input"sv, locator, {});
+        execute_upload_step_attempt(run_id, idx, move(script), move(validated_paths), timeout_ms);
+        return;
     }
+    }
+}
+
+void FlowRunner::execute_upload_step_attempt(String const& run_id, size_t step_index, String script, Vector<String> validated_paths, u32 timeout_ms)
+{
+    auto entry = m_active_runs.get(run_id);
+    if (!entry.has_value())
+        return;
+    auto& run = *entry.value();
+    if (run.finished || run.step_index != step_index)
+        return;
+
+    JsonObject payload;
+    payload.set("script"sv, script);
+    payload.set("args"sv, JsonArray {});
+
+    m_application.enqueue_automation_webdriver_command(run.tab_id, "execute_script"_string, move(payload), {}, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, step_index, script = move(script), validated_paths = move(validated_paths), timeout_ms](Web::WebDriver::Response response) mutable {
+        if (!weak_self)
+            return;
+        auto active = weak_self->m_active_runs.get(run_id);
+        if (!active.has_value())
+            return;
+        auto& run = *active.value();
+        if (run.finished || run.step_index != step_index)
+            return;
+
+        if (response.is_error()) {
+            weak_self->fail_run(run_id, MUST(String::formatted("WebDriver error ({}): {}", response.error().error, response.error().message)));
+            return;
+        }
+
+        auto const& val = response.value();
+        if (!val.is_object()) {
+            weak_self->fail_run(run_id, "Unexpected script result while resolving upload input"_string);
+            return;
+        }
+
+        auto const& obj = val.as_object();
+        if (obj.get_bool("ok"sv).value_or(false)) {
+            Optional<String> element_id;
+            if (auto el_val = obj.get("element"sv); el_val.has_value())
+                element_id = Application::extract_webdriver_element_id(*el_val);
+            if (!element_id.has_value())
+                element_id = Application::extract_webdriver_element_id(val);
+            if (!element_id.has_value()) {
+                weak_self->fail_run(run_id, "Resolved upload element response missing element handle"_string);
+                return;
+            }
+
+            StringBuilder joined;
+            JsonArray paths_array;
+            for (auto const& path : validated_paths) {
+                if (!joined.is_empty())
+                    joined.append('\n');
+                joined.append(path);
+                paths_array.must_append(path);
+            }
+
+            JsonObject send_payload;
+            send_payload.set("text"sv, MUST(joined.to_string()));
+            Vector<String> args;
+            args.append(*element_id);
+
+            auto file_count = validated_paths.size();
+            weak_self->m_application.enqueue_automation_webdriver_command(run.tab_id, "element_send_keys"_string, move(send_payload), move(args), run.require_mcp_permission, [weak_self, run_id, step_index, file_count, paths_array = move(paths_array)](Web::WebDriver::Response send_resp) mutable {
+                if (!weak_self)
+                    return;
+                if (send_resp.is_error()) {
+                    weak_self->fail_run(run_id, MUST(String::formatted("Upload failed ({}): {}", send_resp.error().error, send_resp.error().message)));
+                    return;
+                }
+                JsonObject output;
+                output.set("uploaded"sv, true);
+                output.set("file_count"sv, static_cast<u64>(file_count));
+                output.set("paths"sv, move(paths_array));
+                weak_self->complete_current_step(run_id, step_index, JsonValue { move(output) });
+            });
+            return;
+        }
+
+        bool retryable = obj.get_bool("retryable"sv).value_or(false);
+        auto err_msg = obj.get_string("error"sv).value_or("Upload target check failed"_string);
+        auto elapsed_ms = (MonotonicTime::now() - run.step_started_at).to_milliseconds();
+        if (!retryable || elapsed_ms >= timeout_ms) {
+            weak_self->fail_run(run_id, MUST(String::formatted("Step timed out or failed ({} ms): {}", elapsed_ms, err_msg)));
+            return;
+        }
+
+        run.step_timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(step_poll_interval_ms), [weak_self, run_id, step_index, script = move(script), validated_paths = move(validated_paths), timeout_ms]() mutable {
+            if (weak_self)
+                weak_self->execute_upload_step_attempt(run_id, step_index, move(script), move(validated_paths), timeout_ms);
+        });
+        run.step_timer->start();
+    });
 }
 
 void FlowRunner::execute_locator_step_attempt(String const& run_id, size_t step_index, String script, u32 timeout_ms)
@@ -564,11 +690,22 @@ void FlowRunner::complete_current_step(String const& run_id, size_t step_index, 
     auto& step_res = run.record.steps[step_index];
     step_res.status = "passed"_string;
     step_res.duration_ms = (MonotonicTime::now() - run.step_started_at).to_milliseconds();
-    step_res.output = move(output);
+    if (output.is_string()) {
+        step_res.output = JsonValue { m_application.scrub_mcp_secrets(output.as_string()) };
+    } else if (!output.is_null()) {
+        auto serialized = output.serialized();
+        auto scrubbed = m_application.scrub_mcp_secrets(serialized);
+        if (auto reparsed = JsonValue::from_string(scrubbed); !reparsed.is_error())
+            step_res.output = reparsed.release_value();
+        else
+            step_res.output = JsonValue { move(scrubbed) };
+    } else {
+        step_res.output = move(output);
+    }
     step_res.screenshot_path = move(screenshot_path);
 
     if (step_def.action == FlowStep::Action::Extract
-        || ((step_def.action == FlowStep::Action::Eval || step_def.action == FlowStep::Action::Screenshot) && step_def.save_as.has_value())) {
+        || ((step_def.action == FlowStep::Action::Eval || step_def.action == FlowStep::Action::Screenshot || step_def.action == FlowStep::Action::UploadFile) && step_def.save_as.has_value())) {
         auto key = step_def.save_as.value_or("extracted"_string);
         run.record.outputs.set(key, step_res.output);
         if (step_res.output.is_string())
@@ -594,6 +731,8 @@ void FlowRunner::fail_run(String const& run_id, String error, StringView termina
     auto& run = *taken.value();
     run.finished = true;
     cleanup_run_timers(run);
+
+    error = m_application.scrub_mcp_secrets(error);
 
     if (run.step_index < run.record.steps.size() && run.record.steps[run.step_index].status == "running"sv) {
         run.record.steps[run.step_index].status = String::from_utf8_without_validation(terminal_status.bytes());

@@ -5,6 +5,7 @@
  */
 
 #include <AK/IPv4Address.h>
+#include <errno.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
@@ -148,26 +149,38 @@ public:
     }
     virtual void get_page_source(u64, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
     virtual void find_elements(u64, String, String, MCP::OnToolCallComplete cb) override { cb(error_result("unsupported"sv)); }
-    virtual void click_element(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, MCP::OnToolCallComplete cb) override
+    virtual void click_element(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, Optional<i32> x, Optional<i32> y, String button, u32 click_count, Vector<String> modifiers, MCP::OnToolCallComplete cb) override
     {
         last_action = RecordedAction { "click"_string, ref, selector, {} };
         JsonObject out;
         out.set("clicked"sv, true);
         if (ref.has_value())
             out.set("ref"sv, *ref);
+        if (x.has_value() && y.has_value()) {
+            out.set("x"sv, static_cast<i64>(*x));
+            out.set("y"sv, static_cast<i64>(*y));
+        }
+        out.set("button"sv, move(button));
+        out.set("click_count"sv, static_cast<u64>(click_count));
+        out.set("modifier_count"sv, static_cast<u64>(modifiers.size()));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void type_text(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String, bool, String, MCP::OnToolCallComplete cb) override
+    virtual void type_text(u64, Optional<String> ref, Optional<String> selector, Optional<String>, String text, bool, String, bool use_keyboard, MCP::OnToolCallComplete cb) override
     {
         last_action = RecordedAction { "type_text"_string, ref, selector, {} };
         JsonObject out;
         out.set("typed"sv, true);
         if (ref.has_value())
             out.set("ref"sv, *ref);
+        bool has_target = (ref.has_value() && !ref->is_empty()) || (selector.has_value() && !selector->is_empty());
+        if (use_keyboard || !has_target)
+            out.set("mode"sv, "keyboard"sv);
+        out.set("length"sv, static_cast<u64>(text.bytes().size()));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete cb) override
+    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, Optional<String> root_selector, MCP::OnToolCallComplete cb) override
     {
+        last_action = RecordedAction { "get_page_snapshot"_string, {}, root_selector, {} };
         JsonArray elements;
         JsonObject btn;
         btn.set("ref"sv, "@e1"sv);
@@ -179,16 +192,19 @@ public:
         out.set("tab_id"sv, tab_id);
         out.set("max_elements"sv, static_cast<u64>(max_elements));
         out.set("include_text"sv, include_text);
+        if (root_selector.has_value() && !root_selector->is_empty())
+            out.set("root_selector"sv, *root_selector);
         out.set("element_count"sv, 1);
         out.set("elements"sv, move(elements));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void press_key(u64, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
+    virtual void press_key(u64, String key, Optional<String> ref, Optional<String> selector, Vector<String> modifiers, MCP::OnToolCallComplete cb) override
     {
         last_action = RecordedAction { "press_key"_string, ref, selector, key };
         JsonObject out;
         out.set("pressed"sv, true);
         out.set("key"sv, move(key));
+        out.set("modifier_count"sv, static_cast<u64>(modifiers.size()));
         cb(ok_json_result(JsonValue { move(out) }));
     }
     virtual void scroll_page(u64, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
@@ -200,11 +216,28 @@ public:
         out.set("amount"sv, static_cast<i64>(amount));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void hover_element(u64, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete cb) override
+    virtual void wheel(u64, Optional<i32> x, Optional<i32> y, Optional<String> ref, Optional<String> selector, i32 delta_x, i32 delta_y, Vector<String> modifiers, u32 duration_ms, MCP::OnToolCallComplete cb) override
+    {
+        last_action = RecordedAction { "wheel"_string, ref, selector, {} };
+        JsonObject out;
+        out.set("wheeled"sv, true);
+        out.set("x"sv, static_cast<i64>(x.value_or(500)));
+        out.set("y"sv, static_cast<i64>(y.value_or(300)));
+        out.set("delta_x"sv, static_cast<i64>(delta_x));
+        out.set("delta_y"sv, static_cast<i64>(delta_y));
+        out.set("modifier_count"sv, static_cast<u64>(modifiers.size()));
+        out.set("duration_ms"sv, static_cast<u64>(duration_ms));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void hover_element(u64, Optional<String> ref, Optional<String> selector, Optional<i32> x, Optional<i32> y, MCP::OnToolCallComplete cb) override
     {
         last_action = RecordedAction { "hover"_string, ref, selector, {} };
         JsonObject out;
         out.set("hovered"sv, true);
+        if (x.has_value() && y.has_value()) {
+            out.set("x"sv, static_cast<i64>(*x));
+            out.set("y"sv, static_cast<i64>(*y));
+        }
         cb(ok_json_result(JsonValue { move(out) }));
     }
     virtual void select_option(u64, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String>, Optional<size_t>, MCP::OnToolCallComplete cb) override
@@ -224,7 +257,40 @@ public:
         out.set("timeout_ms"sv, static_cast<u64>(timeout_ms));
         cb(ok_json_result(JsonValue { move(out) }));
     }
-    virtual void drag(u64, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String>, Optional<String>, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, MCP::OnToolCallComplete cb) override
+    virtual void list_notifications(Optional<u64> tab_id, Optional<String> origin, size_t limit, bool clear, MCP::OnToolCallComplete cb) override
+    {
+        JsonArray items;
+        JsonObject notif;
+        notif.set("notification_id"sv, 1);
+        notif.set("tab_id"sv, tab_id.value_or(1));
+        notif.set("event_type"sv, "shown"sv);
+        notif.set("origin"sv, origin.value_or("https://example.com"_string));
+        notif.set("title"sv, "Build Done"sv);
+        notif.set("body"sv, "All checks passed"sv);
+        items.must_append(move(notif));
+        JsonObject out;
+        out.set("count"sv, 1);
+        out.set("limit"sv, static_cast<u64>(limit));
+        out.set("cleared"sv, clear);
+        out.set("notifications"sv, move(items));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String>, Optional<String> event_type, u32 timeout_ms, MCP::OnToolCallComplete cb) override
+    {
+        JsonObject notif;
+        notif.set("notification_id"sv, 2);
+        notif.set("tab_id"sv, tab_id.value_or(1));
+        notif.set("event_type"sv, event_type.value_or("shown"_string));
+        notif.set("origin"sv, origin.value_or("https://example.com"_string));
+        notif.set("title"sv, title_contains.value_or("Build Done"_string));
+        notif.set("body"sv, "Notification matched"sv);
+        JsonObject out;
+        out.set("matched"sv, true);
+        out.set("timeout_ms"sv, static_cast<u64>(timeout_ms));
+        out.set("notification"sv, move(notif));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void drag(u64, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String>, Optional<String>, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, Vector<String> modifiers, MCP::OnToolCallComplete cb) override
     {
         last_action = RecordedAction { "drag"_string, from_ref, from_selector, {} };
         JsonObject out;
@@ -239,6 +305,7 @@ public:
         out.set("to"sv, move(to_obj));
         out.set("steps"sv, static_cast<u64>(steps));
         out.set("duration_ms"sv, static_cast<u64>(duration_ms));
+        out.set("modifier_count"sv, static_cast<u64>(modifiers.size()));
         cb(ok_json_result(JsonValue { move(out) }));
     }
     virtual void upload_file(u64, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, MCP::OnToolCallComplete cb) override
@@ -251,6 +318,20 @@ public:
         for (auto const& p : file_paths)
             paths.must_append(p);
         out.set("paths"sv, move(paths));
+        cb(ok_json_result(JsonValue { move(out) }));
+    }
+    virtual void list_upload_files(MCP::OnToolCallComplete cb) override
+    {
+        JsonArray files;
+        JsonObject f;
+        f.set("name"sv, "demo.mp4"sv);
+        f.set("size_bytes"sv, 1234);
+        files.must_append(move(f));
+        JsonObject out;
+        out.set("upload_directory"sv, "C:\\Users\\Demo\\Videos\\Ladybird Uploads"sv);
+        out.set("overridden_by_cli"sv, false);
+        out.set("count"sv, 1);
+        out.set("files"sv, move(files));
         cb(ok_json_result(JsonValue { move(out) }));
     }
     virtual void get_console_logs(u64 tab_id, size_t, bool, MCP::OnToolCallComplete cb) override
@@ -1114,23 +1195,35 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(!init_http.session_id.is_empty());
 
     auto init_json = MUST(JsonValue::from_string(init_http.body)).as_object();
+    auto caps = init_json.get_object("result"sv)->get_object("capabilities"sv);
+    EXPECT(caps.has_value());
+    EXPECT_EQ(caps->get_object("resources"sv)->get_bool("subscribe"sv), true);
+    EXPECT(caps->has("logging"sv));
+
     auto instructions = init_json.get_object("result"sv)->get_string("instructions"sv);
     EXPECT(instructions.has_value());
     EXPECT(instructions->contains("save_flow"sv));
     EXPECT(instructions->contains("run_flow"sv));
     EXPECT(instructions->contains("list_page_tools"sv));
     EXPECT(instructions->contains("call_page_tool"sv));
+    EXPECT(instructions->contains("list_notifications"sv));
+    EXPECT(instructions->contains("wait_for_notification"sv));
 
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 50u);
+    EXPECT_EQ(tools->size(), 54u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
     Optional<JsonObject> open_tab_tool;
     Optional<JsonObject> click_tool;
     Optional<JsonObject> type_text_tool;
+    Optional<JsonObject> press_key_tool;
+    Optional<JsonObject> hover_tool;
+    Optional<JsonObject> drag_tool;
+    Optional<JsonObject> wheel_tool;
+    Optional<JsonObject> snapshot_tool;
     Optional<JsonObject> list_page_tools_tool;
     Optional<JsonObject> call_page_tool_tool;
     bool found_cancel_flow_run = false;
@@ -1138,6 +1231,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     bool found_inject_extension = false;
     bool found_drag = false;
     bool found_upload_file = false;
+    bool found_list_upload_files = false;
     bool found_snapshot = false;
     bool found_console = false;
     bool found_network = false;
@@ -1155,6 +1249,12 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             click_tool = tool;
         else if (name == "type_text"sv)
             type_text_tool = tool;
+        else if (name == "press_key"sv)
+            press_key_tool = tool;
+        else if (name == "hover"sv)
+            hover_tool = tool;
+        else if (name == "wheel"sv)
+            wheel_tool = tool;
         else if (name == "list_page_tools"sv)
             list_page_tools_tool = tool;
         else if (name == "call_page_tool"sv)
@@ -1165,12 +1265,18 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             found_install_extension = true;
         else if (name == "inject_extension"sv)
             found_inject_extension = true;
-        else if (name == "drag"sv)
+        else if (name == "drag"sv) {
             found_drag = true;
+            drag_tool = tool;
+        }
         else if (name == "upload_file"sv)
             found_upload_file = true;
-        else if (name == "get_page_snapshot"sv)
+        else if (name == "list_upload_files"sv)
+            found_list_upload_files = true;
+        else if (name == "get_page_snapshot"sv) {
             found_snapshot = true;
+            snapshot_tool = tool;
+        }
         else if (name == "get_console_logs"sv)
             found_console = true;
         else if (name == "get_network_requests"sv)
@@ -1185,6 +1291,12 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(open_tab_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("container_id"sv));
     EXPECT(click_tool.has_value());
     EXPECT(type_text_tool.has_value());
+    EXPECT(press_key_tool.has_value());
+    EXPECT(hover_tool.has_value());
+    EXPECT(drag_tool.has_value());
+    EXPECT(wheel_tool.has_value());
+    EXPECT(snapshot_tool.has_value());
+    EXPECT(snapshot_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("root_selector"sv));
     EXPECT(list_page_tools_tool.has_value());
     EXPECT(call_page_tool_tool.has_value());
     EXPECT(call_page_tool_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("arguments"sv));
@@ -1194,12 +1306,31 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(found_inject_extension);
     EXPECT(found_drag);
     EXPECT(found_upload_file);
+    EXPECT(found_list_upload_files);
     EXPECT(found_snapshot);
     EXPECT(found_console);
     EXPECT(found_network);
     EXPECT(found_wait_for);
-    EXPECT(click_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("ref"sv));
-    EXPECT(type_text_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("ref"sv));
+    auto click_props = click_tool->get_object("inputSchema"sv)->get_object("properties"sv);
+    EXPECT(click_props->has("ref"sv));
+    EXPECT(click_props->has("x"sv));
+    EXPECT(click_props->has("y"sv));
+    EXPECT(click_props->has("button"sv));
+    EXPECT(click_props->has("click_count"sv));
+    EXPECT(click_props->has("modifiers"sv));
+    auto type_props = type_text_tool->get_object("inputSchema"sv)->get_object("properties"sv);
+    EXPECT(type_props->has("ref"sv));
+    EXPECT(type_props->has("use_keyboard"sv));
+    EXPECT(press_key_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("modifiers"sv));
+    EXPECT(hover_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("x"sv));
+    EXPECT(hover_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("y"sv));
+    EXPECT(drag_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("modifiers"sv));
+    auto wheel_props = wheel_tool->get_object("inputSchema"sv)->get_object("properties"sv);
+    EXPECT(wheel_props->has("x"sv));
+    EXPECT(wheel_props->has("y"sv));
+    EXPECT(wheel_props->has("delta_x"sv));
+    EXPECT(wheel_props->has("delta_y"sv));
+    EXPECT(wheel_props->has("modifiers"sv));
 
     auto flow_schema = save_flow_tool->get_object("inputSchema"sv)
                            ->get_object("properties"sv)
@@ -1213,7 +1344,15 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
 
     auto action_enum = step_props->get_object("action"sv)->get_array("enum"sv);
     EXPECT(action_enum.has_value());
-    EXPECT_EQ(action_enum->size(), 15u);
+    EXPECT_EQ(action_enum->size(), 16u);
+    bool has_upload_file_step = false;
+    action_enum->for_each([&](JsonValue const& v) {
+        if (v.is_string() && v.as_string() == "upload_file"sv)
+            has_upload_file_step = true;
+    });
+    EXPECT(has_upload_file_step);
+    EXPECT(step_props->has("path"sv));
+    EXPECT(step_props->has("paths"sv));
 
     auto locator_kind_enum = step_props->get_object("locator"sv)
                                  ->get_object("properties"sv)
@@ -1465,10 +1604,20 @@ TEST_CASE(mcp_agentic_tools_roundtrip)
     {
         JsonObject args;
         args.set("tab_id"sv, 42);
+        args.set("root_selector"sv, "[role=dialog]"sv);
         auto res = call_mcp_tool(port, token, 1, "get_page_snapshot"sv, move(args));
         auto payload = parse_tool_json_payload(res);
         EXPECT_EQ(payload.get_integer<u64>("element_count"sv).value_or(0), 1u);
+        EXPECT_EQ(payload.get_string("root_selector"sv).value_or(String {}), "[role=dialog]"sv);
         EXPECT_EQ(payload.get_array("elements"sv)->at(0).as_object().get_string("ref"sv).value_or(String {}), "@e1"sv);
+    }
+
+    {
+        auto res = call_mcp_tool(port, token, 100, "list_upload_files"sv, JsonObject {});
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_integer<u64>("count"sv).value_or(0), 1u);
+        EXPECT_EQ(payload.get_array("files"sv)->at(0).as_object().get_string("name"sv).value_or(String {}), "demo.mp4"sv);
     }
 
     {
@@ -1573,6 +1722,100 @@ TEST_CASE(mcp_agentic_tools_roundtrip)
         EXPECT_EQ(payload.get_integer<u64>("steps"sv).value_or(0), 8u);
         EXPECT_EQ(payload.get_integer<u64>("duration_ms"sv).value_or(0), 200u);
         EXPECT_EQ(delegate.last_action->tool, "drag"sv);
+    }
+
+    {
+        JsonArray mods;
+        mods.must_append("Shift"sv);
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("x"sv, 518);
+        args.set("y"sv, 310);
+        args.set("button"sv, "right"sv);
+        args.set("click_count"sv, 2);
+        args.set("modifiers"sv, move(mods));
+        auto res = call_mcp_tool(port, token, 13, "click"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("clicked"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<i64>("x"sv).value_or(0), 518);
+        EXPECT_EQ(payload.get_integer<i64>("y"sv).value_or(0), 310);
+        EXPECT_EQ(payload.get_string("button"sv).value_or(String {}), "right"sv);
+        EXPECT_EQ(payload.get_integer<u64>("click_count"sv).value_or(0), 2u);
+        EXPECT_EQ(payload.get_integer<u64>("modifier_count"sv).value_or(0), 1u);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("x"sv, 640);
+        args.set("y"sv, 280);
+        auto res = call_mcp_tool(port, token, 14, "hover"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("hovered"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<i64>("x"sv).value_or(0), 640);
+        EXPECT_EQ(payload.get_integer<i64>("y"sv).value_or(0), 280);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("text"sv, "Canvas WASM"sv);
+        auto res = call_mcp_tool(port, token, 15, "type_text"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("typed"sv).value_or(false));
+        EXPECT_EQ(payload.get_string("mode"sv).value_or(String {}), "keyboard"sv);
+        EXPECT_EQ(payload.get_integer<u64>("length"sv).value_or(0), 11u);
+    }
+
+    {
+        JsonArray mods;
+        mods.must_append("Control"sv);
+        mods.must_append("Shift"sv);
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("key"sv, "z"sv);
+        args.set("modifiers"sv, move(mods));
+        auto res = call_mcp_tool(port, token, 16, "press_key"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("pressed"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<u64>("modifier_count"sv).value_or(0), 2u);
+    }
+
+    {
+        JsonArray mods;
+        mods.must_append("Control"sv);
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("x"sv, 600);
+        args.set("y"sv, 320);
+        args.set("delta_y"sv, -120);
+        args.set("modifiers"sv, move(mods));
+        auto res = call_mcp_tool(port, token, 17, "wheel"sv, move(args));
+        EXPECT(!res.get_bool("isError"sv).value_or(true));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT(payload.get_bool("wheeled"sv).value_or(false));
+        EXPECT_EQ(payload.get_integer<i64>("delta_y"sv).value_or(0), -120);
+        EXPECT_EQ(payload.get_integer<u64>("modifier_count"sv).value_or(0), 1u);
+        EXPECT_EQ(delegate.last_action->tool, "wheel"sv);
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        auto res = call_mcp_tool(port, token, 18, "wheel"sv, move(args));
+        EXPECT(res.get_bool("isError"sv).value_or(false));
+    }
+
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 42);
+        args.set("x"sv, 10);
+        auto res = call_mcp_tool(port, token, 19, "click"sv, move(args));
+        EXPECT(res.get_bool("isError"sv).value_or(false));
     }
 
     {
@@ -1732,6 +1975,11 @@ TEST_CASE(mcp_upload_path_security_guards)
     EXPECT(!WebView::validate_mcp_upload_path(photo_path).is_error());
     EXPECT(!WebView::validate_mcp_upload_path(photo_path, allowed_dir).is_error());
     EXPECT(WebView::validate_mcp_upload_path(outside_path, allowed_dir).is_error());
+
+    EXPECT(!WebView::resolve_and_validate_upload_path("photo.png"sv, allowed_dir).is_error());
+    EXPECT(WebView::resolve_and_validate_upload_path("photo.png"sv, OptionalNone {}).is_error());
+    EXPECT(WebView::resolve_and_validate_upload_path("../outside.txt"sv, allowed_dir).is_error());
+    EXPECT(WebView::resolve_and_validate_upload_path(outside_path, allowed_dir).is_error());
 }
 
 TEST_CASE(mcp_skills_store_and_url_matching)
@@ -2277,4 +2525,324 @@ TEST_CASE(settings_user_agent_preset_roundtrip)
 
     auto reset_reloaded = WebView::Settings::create(settings_path);
     EXPECT(!reset_reloaded.user_agent_preset().has_value());
+}
+
+TEST_CASE(settings_upload_directory_roundtrip)
+{
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+    auto settings_path = LexicalPath::join(temp_dir, "settings.json"sv).string();
+    auto custom_dir = LexicalPath::join(temp_dir, "videos-queue"sv).string();
+    auto custom_dir_str = String::from_utf8_without_validation(custom_dir.bytes());
+
+    {
+        auto settings = WebView::Settings::create(settings_path);
+        EXPECT(!settings.upload_directory().has_value());
+        EXPECT_EQ(settings.effective_upload_directory(), WebView::Settings::default_upload_directory());
+
+        EXPECT(settings.set_upload_directory("relative/videos"_string).is_error());
+        EXPECT(settings.set_upload_directory("\\\\server\\share\\videos"_string).is_error());
+        EXPECT(settings.set_upload_directory("/"_string).is_error());
+#if defined(AK_OS_WINDOWS)
+        EXPECT(settings.set_upload_directory("C:\\"_string).is_error());
+        EXPECT(settings.set_upload_directory("C:"_string).is_error());
+#endif
+        EXPECT(!settings.set_upload_directory(custom_dir_str).is_error());
+        EXPECT(settings.upload_directory().has_value());
+    }
+
+    {
+        auto reloaded = WebView::Settings::create(settings_path);
+        EXPECT(reloaded.upload_directory().has_value());
+        EXPECT_EQ(reloaded.effective_upload_directory(), reloaded.upload_directory().value());
+
+        EXPECT(!reloaded.set_upload_directory(""_string).is_error());
+        EXPECT(!reloaded.upload_directory().has_value());
+        EXPECT_EQ(reloaded.effective_upload_directory(), WebView::Settings::default_upload_directory());
+    }
+
+    auto reset_reloaded = WebView::Settings::create(settings_path);
+    EXPECT(!reset_reloaded.upload_directory().has_value());
+}
+
+TEST_CASE(mcp_sse_notifications_and_resource_subscriptions)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup = [&] {
+        (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed);
+    };
+
+    FakeMCPDelegate delegate(temp_dir);
+    auto token = "mcp-sse-token"_string;
+    auto server = MUST(MCP::MCPServer::create(delegate, 0, token));
+    auto port = *server->local_port();
+    EXPECT_EQ(server->sse_client_count(), 0u);
+
+    // GET /mcp without Accept: text/event-stream must return 406.
+    {
+        auto sock = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+        StringBuilder req;
+        req.append("GET /mcp HTTP/1.1\r\n"sv);
+        req.appendff("Host: 127.0.0.1:{}\r\n", port);
+        req.appendff("Authorization: Bearer {}\r\n", token);
+        req.append("Accept: application/json\r\n"sv);
+        req.append("Connection: close\r\n\r\n"sv);
+        MUST(sock->write_until_depleted(req.string_view().bytes()));
+        MUST(sock->set_blocking(false));
+
+        StringBuilder raw;
+        bool done = false;
+        auto timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { done = true; });
+        timer->start();
+        sock->on_ready_to_read = [&] {
+            Array<u8, 4096> buf;
+            while (!done) {
+                auto r = sock->read_some(buf);
+                if (r.is_error()) {
+#if EWOULDBLOCK != EAGAIN
+                    bool would_block = r.error().code() == EAGAIN || r.error().code() == EWOULDBLOCK;
+#else
+                    bool would_block = r.error().code() == EAGAIN;
+#endif
+                    if (r.error().is_errno() && would_block)
+                        break;
+                    done = true;
+                    break;
+                }
+                if (r.value().is_empty() || sock->is_eof()) {
+                    if (!r.value().is_empty())
+                        raw.append(StringView { r.value() });
+                    done = true;
+                    break;
+                }
+                raw.append(StringView { r.value() });
+            }
+        };
+        Core::EventLoop::current().spin_until([&] { return done; });
+        timer->stop();
+        sock->close();
+        EXPECT(raw.string_view().starts_with("HTTP/1.1 406 "sv));
+    }
+
+    // resources/list advertises ladybird://notifications.
+    auto list_res = call_mcp_rpc(port, token, 1, "resources/list"sv, JsonObject {});
+    auto listed_resources = list_res.get_object("result"sv)->get_array("resources"sv);
+    EXPECT(listed_resources.has_value());
+    EXPECT_EQ(listed_resources->size(), 1u);
+    EXPECT_EQ(listed_resources->at(0).as_object().get_string("uri"sv), "ladybird://notifications"_string);
+
+    // Open persistent SSE stream via GET /mcp.
+    auto sse_socket = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+    StringBuilder sse_req;
+    sse_req.append("GET /mcp HTTP/1.1\r\n"sv);
+    sse_req.appendff("Host: 127.0.0.1:{}\r\n", port);
+    sse_req.appendff("Authorization: Bearer {}\r\n", token);
+    sse_req.append("Accept: text/event-stream\r\n\r\n"sv);
+    MUST(sse_socket->write_until_depleted(sse_req.string_view().bytes()));
+    MUST(sse_socket->set_blocking(false));
+
+    StringBuilder sse_stream_data;
+    sse_socket->on_ready_to_read = [&] {
+        Array<u8, 8192> buf;
+        for (;;) {
+            auto r = sse_socket->read_some(buf);
+            if (r.is_error())
+                break;
+            if (r.value().is_empty())
+                break;
+            sse_stream_data.append(StringView { r.value() });
+        }
+    };
+
+    auto sse_timeout = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { VERIFY_NOT_REACHED(); });
+    sse_timeout->start();
+    Core::EventLoop::current().spin_until([&] {
+        return sse_stream_data.string_view().contains(": connected\n\n"sv);
+    });
+    sse_timeout->stop();
+    EXPECT(sse_stream_data.string_view().starts_with("HTTP/1.1 200 OK\r\n"sv));
+    EXPECT(sse_stream_data.string_view().contains("Content-Type: text/event-stream"sv));
+    EXPECT_EQ(server->sse_client_count(), 1u);
+
+    // Unsubscribed URI should NOT emit notifications/resources/updated.
+    server->notify_resource_updated("ladybird://notifications"sv);
+    Core::EventLoop::current().pump(Core::EventLoop::WaitMode::PollForEvents);
+    EXPECT(!sse_stream_data.string_view().contains("notifications/resources/updated"sv));
+
+    // Subscribe via resources/subscribe and emit resource update + notifications/message.
+    JsonObject sub_params;
+    sub_params.set("uri"sv, "ladybird://notifications"sv);
+    auto sub_resp = call_mcp_rpc(port, token, 2, "resources/subscribe"sv, move(sub_params));
+    EXPECT(!sub_resp.has("error"sv));
+
+    server->notify_resource_updated("ladybird://notifications"sv);
+
+    JsonObject log_data;
+    log_data.set("title"sv, "Deploy Finished"sv);
+    log_data.set("body"sv, "Production is green"sv);
+    JsonObject msg_params;
+    msg_params.set("level"sv, "info"sv);
+    msg_params.set("logger"sv, "ladybird.notifications"sv);
+    msg_params.set("data"sv, move(log_data));
+    server->broadcast_notification("notifications/message"sv, JsonValue { move(msg_params) });
+
+    auto push_timeout = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { VERIFY_NOT_REACHED(); });
+    push_timeout->start();
+    Core::EventLoop::current().spin_until([&] {
+        auto v = sse_stream_data.string_view();
+        return v.contains("notifications/resources/updated"sv) && v.contains("Deploy Finished"sv);
+    });
+    push_timeout->stop();
+
+    EXPECT(sse_stream_data.string_view().contains("event: message\ndata: "sv));
+    EXPECT(sse_stream_data.string_view().contains("\"ladybird://notifications\""sv));
+    EXPECT(sse_stream_data.string_view().contains("notifications/message"sv));
+
+    // Unsubscribe and verify resource updates stop, then close SSE stream and verify cleanup.
+    JsonObject unsub_params;
+    unsub_params.set("uri"sv, "ladybird://notifications"sv);
+    auto unsub_resp = call_mcp_rpc(port, token, 3, "resources/unsubscribe"sv, move(unsub_params));
+    EXPECT(!unsub_resp.has("error"sv));
+
+    auto before_unsub_len = sse_stream_data.length();
+    server->notify_resource_updated("ladybird://notifications"sv);
+    Core::EventLoop::current().pump(Core::EventLoop::WaitMode::PollForEvents);
+    EXPECT_EQ(sse_stream_data.length(), before_unsub_len);
+
+    sse_socket->close();
+    auto close_timeout = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { });
+    close_timeout->start();
+    Core::EventLoop::current().spin_until([&] {
+        return server->sse_client_count() == 0 || !close_timeout->is_active();
+    });
+    close_timeout->stop();
+    EXPECT_EQ(server->sse_client_count(), 0u);
+
+    // list_notifications & wait_for_notification tools round-trip.
+    {
+        JsonObject args;
+        args.set("tab_id"sv, 1);
+        args.set("limit"sv, 10);
+        args.set("clear"sv, true);
+        auto res = call_mcp_tool(port, token, 4, "list_notifications"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_u64("count"sv), 1u);
+        EXPECT_EQ(payload.get_bool("cleared"sv), true);
+    }
+    {
+        JsonObject args;
+        args.set("origin"sv, "https://app.example"sv);
+        args.set("title_contains"sv, "Build Done"sv);
+        args.set("event_type"sv, "shown"sv);
+        args.set("timeout_ms"sv, 2500);
+        auto res = call_mcp_tool(port, token, 5, "wait_for_notification"sv, move(args));
+        auto payload = parse_tool_json_payload(res);
+        EXPECT_EQ(payload.get_bool("matched"sv), true);
+        EXPECT_EQ(payload.get_object("notification"sv)->get_string("origin"sv), "https://app.example"_string);
+    }
+
+    // Duplicate Host header rejected (400), [::1] accepted, invalid substring origin subscription rejected, and DELETE /mcp closes SSE streams & clears subscriptions.
+    {
+        auto sock = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+        StringBuilder req;
+        req.append("POST /mcp HTTP/1.1\r\n"sv);
+        req.appendff("Host: 127.0.0.1:{}\r\n", port);
+        req.append("Host: evil.example\r\n"sv);
+        req.appendff("Authorization: Bearer {}\r\n", token);
+        req.append("Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"sv);
+        MUST(sock->write_until_depleted(req.string_view().bytes()));
+        MUST(sock->set_blocking(false));
+        StringBuilder raw;
+        bool done = false;
+        auto timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { done = true; });
+        timer->start();
+        sock->on_ready_to_read = [&] {
+            Array<u8, 4096> buf;
+            while (!done) {
+                auto r = sock->read_some(buf);
+                if (r.is_error())
+                    break;
+                if (r.value().is_empty() || sock->is_eof()) {
+                    if (!r.value().is_empty())
+                        raw.append(StringView { r.value() });
+                    done = true;
+                    break;
+                }
+                raw.append(StringView { r.value() });
+            }
+        };
+        Core::EventLoop::current().spin_until([&] { return done; });
+        timer->stop();
+        sock->close();
+        EXPECT(raw.string_view().starts_with("HTTP/1.1 400 "sv));
+    }
+
+    // Invalid partial/substring origin URI in resources/subscribe must fail; normalized full origin succeeds.
+    {
+        JsonObject bad_sub;
+        bad_sub.set("uri"sv, "ladybird://notifications/origin/example.com"sv);
+        auto bad_resp = call_mcp_rpc(port, token, 6, "resources/subscribe"sv, move(bad_sub));
+        EXPECT(bad_resp.has("error"sv));
+
+        JsonObject good_sub;
+        good_sub.set("uri"sv, "ladybird://notifications/origin/https://example.com/some/path"sv);
+        auto good_resp = call_mcp_rpc(port, token, 7, "resources/subscribe"sv, move(good_sub));
+        EXPECT(!good_resp.has("error"sv));
+    }
+
+    // Open SSE stream, call DELETE /mcp, and verify SSE stream closes & subscriptions are cleared.
+    {
+        auto sse2 = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+        StringBuilder sse2_req;
+        sse2_req.append("GET /mcp HTTP/1.1\r\n"sv);
+        sse2_req.appendff("Host: [::1]:{}\r\n", port);
+        sse2_req.appendff("Authorization: Bearer {}\r\n", token);
+        sse2_req.append("Accept: text/event-stream\r\n\r\n"sv);
+        MUST(sse2->write_until_depleted(sse2_req.string_view().bytes()));
+        MUST(sse2->set_blocking(false));
+
+        StringBuilder sse2_data;
+        bool sse2_closed = false;
+        sse2->on_ready_to_read = [&] {
+            Array<u8, 4096> buf;
+            for (;;) {
+                auto r = sse2->read_some(buf);
+                if (r.is_error())
+                    break;
+                if (r.value().is_empty() || sse2->is_eof()) {
+                    if (!r.value().is_empty())
+                        sse2_data.append(StringView { r.value() });
+                    sse2_closed = true;
+                    break;
+                }
+                sse2_data.append(StringView { r.value() });
+            }
+        };
+        auto t1 = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { VERIFY_NOT_REACHED(); });
+        t1->start();
+        Core::EventLoop::current().spin_until([&] { return sse2_data.string_view().contains(": connected\n\n"sv); });
+        t1->stop();
+        EXPECT_EQ(server->sse_client_count(), 1u);
+
+        auto del_sock = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+        StringBuilder del_req;
+        del_req.append("DELETE /mcp HTTP/1.1\r\n"sv);
+        del_req.appendff("Host: [::1]:{}\r\n", port);
+        del_req.appendff("Authorization: Bearer {}\r\n", token);
+        del_req.append("Connection: close\r\n\r\n"sv);
+        MUST(del_sock->write_until_depleted(del_req.string_view().bytes()));
+        del_sock->close();
+
+        auto t2 = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [&] { });
+        t2->start();
+        Core::EventLoop::current().spin_until([&] {
+            return (server->sse_client_count() == 0 && sse2_closed) || !t2->is_active();
+        });
+        t2->stop();
+        sse2->close();
+        EXPECT_EQ(server->sse_client_count(), 0u);
+    }
 }

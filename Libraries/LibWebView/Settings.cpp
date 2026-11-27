@@ -9,7 +9,9 @@
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
+#include <AK/LexicalPath.h>
 #include <AK/NumericLimits.h>
+#include <AK/Platform.h>
 #include <AK/Random.h>
 #include <AK/Utf16String.h>
 #include <LibCore/GeolocationProvider.h>
@@ -86,6 +88,7 @@ static constexpr auto AUTOPLAY_KEY = "autoplay"sv;
 
 static constexpr auto GLOBAL_PRIVACY_CONTROL_KEY = "globalPrivacyControl"sv;
 static constexpr auto USER_AGENT_PRESET_KEY = "userAgentPreset"sv;
+static constexpr auto UPLOAD_DIRECTORY_KEY = "uploadDirectory"sv;
 static constexpr auto CRASH_REPORT_SENDING_KEY = "crashReportSending"sv;
 
 static constexpr auto BACKGROUND_NETWORKING_KEY = "backgroundNetworking"sv;
@@ -548,6 +551,12 @@ void Settings::load_from_json(JsonValue const& json_value)
             m_user_agent_preset = String::from_utf8_without_validation(normalized->bytes());
     }
 
+    m_upload_directory.clear();
+    if (auto upload_directory = json.get_string(UPLOAD_DIRECTORY_KEY); upload_directory.has_value() && !upload_directory->is_empty()) {
+        if (auto validated = validate_upload_directory(*upload_directory); !validated.is_error())
+            m_upload_directory = validated.release_value();
+    }
+
     if (auto crash_report_sending = json.get_string(CRASH_REPORT_SENDING_KEY); crash_report_sending.has_value())
         m_crash_report_sending = crash_report_sending_from_string(*crash_report_sending);
 
@@ -661,6 +670,7 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
     auto autoplay_settings_changed = changed(AUTOPLAY_KEY);
     auto global_privacy_control_changed = changed(GLOBAL_PRIVACY_CONTROL_KEY);
     auto user_agent_preset_changed = changed(USER_AGENT_PRESET_KEY);
+    auto upload_directory_changed = changed(UPLOAD_DIRECTORY_KEY);
     auto crash_report_sending_changed = changed(CRASH_REPORT_SENDING_KEY);
     auto dns_settings_changed = changed(DNS_SETTINGS_KEY);
     auto background_networking_settings_changed = changed(BACKGROUND_NETWORKING_KEY);
@@ -697,6 +707,8 @@ void Settings::replace_with_json(JsonValue const& json, PersistChange persist_ch
             observer.global_privacy_control_changed();
         if (user_agent_preset_changed)
             observer.user_agent_preset_changed();
+        if (upload_directory_changed)
+            observer.upload_directory_changed();
         if (crash_report_sending_changed)
             observer.crash_report_sending_changed();
         if (dns_settings_changed)
@@ -953,6 +965,7 @@ JsonValue Settings::serialize_json() const
 
     settings.set(GLOBAL_PRIVACY_CONTROL_KEY, m_global_privacy_control == GlobalPrivacyControl::Yes);
     settings.set(USER_AGENT_PRESET_KEY, m_user_agent_preset.has_value() ? JsonValue { *m_user_agent_preset } : JsonValue { String {} });
+    settings.set(UPLOAD_DIRECTORY_KEY, m_upload_directory.has_value() ? JsonValue { *m_upload_directory } : JsonValue { String {} });
     settings.set(CRASH_REPORT_SENDING_KEY, crash_report_sending_to_string(m_crash_report_sending));
 
     JsonObject background_network_features;
@@ -1554,6 +1567,85 @@ void Settings::set_user_agent_preset(Optional<String> preset)
 
     for (auto& observer : m_observers)
         observer.user_agent_preset_changed();
+}
+
+static String normalize_upload_directory_display(ByteString path)
+{
+    auto canonical = LexicalPath::canonicalized_path(path);
+#if defined(AK_OS_WINDOWS)
+    canonical = canonical.replace("/"sv, "\\"sv, ReplaceMode::All);
+#endif
+    return String::from_utf8_without_validation(canonical.bytes());
+}
+
+String Settings::default_upload_directory()
+{
+    auto joined = LexicalPath::join(Core::StandardPaths::videos_directory(), "Ladybird Uploads"sv).string();
+    return normalize_upload_directory_display(move(joined));
+}
+
+ErrorOr<String> Settings::validate_upload_directory(StringView directory)
+{
+    auto trimmed = directory.trim_whitespace();
+    if (trimmed.is_empty())
+        return Error::from_string_literal("Upload directory must not be empty");
+    if (trimmed.contains('\0') || trimmed.contains('\n') || trimmed.contains('\r'))
+        return Error::from_string_literal("Upload directory must not contain control characters");
+    if (trimmed.starts_with("\\\\"sv) || trimmed.starts_with("//"sv))
+        return Error::from_string_literal("UNC or network paths are not allowed as upload directory");
+
+    for (auto slash_part : trimmed.split_view('/', SplitBehavior::Nothing)) {
+        for (auto seg : slash_part.split_view('\\', SplitBehavior::Nothing)) {
+            if (seg == ".."sv)
+                return Error::from_string_literal("Path traversal ('..') is not allowed in upload directory");
+        }
+    }
+
+    ByteString byte_path = trimmed;
+    if (!LexicalPath::is_absolute_path(byte_path))
+        return Error::from_string_literal("Upload directory must be an absolute path");
+
+    LexicalPath lexical_path(byte_path);
+    auto parts = lexical_path.parts_view();
+    bool is_root = parts.is_empty();
+#if defined(AK_OS_WINDOWS)
+    if (parts.size() == 1 && parts[0].length() == 2 && parts[0][1] == ':')
+        is_root = true;
+    if (trimmed.length() == 2 && trimmed[1] == ':')
+        is_root = true;
+#endif
+    if (is_root)
+        return Error::from_string_literal("Upload directory cannot be a filesystem root");
+
+    return normalize_upload_directory_display(move(byte_path));
+}
+
+String Settings::effective_upload_directory() const
+{
+    if (m_upload_directory.has_value() && !m_upload_directory->is_empty())
+        return *m_upload_directory;
+    return default_upload_directory();
+}
+
+ErrorOr<void> Settings::set_upload_directory(Optional<String> directory)
+{
+    Optional<String> normalized_value;
+    if (directory.has_value()) {
+        auto trimmed = directory->bytes_as_string_view().trim_whitespace();
+        if (!trimmed.is_empty())
+            normalized_value = TRY(validate_upload_directory(trimmed));
+    }
+
+    if (m_upload_directory == normalized_value)
+        return {};
+
+    m_upload_directory = move(normalized_value);
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.upload_directory_changed();
+
+    return {};
 }
 
 void Settings::set_crash_report_sending(CrashReportSending crash_report_sending)

@@ -136,23 +136,52 @@ return (function(cfg) {
     if (tag === 'status' || tag === 'output') return 'status';
     return '';
   }
+  function queryAllDeep(root, sel, out, visited) {
+    out = out || [];
+    visited = visited || new Set();
+    if (!root || visited.has(root)) return out;
+    visited.add(root);
+    try {
+      var direct = root.querySelectorAll(sel);
+      for (var i = 0; i < direct.length; ++i) out.push(direct[i]);
+    } catch (e) {}
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; ++i) {
+      if (all[i].shadowRoot) queryAllDeep(all[i].shadowRoot, sel, out, visited);
+    }
+    return out;
+  }
+  function activeElementDeep() {
+    var cur = document.activeElement;
+    while (cur && cur.shadowRoot && cur.shadowRoot.activeElement) {
+      cur = cur.shadowRoot.activeElement;
+    }
+    return cur;
+  }
   function labelTextFor(el) {
+    var rootNode = typeof el.getRootNode === 'function' ? el.getRootNode() : document;
     if (el.getAttribute) {
       var al = el.getAttribute('aria-label');
       if (al) return al;
       var alb = el.getAttribute('aria-labelledby');
       if (alb) {
         var parts = alb.trim().split(/\\s+/).map(function(id) {
-          var target = document.getElementById(id);
+          var target = (rootNode && rootNode.getElementById ? rootNode.getElementById(id) : null) || document.getElementById(id);
           return target ? norm(target.textContent) : '';
         }).filter(Boolean);
         if (parts.length > 0) return parts.join(' ');
       }
     }
     if (el.id) {
-      var labels = document.querySelectorAll('label');
+      var labels = rootNode && rootNode.querySelectorAll ? rootNode.querySelectorAll('label') : [];
       for (var i = 0; i < labels.length; ++i) {
         if (labels[i].getAttribute('for') === el.id) return norm(labels[i].textContent);
+      }
+      if (rootNode !== document) {
+        var docLabels = document.querySelectorAll('label');
+        for (var j = 0; j < docLabels.length; ++j) {
+          if (docLabels[j].getAttribute('for') === el.id) return norm(docLabels[j].textContent);
+        }
       }
     }
     var parent = el.closest ? el.closest('label') : null;
@@ -175,7 +204,8 @@ return (function(cfg) {
     }
     return norm(el.innerText !== undefined ? el.innerText : el.textContent);
   }
-  var all = document.querySelectorAll('a[href], button, input, textarea, select, h1, h2, h3, h4, h5, h6, img, p, li, [role], [data-testid], [contenteditable="true"], [tabindex]');
+  var all = queryAllDeep(document, 'a[href], button, input, textarea, select, h1, h2, h3, h4, h5, h6, img, p, li, [role], [data-testid], [contenteditable="true"], [tabindex]');
+  var activeEl = activeElementDeep();
   var children = [];
   for (var i = 0; i < all.length && children.length < 300; ++i) {
     var el = all[i];
@@ -195,7 +225,7 @@ return (function(cfg) {
     var states = {
       hidden: hidden,
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      focused: document.activeElement === el,
+      focused: activeEl === el,
       secure: secure
     };
     if (inputType === 'checkbox' || inputType === 'radio' || role === 'checkbox' || role === 'radio') {
@@ -234,6 +264,9 @@ return (function(cfg) {
 
 const PERFORM_SCRIPT = `
 return (function(cfg) {
+  if (!cfg || !cfg.ref || typeof cfg.ref !== 'object' || !/^\\d+$/.test(String(cfg.ref.revision || '')) || !/^[a-zA-Z0-9_-]+$/.test(String(cfg.ref.id || ''))) {
+    return { ok: false, code: 'INVALID_ARGUMENT', error: 'Invalid element ref format', retryable: false };
+  }
   var refToken = cfg.ref.revision + ':' + cfg.ref.id;
   if (cfg.ref.id === 'root') {
     if (cfg.action && (cfg.action.kind === 'swipe' || cfg.action.kind === 'scroll')) {
@@ -244,9 +277,26 @@ return (function(cfg) {
     }
     return { ok: false, code: 'UNSUPPORTED_CAPABILITY', error: 'Unsupported root action' };
   }
-  var el = document.querySelector('[data-e2e-ref="' + refToken + '"]');
+  function findDeepSelector(root, sel, visited) {
+    visited = visited || new Set();
+    if (!root || visited.has(root)) return null;
+    visited.add(root);
+    try {
+      var hit = root.querySelector(sel);
+      if (hit) return hit;
+    } catch (e) {}
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; ++i) {
+      if (all[i].shadowRoot) {
+        var nested = findDeepSelector(all[i].shadowRoot, sel, visited);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+  var el = findDeepSelector(document, '[data-e2e-ref="' + refToken + '"]');
   if (!el) {
-    var staleMatch = document.querySelector('[data-e2e-ref$=":' + cfg.ref.id + '"]');
+    var staleMatch = findDeepSelector(document, '[data-e2e-ref$=":' + cfg.ref.id + '"]');
     if (staleMatch) return { ok: false, code: 'STALE_REF', error: 'Element ref belongs to an earlier observation revision', retryable: true };
     return { ok: false, code: 'NOT_FOUND', error: 'Element ref not found in DOM', retryable: true };
   }
@@ -334,6 +384,9 @@ class LadybirdBridgeSession {
   async startAttempt() {
     if (this.#tabId === null) {
       const opened = await this.#mcp.callTool('open_tab', { activate: true, wait_for_load: false });
+      if (typeof opened?.tab_id !== 'number') {
+        throw new LadybirdEngineError('ENGINE_FAILURE', 'Ladybird MCP open_tab did not return a numeric tab_id');
+      }
       this.#tabId = opened.tab_id;
     }
     return null;
@@ -406,6 +459,20 @@ class LadybirdBridgeSession {
 
   async perform(ref, action) {
     const tabId = this.#requireTab();
+    if (action?.kind === 'setInputFiles') {
+      if (!ref || !/^\d+$/.test(String(ref.revision || '')) || !/^[a-zA-Z0-9_-]+$/.test(String(ref.id || '')) || ref.id === 'root') {
+        throw new LadybirdEngineError('INVALID_ARGUMENT', 'setInputFiles requires a valid non-root element ref');
+      }
+      if (!Array.isArray(action.paths) || action.paths.length === 0 || !action.paths.every(p => typeof p === 'string' && p.trim() !== '')) {
+        throw new LadybirdEngineError('INVALID_ARGUMENT', 'setInputFiles requires one or more non-empty file paths');
+      }
+      await this.#mcp.callTool('upload_file', {
+        tab_id: tabId,
+        selector: `[data-e2e-ref="${String(ref.revision)}:${String(ref.id)}"]`,
+        paths: action.paths,
+      });
+      return null;
+    }
     const evalRes = await this.#mcp.callTool('eval_js', {
       tab_id: tabId,
       script: `arguments[0] = ${JSON.stringify({ ref, action })};\n${PERFORM_SCRIPT}`,
@@ -430,7 +497,12 @@ class LadybirdBridgeSession {
       var cur = el.isContentEditable ? String(el.textContent || '') : String(el.value || '');
       var next = cfg.replace ? cfg.text : (cur + cfg.text);
       if (el.isContentEditable) el.textContent = next;
-      else el.value = next;
+      else {
+        var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLInputElement ? HTMLInputElement.prototype : null);
+        var desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+        if (desc && desc.set) desc.set.call(el, next);
+        else el.value = next;
+      }
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return { ok: true };
@@ -611,6 +683,11 @@ export function startServer(streams = { input: process.stdin, output: process.st
           continue;
         }
         bodyLength = Number(match[1]);
+        if (!Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > 16 * 1024 * 1024) {
+          closed = true;
+          streams.output.end();
+          return;
+        }
         buffer = buffer.subarray(idx + DELIM.length);
       }
       if (buffer.length < bodyLength) return;

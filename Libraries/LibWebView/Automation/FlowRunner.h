@@ -69,6 +69,7 @@ private:
 
     void run_next_step(String const& run_id);
     void execute_locator_step_attempt(String const& run_id, size_t step_index, String script, u32 timeout_ms);
+    void execute_upload_step_attempt(String const& run_id, size_t step_index, String script, Vector<String> validated_paths, u32 timeout_ms);
     void poll_assert_url(String const& run_id, size_t step_index, Optional<String> contains, Optional<String> equals, u32 timeout_ms);
     void complete_current_step(String const& run_id, size_t step_index, JsonValue output = {}, Optional<String> screenshot_path = {});
     void fail_run(String const& run_id, String error, StringView terminal_status = "failed"sv);

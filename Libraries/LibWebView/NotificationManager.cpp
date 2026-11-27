@@ -71,6 +71,9 @@ void NotificationManager::show(WebContentPage& page, u64 page_notification_id, U
         .traversable = page.traversable().make_weak_ptr<CanonicalTraversable>(),
         .tag = data.tag,
         .is_private = page.view().session().is_private(),
+        .tab_id = page.view().view_id(),
+        .title = data.title.to_well_formed_utf8(),
+        .body = data.body.to_well_formed_utf8(),
     };
 
     // Same origin and same tag take the place of the earlier notification (the spec's oldNotification): Its page
@@ -78,11 +81,11 @@ void NotificationManager::show(WebContentPage& page, u64 page_notification_id, U
     Optional<u64> replaces;
     if (!data.tag.is_empty()) {
         for (size_t index = 0; index < m_records.size(); ++index) {
-            auto const& existing = m_records[index];
-            if (existing.tag == data.tag && existing.is_private == record.is_private && existing.origin.is_same_origin(origin)) {
+            auto const& existing_ref = m_records[index];
+            if (existing_ref.tag == data.tag && existing_ref.is_private == record.is_private && existing_ref.origin.is_same_origin(origin)) {
+                auto existing = m_records.take(index);
                 replaces = existing.id;
                 report_closed(existing, false);
-                m_records.remove(index);
                 break;
             }
         }
@@ -212,8 +215,28 @@ void NotificationManager::close_record_from_browser(size_t index)
     report_closed(record, false);
 }
 
+void NotificationManager::emit_event(NotificationEvent::Kind kind, Record const& record, bool by_user, bool os_delivered) const
+{
+    if (!on_notification_event)
+        return;
+    NotificationEvent event {
+        .kind = kind,
+        .id = record.id,
+        .tab_id = record.tab_id,
+        .origin = record.origin.serialize(),
+        .title = record.title,
+        .body = record.body,
+        .tag = record.tag.to_well_formed_utf8(),
+        .is_private = record.is_private == IsPrivate::Yes,
+        .by_user = by_user,
+        .os_delivered = os_delivered,
+    };
+    on_notification_event(event);
+}
+
 void NotificationManager::report_closed(Record const& record, bool by_user)
 {
+    emit_event(NotificationEvent::Kind::Closed, record, by_user);
     if (record.page && record.page->is_open())
         record.page->async_notification_closed(record.page_notification_id, by_user);
 }
@@ -223,9 +246,11 @@ void NotificationManager::backend_did_show(u64 id)
     auto index = index_of(id);
     if (!index.has_value())
         return;
-    auto const& record = m_records[*index];
-    if (record.page && record.page->is_open())
-        record.page->async_notification_shown(record.page_notification_id);
+    m_records[*index].emitted_shown = true;
+    auto record_snapshot = m_records[*index];
+    if (record_snapshot.page && record_snapshot.page->is_open())
+        record_snapshot.page->async_notification_shown(record_snapshot.page_notification_id);
+    emit_event(NotificationEvent::Kind::Shown, record_snapshot);
 }
 
 void NotificationManager::backend_did_fail(u64 id)
@@ -234,6 +259,8 @@ void NotificationManager::backend_did_fail(u64 id)
     if (!index.has_value())
         return;
     auto record = m_records.take(*index);
+    if (!record.emitted_shown)
+        emit_event(NotificationEvent::Kind::Shown, record, false, false);
     if (record.page && record.page->is_open())
         record.page->async_notification_show_failed(record.page_notification_id);
 }
@@ -243,23 +270,21 @@ void NotificationManager::backend_did_click(u64 id)
     auto index = index_of(id);
     if (!index.has_value())
         return;
-    auto const& record = m_records[*index];
-    if (record.page && record.page->is_open()) {
+    auto record_snapshot = m_records[*index];
+    emit_event(NotificationEvent::Kind::Clicked, record_snapshot);
+    if (record_snapshot.page && record_snapshot.page->is_open()) {
         // The click is the user's, so the page may open a window from its handler: The UI process checks the
         // activation it granted, not the one the renderer reports.
-        record.page->give_user_activation();
-        m_clicks_awaiting_reply.append({ record.page, record.page_notification_id });
-        record.page->async_notification_clicked(record.page_notification_id);
+        record_snapshot.page->give_user_activation();
+        m_clicks_awaiting_reply.append({ record_snapshot.page, record_snapshot.page_notification_id });
+        record_snapshot.page->async_notification_clicked(record_snapshot.page_notification_id);
         return;
     }
 
     // The page is gone, so the click opens the site instead; the notification has done its job.
-    auto origin_url = record.origin_url;
-    auto page_id = record.page_id;
-    auto traversable = record.traversable;
-    auto is_private = record.is_private;
-    m_records.remove(*index);
-    Application::the().open_url_in_new_tab_from_notification(origin_url, page_id, traversable.ptr(), is_private);
+    if (auto current_index = index_of(id); current_index.has_value())
+        m_records.remove(*current_index);
+    Application::the().open_url_in_new_tab_from_notification(record_snapshot.origin_url, record_snapshot.page_id, record_snapshot.traversable.ptr(), record_snapshot.is_private);
 }
 
 void NotificationManager::backend_did_close(u64 id, NotificationBackend::ByUser by_user)

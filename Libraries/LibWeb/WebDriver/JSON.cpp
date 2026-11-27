@@ -10,6 +10,7 @@
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/NumericLimits.h>
+#include <AK/ScopeGuard.h>
 #include <AK/Utf16String.h>
 #include <AK/Variant.h>
 #include <LibJS/Runtime/AbstractOperations.h>
@@ -54,7 +55,14 @@ namespace Web::WebDriver {
         _temporary_result.release_value();                                                                \
     })
 
-using SeenMap = HashTable<GC::RawPtr<JS::Object const>>;
+struct SeenMap {
+    HashTable<GC::RawPtr<JS::Object const>> table;
+    size_t depth { 0 };
+
+    bool contains(JS::Object const& object) const { return table.contains(&object); }
+    void set(JS::Object const& object) { table.set(&object); }
+    void remove(JS::Object const& object) { table.remove(&object); }
+};
 
 static DOM::Element const* web_driver_element_from_object(JS::Object const& object)
 {
@@ -154,8 +162,14 @@ static ErrorOr<ResultType, WebDriver::Error> clone_an_object(HTML::BrowsingConte
     if (seen.contains(value))
         return WebDriver::Error::from_code(ErrorCode::JavascriptError, "Attempted to recursively clone an Object"sv);
 
+    static constexpr size_t max_json_clone_depth = 64;
+    if (seen.depth >= max_json_clone_depth)
+        return WebDriver::Error::from_code(ErrorCode::JavascriptError, "Maximum JSON serialization depth exceeded"sv);
+
     // 2. Append value to seen.
     seen.set(value);
+    ++seen.depth;
+    ScopeGuard decrement_depth = [&] { --seen.depth; };
 
     // 3. Let result be the value of the first matching statement, matching on value:
     Optional<u32> collection_length;
@@ -335,12 +349,20 @@ static Response internal_json_clone(HTML::BrowsingContext const& browsing_contex
 
     // -> has an own property named "toJSON" that is a Function
     if (auto to_json = object.get_without_side_effects(vm.names.toJSON); to_json.is_function()) {
+        if (seen.contains(object))
+            return WebDriver::Error::from_code(ErrorCode::JavascriptError, "Cyclic object value"sv);
+        static constexpr size_t max_json_clone_depth = 64;
+        if (seen.depth >= max_json_clone_depth)
+            return WebDriver::Error::from_code(ErrorCode::JavascriptError, "Maximum JSON serialization depth exceeded"sv);
+        seen.set(object);
+        ++seen.depth;
+        ScopeGuard remove_seen = [&] {
+            seen.remove(object);
+            --seen.depth;
+        };
         // Return success with the value returned by Function.[[Call]](toJSON) with value as the this value.
         auto to_json_result = TRY_OR_JS_ERROR(JS::call(vm, to_json.as_function(), value));
-        if (!to_json_result.is_string())
-            return WebDriver::Error::from_code(ErrorCode::JavascriptError, "toJSON did not return a String"sv);
-
-        return JsonValue { to_json_result.as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16() };
+        return internal_json_clone(browsing_context, to_json_result, seen);
     }
 
     // -> Otherwise

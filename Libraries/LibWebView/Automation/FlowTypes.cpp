@@ -81,6 +81,8 @@ StringView flow_action_name(FlowStep::Action action)
         return "sleep"sv;
     case FlowStep::Action::Screenshot:
         return "screenshot"sv;
+    case FlowStep::Action::UploadFile:
+        return "upload_file"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -138,6 +140,8 @@ static Optional<FlowStep::Action> parse_step_action(StringView action)
         return FlowStep::Action::Sleep;
     if (action == "screenshot"sv)
         return FlowStep::Action::Screenshot;
+    if (action == "upload_file"sv)
+        return FlowStep::Action::UploadFile;
     return {};
 }
 
@@ -237,6 +241,15 @@ static ErrorOr<FlowStep> parse_step(JsonValue const& value)
         step.locator = TRY(parse_locator(*maybe_locator));
     if (auto text = obj.get_string("text"sv); text.has_value())
         step.text = *text;
+    if (auto paths = obj.get_array("paths"sv); paths.has_value()) {
+        for (auto const& entry : paths->values()) {
+            if (!entry.is_string())
+                return Error::from_string_literal("Step 'paths' entries must be strings");
+            step.paths.append(entry.as_string());
+        }
+    } else if (auto path = obj.get_string("path"sv); path.has_value()) {
+        step.paths.append(*path);
+    }
     if (auto key = obj.get_string("key"sv); key.has_value())
         step.key = *key;
     if (auto clear = obj.get_bool("clear"sv); clear.has_value())
@@ -299,6 +312,16 @@ static ErrorOr<FlowStep> parse_step(JsonValue const& value)
     case FlowStep::Action::Forward:
     case FlowStep::Action::Sleep:
     case FlowStep::Action::Screenshot:
+        break;
+    case FlowStep::Action::UploadFile:
+        if (!step.locator.has_value())
+            return Error::from_string_literal("Step 'upload_file' requires a 'locator' object");
+        if (step.paths.is_empty())
+            return Error::from_string_literal("Step 'upload_file' requires a non-empty 'path' or 'paths'");
+        for (auto const& p : step.paths) {
+            if (p.bytes_as_string_view().trim_whitespace().is_empty())
+                return Error::from_string_literal("Step 'upload_file' paths must not be empty");
+        }
         break;
     }
 
@@ -389,6 +412,13 @@ JsonObject serialize_flow_definition(FlowDefinition const& flow)
             s.set("locator"sv, serialize_locator(*step.locator));
         if (step.text.has_value())
             s.set("text"sv, *step.text);
+        if (!step.paths.is_empty()) {
+            JsonArray paths_arr;
+            paths_arr.ensure_capacity(step.paths.size());
+            for (auto const& p : step.paths)
+                paths_arr.must_append(p);
+            s.set("paths"sv, move(paths_arr));
+        }
         if (step.key.has_value())
             s.set("key"sv, *step.key);
         if (step.action == FlowStep::Action::Fill)
@@ -551,24 +581,59 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
     if (/^h[1-6]$/.test(tag)) return 'heading';
     return '';
   }
+  function queryAllDeep(root, sel, out, visited) {
+    out = out || [];
+    visited = visited || new Set();
+    if (!root || visited.has(root)) return out;
+    visited.add(root);
+    try {
+      var direct = root.querySelectorAll(sel);
+      for (var i = 0; i < direct.length; ++i) out.push(direct[i]);
+    } catch (e) {}
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; ++i) {
+      if (all[i].shadowRoot) queryAllDeep(all[i].shadowRoot, sel, out, visited);
+    }
+    return out;
+  }
+  function walkElementsDeep(root, out, visited) {
+    out = out || [];
+    visited = visited || new Set();
+    if (!root || visited.has(root)) return out;
+    visited.add(root);
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; ++i) {
+      out.push(all[i]);
+      if (all[i].shadowRoot) walkElementsDeep(all[i].shadowRoot, out, visited);
+    }
+    return out;
+  }
   function labelTextFor(el) {
+    var rootNode = typeof el.getRootNode === 'function' ? el.getRootNode() : document;
     if (el.getAttribute) {
       var ariaLabel = el.getAttribute('aria-label');
       if (ariaLabel) return ariaLabel;
       var labelledBy = el.getAttribute('aria-labelledby');
       if (labelledBy) {
         var parts = labelledBy.trim().split(/\s+/).map(function(id) {
-          var target = document.getElementById(id);
+          var target = (rootNode && rootNode.getElementById ? rootNode.getElementById(id) : null) || document.getElementById(id);
           return target ? norm(target.textContent) : '';
         }).filter(Boolean);
         if (parts.length > 0) return parts.join(' ');
       }
     }
     if (el.id) {
-      var labels = document.querySelectorAll('label');
+      var labels = rootNode && rootNode.querySelectorAll ? rootNode.querySelectorAll('label') : [];
       for (var i = 0; i < labels.length; ++i) {
         if (labels[i].getAttribute('for') === el.id)
           return norm(labels[i].textContent);
+      }
+      if (rootNode !== document) {
+        var docLabels = document.querySelectorAll('label');
+        for (var j = 0; j < docLabels.length; ++j) {
+          if (docLabels[j].getAttribute('for') === el.id)
+            return norm(docLabels[j].textContent);
+        }
       }
     }
     var parent = el.closest ? el.closest('label') : null;
@@ -595,7 +660,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
     var kind = loc.kind || 'css';
     var exact = Boolean(loc.exact);
     if (kind === 'css') {
-      return Array.prototype.slice.call(document.querySelectorAll(loc.value));
+      return queryAllDeep(document, loc.value);
     }
     if (kind === 'xpath') {
       var snap = document.evaluate(loc.value, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
@@ -607,7 +672,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
       return out;
     }
     if (kind === 'test_id') {
-      var all = document.querySelectorAll('[data-testid]');
+      var all = queryAllDeep(document, '[data-testid]');
       var matches = [];
       for (var i = 0; i < all.length; ++i) {
         if (all[i].getAttribute('data-testid') === loc.value)
@@ -616,7 +681,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
       return matches;
     }
     if (kind === 'placeholder') {
-      var inputs = document.querySelectorAll('input, textarea');
+      var inputs = queryAllDeep(document, 'input, textarea');
       var matches = [];
       for (var i = 0; i < inputs.length; ++i) {
         var ph = inputs[i].getAttribute('placeholder');
@@ -626,7 +691,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
       return matches;
     }
     if (kind === 'label') {
-      var controls = document.querySelectorAll('input, textarea, select, button, [role], [contenteditable="true"]');
+      var controls = queryAllDeep(document, 'input, textarea, select, button, [role], [contenteditable="true"]');
       var matches = [];
       for (var i = 0; i < controls.length; ++i) {
         var lbl = labelTextFor(controls[i]);
@@ -637,7 +702,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
     }
     if (kind === 'role') {
       var wantRole = String(loc.role || '').toLowerCase();
-      var candidates = document.querySelectorAll('*');
+      var candidates = walkElementsDeep(document);
       var matches = [];
       for (var i = 0; i < candidates.length; ++i) {
         var el = candidates[i];
@@ -652,7 +717,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
       return matches;
     }
     if (kind === 'text') {
-      var all = document.querySelectorAll('*');
+      var all = walkElementsDeep(document);
       var rawMatches = [];
       for (var i = 0; i < all.length; ++i) {
         var el = all[i];
@@ -671,6 +736,47 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
     }
     throw new Error('Unsupported locator kind: ' + kind);
   }
+  function isFileInput(node) {
+    return Boolean(node
+      && String(node.tagName || '').toLowerCase() === 'input'
+      && String(node.getAttribute('type') || node.type || '').toLowerCase() === 'file');
+  }
+  function resolveFileInput(node) {
+    if (!node) return null;
+    if (isFileInput(node)) return node;
+    if (String(node.tagName || '').toLowerCase() === 'label' && isFileInput(node.control))
+      return node.control;
+    if (typeof node.closest === 'function') {
+      var lbl = node.closest('label');
+      if (lbl && isFileInput(lbl.control)) return lbl.control;
+    }
+    var inside = queryAllDeep(node, 'input[type="file"]');
+    if (inside.length > 0) return inside[0];
+    if (node.shadowRoot) {
+      var inShadow = queryAllDeep(node.shadowRoot, 'input[type="file"]');
+      if (inShadow.length > 0) return inShadow[0];
+    }
+    var root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    while (root && root !== document) {
+      var inRoot = queryAllDeep(root, 'input[type="file"]');
+      if (inRoot.length > 0) return inRoot[0];
+      var host = root.host;
+      if (!host) break;
+      if (host.parentElement) {
+        var inSibling = queryAllDeep(host.parentElement, 'input[type="file"]');
+        if (inSibling.length > 0) return inSibling[0];
+      }
+      root = typeof host.getRootNode === 'function' ? host.getRootNode() : null;
+    }
+    if (typeof node.closest === 'function') {
+      var container = node.closest('ytcp-uploads-file-picker, [role="dialog"], dialog, form');
+      if (container) {
+        var inContainer = queryAllDeep(container, 'input[type="file"]');
+        if (inContainer.length > 0) return inContainer[0];
+      }
+    }
+    return null;
+  }
   function setNativeValue(el, value) {
     var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLInputElement ? HTMLInputElement.prototype : null);
     var desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
@@ -680,7 +786,7 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
   try {
     var matches = resolveAll(cfg.locator || {});
     var visibleMatches = matches.filter(isVisible);
-    var pool = (cfg.operation === 'extract' || cfg.operation === 'assert_text') && visibleMatches.length === 0 ? matches : visibleMatches;
+    var pool = (cfg.operation === 'extract' || cfg.operation === 'assert_text' || cfg.operation === 'resolve_upload_input') && visibleMatches.length === 0 ? matches : visibleMatches;
     if (pool.length === 0) {
       return { ok: false, retryable: true, error: matches.length > 0 ? 'Matched element is hidden' : 'Element not found' };
     }
@@ -691,6 +797,13 @@ String build_locator_action_script(StringView operation, FlowLocator const& loca
     var el = pool[idx];
     var op = cfg.operation;
     var p = cfg.params || {};
+    if (op === 'resolve_upload_input') {
+      var fileInput = resolveFileInput(el);
+      if (!fileInput) {
+        return { ok: false, retryable: true, error: 'Matched element has no associated <input type="file">' };
+      }
+      return { ok: true, element: fileInput };
+    }
     if (op === 'wait_for' || op === 'assert_visible') {
       return { ok: true, count: pool.length };
     }

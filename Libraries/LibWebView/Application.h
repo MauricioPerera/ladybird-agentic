@@ -438,6 +438,7 @@ public:
     bool is_view_mcp_secret_tainted(u64 view_id) const;
     void mark_view_mcp_secret_tainted(u64 view_id, StringView secret_to_scrub = {});
     void clear_view_mcp_secret_taint(u64 view_id);
+    String scrub_mcp_secrets(StringView) const;
     MCP::ToolCallResult scrub_mcp_tool_result(MCP::ToolCallResult) const;
     void did_start_load_for_extensions(ViewImplementation&, URL::URL const&);
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
@@ -447,6 +448,10 @@ public:
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
     u64 start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete);
     void cancel_automation_navigation_wait(u64 wait_id);
+    ByteString effective_upload_directory() const;
+    bool upload_directory_overridden_by_cli() const;
+    ErrorOr<void> open_upload_directory() const;
+    static Optional<String> extract_webdriver_element_id(JsonValue const&);
 
     void dump_cookies() const;
     void crash_compositor_process();
@@ -693,16 +698,20 @@ private:
     virtual void get_dom_tree(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void get_page_source(u64 tab_id, MCP::OnToolCallComplete) override;
     virtual void find_elements(u64 tab_id, String selector, String strategy, MCP::OnToolCallComplete) override;
-    virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, MCP::OnToolCallComplete) override;
-    virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, MCP::OnToolCallComplete) override;
-    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, MCP::OnToolCallComplete) override;
-    virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
+    virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, Optional<i32> x, Optional<i32> y, String button, u32 click_count, Vector<String> modifiers, MCP::OnToolCallComplete) override;
+    virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, bool use_keyboard, MCP::OnToolCallComplete) override;
+    virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, Optional<String> root_selector, MCP::OnToolCallComplete) override;
+    virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, Vector<String> modifiers, MCP::OnToolCallComplete) override;
     virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
-    virtual void hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
-    virtual void drag(u64 tab_id, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String> to_ref, Optional<String> to_selector, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, MCP::OnToolCallComplete) override;
+    virtual void wheel(u64 tab_id, Optional<i32> x, Optional<i32> y, Optional<String> ref, Optional<String> selector, i32 delta_x, i32 delta_y, Vector<String> modifiers, u32 duration_ms, MCP::OnToolCallComplete) override;
+    virtual void hover_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<i32> x, Optional<i32> y, MCP::OnToolCallComplete) override;
+    virtual void drag(u64 tab_id, Optional<String> from_ref, Optional<String> from_selector, Optional<i32> from_x, Optional<i32> from_y, Optional<String> to_ref, Optional<String> to_selector, Optional<i32> to_x, Optional<i32> to_y, Optional<i32> delta_x, Optional<i32> delta_y, u32 steps, u32 duration_ms, Vector<String> modifiers, MCP::OnToolCallComplete) override;
     virtual void upload_file(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, Vector<String> file_paths, MCP::OnToolCallComplete) override;
+    virtual void list_upload_files(MCP::OnToolCallComplete) override;
     virtual void select_option(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> value, Optional<String> label, Optional<size_t> index, MCP::OnToolCallComplete) override;
     virtual void wait_for(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> text, u32 timeout_ms, MCP::OnToolCallComplete) override;
+    virtual void list_notifications(Optional<u64> tab_id, Optional<String> origin, size_t limit, bool clear, MCP::OnToolCallComplete) override;
+    virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, MCP::OnToolCallComplete) override;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
@@ -957,9 +966,34 @@ private:
         Optional<i64> finished_at_ms;
         bool finished { false };
     };
+    struct MCPNotificationEntry {
+        i64 timestamp_ms { 0 };
+        u64 notification_id { 0 };
+        Optional<u64> tab_id;
+        String event_type;
+        String origin;
+        String title;
+        String body;
+        String tag;
+        bool by_user { false };
+        bool os_delivered { true };
+    };
+    struct PendingMCPNotificationWait {
+        AK_ALLOC_WITH_KMALLOC;
+        Optional<u64> tab_id;
+        Optional<String> origin;
+        Optional<String> title_contains;
+        Optional<String> body_contains;
+        Optional<String> event_type;
+        RefPtr<Core::Timer> timer;
+        MCP::OnToolCallComplete on_complete;
+    };
 
     void poll_mcp_condition_wait(u64 wait_id);
     void finish_mcp_condition_wait(u64 wait_id, MCP::ToolCallResult);
+    void handle_browser_notification_event(MCPNotificationEntry);
+    void finish_mcp_notification_wait(u64 wait_id, MCP::ToolCallResult);
+    static JsonObject mcp_notification_entry_to_json(MCPNotificationEntry const&);
 
     HashMap<u64, OwnPtr<MCPViewQueue>> m_mcp_content_queues;
     HashMap<u64, u64> m_mcp_command_to_view;
@@ -968,6 +1002,9 @@ private:
     HashMap<u64, OwnPtr<PendingMCPConditionWait>> m_mcp_condition_waits;
     HashMap<u64, Vector<MCPConsoleEntry>> m_mcp_console_logs;
     HashMap<u64, Vector<MCPNetworkEntry>> m_mcp_network_requests;
+    Vector<MCPNotificationEntry> m_mcp_notifications;
+    HashMap<u64, OwnPtr<PendingMCPNotificationWait>> m_mcp_notification_waits;
+    HashTable<u64> m_mcp_suppressed_notification_ids;
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
 

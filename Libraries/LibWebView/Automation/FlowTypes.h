@@ -54,6 +54,7 @@ struct WEBVIEW_API FlowStep {
         Eval,
         Sleep,
         Screenshot,
+        UploadFile,
     };
 
     Action action { Action::Open };
@@ -61,6 +62,7 @@ struct WEBVIEW_API FlowStep {
     Optional<String> url;
     Optional<FlowLocator> locator;
     Optional<String> text;
+    Vector<String> paths;
     Optional<String> key;
     bool clear { true };
     Optional<String> contains;

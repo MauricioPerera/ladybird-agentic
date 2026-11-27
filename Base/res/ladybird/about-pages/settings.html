@@ -1297,6 +1297,19 @@
                             </label>
                             <select id="user-agent-preset"></select>
                         </div>
+                        <div class="card-group inline-container control-row">
+                            <label for="upload-directory-input">
+                                Automation upload folder
+                                <p class="description">Folder where <code>about:flows</code> and MCP <code>upload_file</code> resolve relative video/file paths.</p>
+                                <p id="upload-directory-status" class="description"></p>
+                            </label>
+                            <div style="display: flex; gap: 6px; width: 50%; align-items: center;">
+                                <input id="upload-directory-input" type="text" style="flex: 1; width: auto;" />
+                                <button id="upload-directory-save" class="secondary-button" type="button">Save</button>
+                                <button id="upload-directory-reset" class="secondary-button" type="button">Reset</button>
+                                <button id="upload-directory-open" class="secondary-button" type="button">Open…</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 

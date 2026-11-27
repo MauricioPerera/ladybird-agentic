@@ -1070,13 +1070,13 @@
                     name: "youtube-navigation",
                     description: "Navigate YouTube feeds, Polymer Shadow DOM controls, search, and video playback.",
                     matches: ["https://www.youtube.com/*"],
-                    body: "# YouTube Agent Guide\n\n1. Wait briefly for Polymer hydration if skeleton cards appear, then call `get_page_snapshot` (which traverses Shadow DOM).\n2. Search via the Search input `@eN` ref or navigate directly to `https://www.youtube.com/results?search_query=<encoded_query>`.\n3. Use `scroll_page` down to hydrate lazy thumbnails below the fold.\n4. Playback shortcuts via `press_key` on the watch page: `k` or `Space` (play/pause), `m` (mute), `f` (fullscreen), `l`/`j` (±10s)."
+                    body: "# YouTube Agent Guide\n\n1. Wait briefly for Polymer hydration if skeleton cards appear, then call `get_page_snapshot` (which traverses Shadow DOM).\n2. Search via the Search input `@eN` ref or navigate directly to `https://www.youtube.com/results?search_query=<encoded_query>`.\n3. Use `scroll` down to hydrate lazy thumbnails below the fold.\n4. Playback shortcuts via `press_key` on the watch page: `k` or `Space` (play/pause), `m` (mute), `f` (fullscreen), `l`/`j` (±10s)."
                 },
                 "youtube-studio": {
                     name: "youtube-studio",
-                    description: "Manage YouTube Studio (`ytcp-*` Shadow DOM components) and authenticate blindly via about:vault.",
+                    description: "Manage YouTube Studio (`ytcp-*` Shadow DOM components), upload videos from the browser Upload Directory, and authenticate blindly via about:vault.",
                     matches: ["https://studio.youtube.com/*"],
-                    body: "# YouTube Studio Agent Guide\n\n1. Use `get_page_snapshot` to inspect `ytcp-*` custom elements inside Shadow DOM.\n2. Authenticate via `matching_credentials` + `login_with_credential` when prompted (never ask for raw passwords).\n3. Confirm with the user before publishing, deleting, or changing video visibility/monetization."
+                    body: "# YouTube Studio Agent Guide\n\n1. Use `get_page_snapshot` to inspect `ytcp-*` custom elements inside Shadow DOM.\n2. Authenticate via `matching_credentials` + `login_with_credential` when prompted (never ask for raw passwords).\n3. To upload a video without opening the OS file dialog, open the upload modal (`Create` -> `Upload videos`) and call `upload_file` (or run an `about:flows` flow with `upload_file`) targeting `input[type=\"file\"]` or `#select-files-button` using the filename inside the browser's configured Upload Directory (`about:flows` / `about:settings`).\n4. While the video uploads in the background, fill out the title, description, audience (`Made for kids`), and visibility steps using `get_page_snapshot`, `type_text`, and `click`.\n5. Confirm with the user before publishing, deleting, or changing video visibility/monetization."
                 },
                 "google-maps": {
                     name: "google-maps-navigation",

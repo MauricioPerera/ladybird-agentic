@@ -212,3 +212,53 @@ TEST_CASE(flow_store_prunes_evicted_runs_from_disk)
     EXPECT(!reloaded.get_run("run-000"sv).has_value());
     EXPECT(reloaded.get_run("run-052"sv).has_value());
 }
+
+TEST_CASE(upload_file_step_parse_serialize_and_shadow_dom_script)
+{
+    auto flow_json = MUST(JsonValue::from_string(R"JSON({
+        "schema_version": 1,
+        "id": "yt-upload-video",
+        "name": "Upload Video",
+        "steps": [
+            {
+                "action": "upload_file",
+                "label": "Attach video",
+                "locator": { "kind": "css", "value": "ytcp-uploads-file-picker #select-files-button" },
+                "path": "demo.mp4",
+                "save_as": "upload_info"
+            }
+        ]
+    })JSON"sv));
+
+    auto parsed = MUST(WebView::parse_flow_definition(flow_json));
+    EXPECT_EQ(parsed.steps.size(), 1u);
+    EXPECT_EQ(parsed.steps[0].action, WebView::FlowStep::Action::UploadFile);
+    EXPECT_EQ(parsed.steps[0].paths.size(), 1u);
+    EXPECT_EQ(parsed.steps[0].paths[0], "demo.mp4"sv);
+    EXPECT_EQ(parsed.steps[0].save_as.value_or(String {}), "upload_info"sv);
+
+    auto serialized = WebView::serialize_flow_definition(parsed);
+    auto reparsed = MUST(WebView::parse_flow_definition(JsonValue { move(serialized) }));
+    EXPECT_EQ(reparsed.steps[0].action, WebView::FlowStep::Action::UploadFile);
+    EXPECT_EQ(reparsed.steps[0].paths.size(), 1u);
+    EXPECT_EQ(reparsed.steps[0].paths[0], "demo.mp4"sv);
+
+    auto missing_paths = MUST(JsonValue::from_string(R"JSON({
+        "id": "bad-upload",
+        "name": "Bad Upload",
+        "steps": [{ "action": "upload_file", "locator": { "kind": "css", "value": "input[type=file]" } }]
+    })JSON"sv));
+    EXPECT(WebView::parse_flow_definition(missing_paths).is_error());
+
+    auto missing_locator = MUST(JsonValue::from_string(R"JSON({
+        "id": "bad-upload-2",
+        "name": "Bad Upload 2",
+        "steps": [{ "action": "upload_file", "paths": ["demo.mp4"] }]
+    })JSON"sv));
+    EXPECT(WebView::parse_flow_definition(missing_locator).is_error());
+
+    auto script = WebView::build_locator_action_script("resolve_upload_input"sv, *parsed.steps[0].locator, {});
+    EXPECT(script.contains("queryAllDeep"sv));
+    EXPECT(script.contains("resolve_upload_input"sv));
+    EXPECT(script.contains("shadowRoot"sv));
+}

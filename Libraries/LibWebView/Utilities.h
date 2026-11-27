@@ -38,5 +38,7 @@ WEBVIEW_API ErrorOr<OpenedLocalFile> open_local_file_the_user_chose(ByteString c
 WEBVIEW_API ErrorOr<JsonObject> read_json_file(ByteString const& path);
 WEBVIEW_API ErrorOr<void> write_json_file(ByteString const& path, JsonValue const& value);
 WEBVIEW_API ErrorOr<ByteString> validate_mcp_upload_path(StringView raw_path, Optional<ByteString> const& allowed_root = {});
+WEBVIEW_API ErrorOr<ByteString> resolve_and_validate_upload_path(StringView raw_path, Optional<ByteString> const& allowed_root);
+WEBVIEW_API ErrorOr<void> open_directory_in_system_file_manager(ByteString const& path);
 
 }

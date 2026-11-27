@@ -24,6 +24,7 @@ function startMockMcpServer() {
     currentUrl: 'about:blank',
     title: 'Initial',
     inputValue: '',
+    uploadedFiles: [],
   };
 
   const server = http.createServer(async (req, res) => {
@@ -128,6 +129,10 @@ function startMockMcpServer() {
           }),
         );
         return;
+      case 'upload_file':
+        state.uploadedFiles.push({ selector: args.selector, paths: args.paths });
+        payload = { uploaded: true, file_count: Array.isArray(args.paths) ? args.paths.length : 0, paths: args.paths || [] };
+        break;
       default:
         payload = { ok: true };
     }
@@ -238,6 +243,13 @@ test('LSP Engine Protocol v1 round-trip against mock Ladybird MCP server', async
       operation: { signal: { id: 5 }, timeoutMs: 5000, runId: 'r1', attemptId: 'a1', origin: 'test' },
     });
     assert.equal(mock.state.inputValue, 'user@example.com');
+
+    await rpc.request('engine/perform', {
+      ref: snapshot.root.children[1].ref,
+      action: { kind: 'setInputFiles', paths: ['demo.mp4'] },
+      operation: { signal: { id: 51 }, timeoutMs: 5000, runId: 'r1', attemptId: 'a1', origin: 'test' },
+    });
+    assert.deepEqual(mock.state.uploadedFiles, [{ selector: '[data-e2e-ref="1:n2"]', paths: ['demo.mp4'] }]);
 
     const shot = await rpc.request('artifacts/screenshot', { operation: { signal: { id: 6 }, timeoutMs: 5000, runId: 'r1', attemptId: 'a1', origin: 'test' } });
     assert.equal(shot.mediaType, 'image/png');

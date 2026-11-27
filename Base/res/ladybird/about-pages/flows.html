@@ -444,6 +444,20 @@
                 </div>
                 <div id="flow-list" class="flow-list"></div>
                 <div id="empty-flows" class="muted hidden">No flows saved yet. Click <b>+ Example Flow</b> or <b>+ New Flow</b>.</div>
+                <div class="section-title" style="margin-top: 18px;">
+                    <span>Upload Directory</span>
+                    <button id="btn-open-upload-dir" type="button">Open Folder</button>
+                </div>
+                <div class="field">
+                    <input id="upload-dir-input" type="text" placeholder="Default Videos/Ladybird Uploads" />
+                    <div id="upload-dir-note" class="muted"></div>
+                </div>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
+                    <button id="btn-save-upload-dir" class="primary" type="button">Save Folder</button>
+                    <button id="btn-default-upload-dir" type="button">Use Default</button>
+                    <button id="btn-refresh-upload-files" type="button">Refresh</button>
+                </div>
+                <div id="upload-files-summary" class="muted"></div>
             </aside>
 
             <main class="panel">
@@ -526,15 +540,26 @@
 
         <script>
             const ACTIONS = [
-                "open", "wait_for", "click", "fill", "press",
+                "open", "wait_for", "click", "fill", "press", "upload_file",
                 "assert_text", "assert_visible", "assert_url",
                 "extract", "eval", "sleep", "screenshot",
                 "reload", "back", "forward"
             ];
             const LOCATOR_KINDS = ["css", "role", "label", "placeholder", "text", "test_id", "xpath"];
-            const NEEDS_LOCATOR = new Set(["click", "fill", "wait_for", "assert_visible", "assert_text", "extract"]);
+            const NEEDS_LOCATOR = new Set(["click", "fill", "upload_file", "wait_for", "assert_visible", "assert_text", "extract"]);
 
-            let state = { flows: [], runs: [], tabs: [], mcp: { enabled: false }, storageDirectory: "" };
+            let state = {
+                flows: [],
+                runs: [],
+                tabs: [],
+                mcp: { enabled: false },
+                storageDirectory: "",
+                uploadDirectory: "",
+                defaultUploadDirectory: "",
+                uploadDirectoryCustom: "",
+                uploadDirectoryOverriddenByCli: false,
+                uploadFiles: []
+            };
             let selectedFlowId = null;
             let activeTab = "visual";
             let draft = createBlankDraft();
@@ -717,8 +742,14 @@
                             newStep.url = step.url || "http://example.com";
                             newStep.wait_for_load = true;
                         } else if (NEEDS_LOCATOR.has(nextAction)) {
-                            newStep.locator = step.locator || { kind: "css", value: "body" };
+                            newStep.locator = step.locator || {
+                                kind: "css",
+                                value: nextAction === "upload_file" ? 'input[type="file"]' : "body"
+                            };
                             if (nextAction === "fill") { newStep.text = ""; newStep.clear = true; }
+                            if (nextAction === "upload_file") {
+                                newStep.paths = Array.isArray(step.paths) && step.paths.length > 0 ? step.paths : [""];
+                            }
                             if (nextAction === "assert_text") newStep.contains = "";
                             if (nextAction === "extract") newStep.save_as = "value";
                         } else if (nextAction === "press") {
@@ -813,6 +844,25 @@
 
                     if (step.action === "fill") {
                         addInputField(body, "Text to Type", step.text, v => { step.text = v; }, "Text or {{variable}}");
+                    } else if (step.action === "upload_file") {
+                        const curPaths = Array.isArray(step.paths) ? step.paths : (step.path ? [step.path] : []);
+                        addInputField(body, "File Path(s) (relative to Upload Folder or {{var}})", curPaths.join(", "), v => {
+                            const list = String(v || "").split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+                            delete step.path;
+                            step.paths = list.length > 0 ? list : [""];
+                        }, "video.mp4 or {{video_file}}");
+
+                        const fileChoices = ["", ...(state.uploadFiles || []).map(f => f.name)];
+                        const selectedName = curPaths.length === 1 && fileChoices.includes(curPaths[0]) ? curPaths[0] : "";
+                        addSelectField(body, "Pick File from Upload Folder", fileChoices, selectedName, v => {
+                            if (v) {
+                                delete step.path;
+                                step.paths = [v];
+                            }
+                        });
+                        addInputField(body, "Save Output As (optional)", step.save_as, v => {
+                            if (v) step.save_as = v; else delete step.save_as;
+                        }, "upload_result");
                     } else if (step.action === "press") {
                         addInputField(body, "Key", step.key, v => { step.key = v; }, "Enter, Tab, Escape");
                     } else if (step.action === "assert_text" || step.action === "assert_url") {
@@ -1032,6 +1082,38 @@
                     mcpBadge.textContent = "MCP: disabled (Inspect -> Enable MCP Server)";
                 }
                 document.getElementById("storage-path").textContent = state.storageDirectory ? `Stored in: ${state.storageDirectory}` : "";
+
+                const uploadInput = document.getElementById("upload-dir-input");
+                const uploadNote = document.getElementById("upload-dir-note");
+                const uploadSummary = document.getElementById("upload-files-summary");
+                const saveBtn = document.getElementById("btn-save-upload-dir");
+                const defaultBtn = document.getElementById("btn-default-upload-dir");
+                if (uploadInput) {
+                    if (document.activeElement !== uploadInput) {
+                        uploadInput.value = state.uploadDirectory || state.defaultUploadDirectory || "";
+                    }
+                    uploadInput.disabled = Boolean(state.uploadDirectoryOverriddenByCli);
+                }
+                if (saveBtn) saveBtn.disabled = Boolean(state.uploadDirectoryOverriddenByCli);
+                if (defaultBtn) defaultBtn.disabled = Boolean(state.uploadDirectoryOverriddenByCli);
+                if (uploadNote) {
+                    if (state.uploadDirectoryOverriddenByCli) {
+                        uploadNote.textContent = "Overridden by --mcp-upload-dir CLI flag.";
+                    } else if (state.uploadDirectoryCustom) {
+                        uploadNote.textContent = `Custom folder active (default: ${state.defaultUploadDirectory})`;
+                    } else {
+                        uploadNote.textContent = "Using default browser upload folder.";
+                    }
+                }
+                if (uploadSummary) {
+                    const files = state.uploadFiles || [];
+                    if (files.length === 0) {
+                        uploadSummary.textContent = "No files in upload folder yet. Click Open Folder and drop videos here.";
+                    } else {
+                        const preview = files.slice(0, 5).map(f => f.name).join(", ");
+                        uploadSummary.textContent = `${files.length} file${files.length === 1 ? "" : "s"} ready: ${preview}${files.length > 5 ? ", ..." : ""}`;
+                    }
+                }
             }
 
             function escapeHtml(text) {
@@ -1132,6 +1214,23 @@
                 } catch (err) {
                     showBanner(`Invalid JSON: ${err.message}`, true);
                 }
+            });
+
+            document.getElementById("btn-save-upload-dir").addEventListener("click", () => {
+                const val = document.getElementById("upload-dir-input").value.trim();
+                ladybird.sendMessage("setUploadDirectory", val);
+            });
+
+            document.getElementById("btn-default-upload-dir").addEventListener("click", () => {
+                ladybird.sendMessage("setUploadDirectory", "");
+            });
+
+            document.getElementById("btn-open-upload-dir").addEventListener("click", () => {
+                ladybird.sendMessage("openUploadDirectory");
+            });
+
+            document.getElementById("btn-refresh-upload-files").addEventListener("click", () => {
+                ladybird.sendMessage("loadState");
             });
 
             document.addEventListener("WebUIMessage", event => {

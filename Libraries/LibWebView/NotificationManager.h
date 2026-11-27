@@ -6,9 +6,11 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Optional.h>
 #include <AK/RefPtr.h>
+#include <AK/String.h>
 #include <AK/Utf16String.h>
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
@@ -56,6 +58,25 @@ public:
     // The ids of a page's notifications whose document has gone, so a test can wait for the page to have said so.
     Vector<u64> ids_without_a_page_for_testing(Web::PageId) const;
 
+    struct NotificationEvent {
+        enum class Kind : u8 {
+            Shown,
+            Clicked,
+            Closed,
+        };
+        Kind kind { Kind::Shown };
+        u64 id { 0 };
+        Optional<u64> tab_id;
+        String origin;
+        String title;
+        String body;
+        String tag;
+        bool is_private { false };
+        bool by_user { false };
+        bool os_delivered { true };
+    };
+    Function<void(NotificationEvent const&)> on_notification_event;
+
 private:
     struct Record {
         u64 id { 0 };
@@ -71,6 +92,10 @@ private:
         // Tag replacement and the per-origin cap never reach across sessions, so a private window's notification
         // can't close a normal window's and the other way around.
         IsPrivate is_private { IsPrivate::No };
+        Optional<u64> tab_id;
+        String title;
+        String body;
+        bool emitted_shown { false };
     };
 
     NotificationManager() = default;
@@ -80,6 +105,7 @@ private:
     Optional<size_t> index_of(WebContentPage const&, u64 page_notification_id) const;
     void close_record_from_browser(size_t index);
     void report_closed(Record const&, bool by_user);
+    void emit_event(NotificationEvent::Kind, Record const&, bool by_user = false, bool os_delivered = true) const;
 
     void backend_did_show(u64 id);
     void backend_did_fail(u64 id);

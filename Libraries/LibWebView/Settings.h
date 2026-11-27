@@ -206,6 +206,7 @@ public:
     virtual void permission_settings_changed(Web::Permissions::PermissionName) { }
     virtual void global_privacy_control_changed() { }
     virtual void user_agent_preset_changed() { }
+    virtual void upload_directory_changed() { }
     virtual void crash_report_sending_changed() { }
     virtual void dns_settings_changed() { }
     virtual void config_variable_changed(ConfigVariableID) { }
@@ -240,6 +241,7 @@ struct WEBVIEW_API SettingsData {
 
     GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
     Optional<String> m_user_agent_preset;
+    Optional<String> m_upload_directory;
     CrashReportSending m_crash_report_sending { CrashReportSending::AskMe };
 
     bool m_background_networking_enabled { true };
@@ -355,6 +357,12 @@ public:
 
     Optional<String> const& user_agent_preset() const { return m_user_agent_preset; }
     void set_user_agent_preset(Optional<String>);
+
+    static String default_upload_directory();
+    static ErrorOr<String> validate_upload_directory(StringView directory);
+    Optional<String> const& upload_directory() const { return m_upload_directory; }
+    String effective_upload_directory() const;
+    ErrorOr<void> set_upload_directory(Optional<String>);
 
     CrashReportSending crash_report_sending() const { return m_crash_report_sending; }
     void set_crash_report_sending(CrashReportSending);

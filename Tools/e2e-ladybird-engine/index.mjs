@@ -31,7 +31,7 @@ export const LADYBIRD_MANIFEST = Object.freeze({
     'lifecycle/endAttempt',
     'lifecycle/dispose',
   ],
-  actions: ['tap', 'fill', 'clear', 'check', 'uncheck', 'focus', 'scrollIntoView', 'swipe'],
+  actions: ['tap', 'fill', 'clear', 'check', 'uncheck', 'focus', 'scrollIntoView', 'swipe', 'setInputFiles'],
 });
 
 export function ladybirdEngineOptions({
