@@ -783,6 +783,7 @@ private:
     virtual void inject_extension(String extension_id, Optional<u64> tab_id, MCP::OnToolCallComplete) override;
     virtual void list_page_tools(u64 tab_id, bool include_declarative, MCP::OnToolCallComplete) override;
     virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, MCP::OnToolCallComplete) override;
+    virtual void inspect_site_manifests(u64 tab_id, bool include_content, size_t max_bytes_per_manifest, MCP::OnToolCallComplete) override;
     virtual void skills_list(Optional<String> cursor, MCP::OnProtocolCallComplete) override;
     virtual void skills_get(String uri, MCP::OnProtocolCallComplete) override;
     virtual void resources_read(String uri, MCP::OnProtocolCallComplete) override;

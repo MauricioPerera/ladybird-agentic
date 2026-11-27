@@ -111,6 +111,7 @@ public:
 
     virtual void list_page_tools(u64 tab_id, bool include_declarative, OnToolCallComplete) = 0;
     virtual void call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, OnToolCallComplete) = 0;
+    virtual void inspect_site_manifests(u64 tab_id, bool include_content, size_t max_bytes_per_manifest, OnToolCallComplete) = 0;
 
     virtual void skills_list(Optional<String> cursor, OnProtocolCallComplete) = 0;
     virtual void skills_get(String uri, OnProtocolCallComplete) = 0;
