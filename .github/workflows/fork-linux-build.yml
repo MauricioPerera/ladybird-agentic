@@ -29,6 +29,9 @@ jobs:
     timeout-minutes: 355
     permissions:
       contents: read
+    outputs:
+      packages-cache-key: ${{ steps.release-checksums.outputs.cache-key }}
+      manifest-digest: ${{ steps.release-checksums.outputs.manifest-digest }}
 
     steps:
       - name: Validate release version input
@@ -209,6 +212,7 @@ jobs:
             -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_SystemIntegration"
 
       - name: Generate SHA-256 checksums
+        id: release-checksums
         working-directory: ${{ github.workspace }}/Build/packages
         shell: bash
         run: |
@@ -220,16 +224,19 @@ jobs:
           fi
           sha256sum "${assets[@]}" > SHA256SUMS-linux-ubuntu-2404.txt
           cat SHA256SUMS-linux-ubuntu-2404.txt
+          read -r digest _ < <(sha256sum SHA256SUMS-linux-ubuntu-2404.txt)
+          echo "manifest-digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "cache-key=linux-release-packages-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v7
+      # Transfer only the release files through the repository cache so artifact storage limits cannot block publication.
+      - name: Save Linux packages for publication
+        uses: actions/cache/save@v6
         with:
-          name: linux-ubuntu-2404-packages
+          key: ${{ steps.release-checksums.outputs.cache-key }}
           path: |
             Build/packages/*.AppImage
             Build/packages/*.deb
             Build/packages/SHA256SUMS-linux-ubuntu-2404.txt
-          if-no-files-found: error
 
   publish-release:
     name: Publish Ubuntu 24.04 Release
@@ -243,15 +250,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v8
+      - name: Restore Linux packages for publication
+        id: release-packages
+        uses: actions/cache/restore@v6
         with:
-          name: linux-ubuntu-2404-packages
-          path: packages
+          key: ${{ needs.build-ubuntu-2404-x86_64.outputs.packages-cache-key }}
+          path: |
+            Build/packages/*.AppImage
+            Build/packages/*.deb
+            Build/packages/SHA256SUMS-linux-ubuntu-2404.txt
+          fail-on-cache-miss: true
 
       - name: Verify and publish Linux packages
+        shell: bash
         env:
+          PACKAGES_CACHE_HIT: ${{ steps.release-packages.outputs.cache-hit }}
+          MANIFEST_DIGEST: ${{ needs.build-ubuntu-2404-x86_64.outputs.manifest-digest }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           PACKAGE_FORMAT: ${{ inputs.package_format }}
-        run: python3 Meta/publish-linux-release.py packages "$PACKAGE_FORMAT" "$RELEASE_VERSION"
+        run: |
+          if [[ "$PACKAGES_CACHE_HIT" != 'true' || ! "$MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "The build's release package cache is unavailable" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$MANIFEST_DIGEST" Build/packages/SHA256SUMS-linux-ubuntu-2404.txt | sha256sum --check --strict
+          python3 Meta/publish-linux-release.py Build/packages "$PACKAGE_FORMAT" "$RELEASE_VERSION"
