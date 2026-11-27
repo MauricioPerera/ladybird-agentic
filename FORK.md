@@ -43,7 +43,7 @@ Linux Ubuntu 24.04 x86_64 AppImage/DEB builds can be triggered in GitHub Actions
 | `--mcp-allowed-containers <csv>` | Unfiltered (`open_tab` defaults to ephemeral `agent-ephemeral-*`) | Restrict MCP access & `open_tab` to listed container IDs |
 | `--mcp-allowed-domains <csv>` | Unfiltered | Domain allowlist (`*.domain.com` supported) |
 | `--mcp-blocked-domains <csv>` | Unset | Domain denylist (`*.domain.com` supported) |
-| `--mcp-allow-eval-js` | `false` (`eval_js` disabled by default) | Re-enable `eval_js` and `call_page_tool` (`--mcp-disable-eval-js` also forces off) |
+| `--mcp-allow-eval-js` | `false` (`eval_js` disabled by default) | Re-enable `eval_js` and Flow `eval` steps (`--mcp-disable-eval-js` also forces off; WebMCP `call_page_tool` uses `--mcp-disable-webmcp` to opt out) |
 | `--mcp-disable-screenshots` | `false` | Disable `take_screenshot` and MCP `FlowRunner` `screenshot` steps (DOM-only visual prompt-injection defense) |
 | `--mcp-redact-screenshot-media` | `false` | Force `redact_media: true` on `take_screenshot` (hides `<img>`, `<picture>`, `<video>`, `<canvas>`, `<svg>`, CSS background images during capture) |
 | `--mcp-auto-approve` | `false` | `--headless` only (ignored in GUI): auto-approves uploads, blind vault credentials, consequential `call_page_tool`, egress decisions, and extension installs (logged to `about:agent`) |

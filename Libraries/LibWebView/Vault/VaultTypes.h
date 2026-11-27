@@ -56,6 +56,7 @@ struct WEBVIEW_API MCPSecurityPolicy {
     Vector<String> allowed_domains {};
     Vector<String> blocked_domains {};
     bool disable_eval_js { false };
+    bool disable_webmcp { false };
     bool disable_screenshots { false };
     bool redact_screenshot_media { false };
     size_t max_tabs { 16 };

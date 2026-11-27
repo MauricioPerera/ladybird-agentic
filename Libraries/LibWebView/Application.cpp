@@ -394,6 +394,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     Optional<StringView> mcp_blocked_domains_arg;
     bool mcp_disable_eval_js = false;
     bool mcp_allow_eval_js = false;
+    bool mcp_disable_webmcp = false;
     bool mcp_disable_screenshots = false;
     bool mcp_redact_screenshot_media = false;
     bool mcp_auto_approve = false;
@@ -618,6 +619,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_blocked_domains_arg, "Comma-separated domain denylist for MCP navigation (supports *.domain.com)", "mcp-blocked-domains", 0, "domains");
     args_parser.add_option(mcp_disable_eval_js, "Keep the eval_js MCP tool disabled (default: disabled)", "mcp-disable-eval-js", 0);
     args_parser.add_option(mcp_allow_eval_js, "Explicitly enable the eval_js MCP tool (disabled by default for prompt-injection hardening)", "mcp-allow-eval-js", 0);
+    args_parser.add_option(mcp_disable_webmcp, "Disable WebMCP call_page_tool execution", "mcp-disable-webmcp", 0);
     args_parser.add_option(mcp_disable_screenshots, "Disable MCP take_screenshot tool and flow screenshot steps for visual prompt-injection hardening", "mcp-disable-screenshots", 0);
     args_parser.add_option(mcp_redact_screenshot_media, "Automatically redact untrusted visual media (<img>, <video>, <canvas>, <svg>, CSS backgrounds) during MCP screenshots", "mcp-redact-screenshot-media", 0);
     args_parser.add_option(mcp_auto_approve, "Auto-approve sensitive MCP actions (uploads, blind logins, consequential WebMCP tools, egress decisions, extension installs) without UI prompt in --headless mode only (ignored with GUI)", "mcp-auto-approve", 0);
@@ -699,6 +701,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .mcp_allowed_domains = {},
         .mcp_blocked_domains = {},
         .mcp_disable_eval_js = !mcp_allow_eval_js || mcp_disable_eval_js,
+        .mcp_disable_webmcp = mcp_disable_webmcp,
         .mcp_disable_screenshots = mcp_disable_screenshots,
         .mcp_redact_screenshot_media = mcp_redact_screenshot_media,
         .mcp_auto_approve = effective_mcp_auto_approve,
@@ -5873,6 +5876,7 @@ MCPSecurityPolicy Application::mcp_security_policy() const
         .allowed_domains = m_browser_options.mcp_allowed_domains,
         .blocked_domains = m_browser_options.mcp_blocked_domains,
         .disable_eval_js = m_browser_options.mcp_disable_eval_js,
+        .disable_webmcp = m_browser_options.mcp_disable_webmcp,
         .disable_screenshots = m_browser_options.mcp_disable_screenshots,
         .redact_screenshot_media = m_browser_options.mcp_redact_screenshot_media,
         .max_tabs = m_browser_options.mcp_max_tabs,
@@ -6653,7 +6657,9 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
             cb(mcp_error_result(mcp_denied_message));
             return;
         }
-        if (wait_for_load && parsed_url != URL::about_blank()) {
+        bool is_same_document_hash_navigation = current_view->url().scheme().is_one_of("http"sv, "https"sv)
+            && parsed_url.equals(current_view->url(), URL::ExcludeFragment::Yes);
+        if (wait_for_load && parsed_url != URL::about_blank() && !is_same_document_hash_navigation) {
             wait_for_mcp_navigation(tab_id, move(cb));
             current_view->load_from_browser_ui(parsed_url);
             return;
@@ -6663,6 +6669,9 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
         JsonObject result;
         result.set("tab_id"sv, tab_id);
         result.set("url"sv, parsed_url.to_string());
+        result.set("container_id"sv, current_view->container_id());
+        result.set("ephemeral"sv, is_ephemeral_container_id(current_view->container_id()));
+        result.set("same_document"sv, is_same_document_hash_navigation);
         if (auto hints = matching_skills_json_for_url(parsed_url); !hints.is_empty())
             result.set("matching_skills"sv, move(hints));
         if (auto cred_hints = matching_credentials_json_for_view(parsed_url, current_view->container_id()); !cred_hints.is_empty())
@@ -7135,6 +7144,35 @@ const resolveTarget = (cfg) => {
     return { el };
   }
   return { error: 'Either ref or selector must be provided' };
+};
+const scrollElementIntoNestedView = (el) => {
+  if (!el) return;
+  const win = getOwnerWindow(el);
+  let cur = el.parentElement;
+  while (cur && cur !== el.ownerDocument.documentElement && cur !== el.ownerDocument.body) {
+    try {
+      const st = win.getComputedStyle(cur);
+      const oy = st ? st.overflowY : '';
+      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && cur.scrollHeight > cur.clientHeight + 2) {
+        const er = el.getBoundingClientRect();
+        const cr = cur.getBoundingClientRect();
+        if (er.top < cr.top || er.bottom > cr.bottom) {
+          cur.scrollTop = Math.max(0, cur.scrollTop + (er.top - cr.top) - Math.max(0, (cr.height - er.height) / 2));
+        }
+      }
+      const ox = st ? st.overflowX : '';
+      if ((ox === 'auto' || ox === 'scroll' || ox === 'overlay') && cur.scrollWidth > cur.clientWidth + 2) {
+        const er = el.getBoundingClientRect();
+        const cr = cur.getBoundingClientRect();
+        if (er.left < cr.left || er.right > cr.right) {
+          cur.scrollLeft = Math.max(0, cur.scrollLeft + (er.left - cr.left) - Math.max(0, (cr.width - er.width) / 2));
+        }
+      }
+    } catch (e) {}
+    cur = cur.parentElement;
+  }
+  if (typeof el.scrollIntoView === 'function')
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
 };
 )JS"sv;
 
@@ -8044,9 +8082,12 @@ void Application::click_element(u64 tab_id, Optional<String> ref, Optional<Strin
             return;
         }
 
-        if (has_ref) {
+        if (has_ref || (has_selector && strategy == "css selector"sv)) {
             JsonObject cfg;
-            cfg.set("ref"sv, *ref);
+            if (has_ref)
+                cfg.set("ref"sv, *ref);
+            else
+                cfg.set("selector"sv, *selector);
             StringBuilder js;
             js.append("const cfg = arguments[0] || {};\n"sv);
             js.append(mcp_target_resolver_js);
@@ -8054,13 +8095,33 @@ void Application::click_element(u64 tab_id, Optional<String> ref, Optional<Strin
 const res = resolveTarget(cfg);
 if (res.error) return { error: res.error };
 const el = res.el;
-if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'nearest' });
+scrollElementIntoNestedView(el);
 if (typeof el.focus === 'function') el.focus();
 const win = getOwnerWindow(el);
-for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup'])
-  el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: win }));
+const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+const cx = Math.round((rect.left || 0) + (rect.width || 0) / 2);
+const cy = Math.round((rect.top || 0) + (rect.height || 0) / 2);
+const dispatchPtr = (type, buttons) => {
+  const opts = { bubbles: true, cancelable: true, composed: true, view: win, button: 0, buttons, clientX: cx, clientY: cy };
+  if (typeof win.PointerEvent === 'function')
+    el.dispatchEvent(new win.PointerEvent(type, { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+  else
+    el.dispatchEvent(new win.MouseEvent(type, opts));
+};
+const dispatchMouse = (type, buttons) => {
+  el.dispatchEvent(new win.MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: win, button: 0, buttons, clientX: cx, clientY: cy }));
+};
+dispatchPtr('pointerdown', 1);
+dispatchMouse('mousedown', 1);
+dispatchPtr('pointerup', 0);
+dispatchMouse('mouseup', 0);
 el.click();
-return { clicked: true, ref: String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref)), tag: (el.tagName || '').toLowerCase() };
+const out = { clicked: true, tag: (el.tagName || '').toLowerCase() };
+if (cfg.ref)
+  out.ref = String(cfg.ref).startsWith('@') ? String(cfg.ref) : ('@' + String(cfg.ref));
+else
+  out.selector = String(cfg.selector);
+return out;
 )JS"sv);
             execute_mcp_js_json(*this, tab_id, MUST(js.to_string()), move(cfg), move(cb));
             return;
@@ -8608,8 +8669,23 @@ void Application::scroll_page(u64 tab_id, String direction, i32 amount, Optional
 if (cfg.ref || cfg.selector) {
   const res = resolveTarget(cfg);
   if (res.error) return { error: res.error };
-  if (typeof res.el.scrollIntoView === 'function')
-    res.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const el = res.el;
+  const amt = Math.max(0, Number(cfg.amount || 600));
+  if (el.scrollHeight > el.clientHeight + 2) {
+    if (cfg.direction === 'top') el.scrollTop = 0;
+    else if (cfg.direction === 'bottom') el.scrollTop = el.scrollHeight;
+    else if (cfg.direction === 'up') el.scrollTop = Math.max(0, el.scrollTop - amt);
+    else el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + amt);
+    return {
+      scrolled: true,
+      targetScrolled: true,
+      scrollX: Math.round(el.scrollLeft || 0),
+      scrollY: Math.round(el.scrollTop || 0),
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight
+    };
+  }
+  scrollElementIntoNestedView(el);
 } else {
   const amt = Math.max(0, Number(cfg.amount || 600));
   if (cfg.direction === 'top') window.scrollTo(0, 0);
@@ -10672,8 +10748,8 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         on_complete(mcp_error_result(*err));
         return;
     }
-    if (mcp_security_policy().disable_eval_js) {
-        on_complete(mcp_error_result("call_page_tool is disabled because eval_js is disabled (--mcp-allow-eval-js required)"sv));
+    if (mcp_security_policy().disable_webmcp) {
+        on_complete(mcp_error_result("call_page_tool is disabled by MCP security policy (--mcp-disable-webmcp)"sv));
         return;
     }
     if (is_view_mcp_secret_tainted(tab_id)) {

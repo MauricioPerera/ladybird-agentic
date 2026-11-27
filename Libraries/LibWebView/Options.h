@@ -120,6 +120,7 @@ struct BrowserOptions {
     Vector<String> mcp_allowed_domains {};
     Vector<String> mcp_blocked_domains {};
     bool mcp_disable_eval_js { true };
+    bool mcp_disable_webmcp { false };
     bool mcp_disable_screenshots { false };
     bool mcp_redact_screenshot_media { false };
     bool mcp_auto_approve { false };
