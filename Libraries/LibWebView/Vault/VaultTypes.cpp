@@ -353,7 +353,7 @@ ErrorOr<String> mcp_resolve_container_against_policy(Optional<String> requested_
 {
     String requested = requested_container.value_or(String {});
     if (policy.allowed_containers.is_empty())
-        return requested;
+        return requested.is_empty() ? "agent"_string : requested;
 
     if (requested.is_empty())
         return policy.allowed_containers.first();

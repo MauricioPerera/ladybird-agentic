@@ -164,6 +164,17 @@ bool FlowRunner::cancel_run(StringView run_id)
     return true;
 }
 
+void FlowRunner::cancel_mcp_runs(StringView reason)
+{
+    Vector<String> ids;
+    for (auto const& [id, run] : m_active_runs) {
+        if (run->require_mcp_permission)
+            ids.append(id);
+    }
+    for (auto const& id : ids)
+        fail_run(id, String::from_utf8_without_validation(reason.bytes()), "cancelled"sv);
+}
+
 void FlowRunner::cancel_all_runs(StringView reason)
 {
     Vector<String> ids;
@@ -199,6 +210,11 @@ void FlowRunner::run_next_step(String const& run_id)
         return;
     }
 
+    if (run.require_mcp_permission && m_application.mcp_paused()) {
+        fail_run(run_id, "MCP automation is currently paused by the user"_string, "cancelled"sv);
+        return;
+    }
+
     auto view = m_application.find_automation_view(run.tab_id, run.require_mcp_permission);
     if (!view.has_value()) {
         fail_run(run_id, "Target tab disappeared or permission was revoked"_string);
@@ -227,34 +243,82 @@ void FlowRunner::run_next_step(String const& run_id)
                 fail_run(run_id, MUST(String::formatted("{}", policy_check.error())));
                 return;
             }
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "navigate tab"sv, url); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
         }
-        if (step.wait_for_load && url != URL::about_blank()) {
-            run.nav_wait_id = m_application.start_automation_navigation_wait(run.tab_id, timeout_ms, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission](ErrorOr<void> result) {
-                if (!weak_self)
-                    return;
-                if (auto active = weak_self->m_active_runs.get(run_id); active.has_value())
-                    active.value()->nav_wait_id.clear();
-                if (result.is_error()) {
-                    weak_self->fail_run(run_id, MUST(String::formatted("Navigation failed: {}", result.error())));
-                    return;
-                }
-                if (auto landed_view = weak_self->m_application.find_automation_view(tab_id, require_mcp); landed_view.has_value()) {
-                    if (landed_view->url().scheme() == "about"sv && landed_view->url() != URL::about_blank()) {
-                        weak_self->fail_run(run_id, MUST(String::formatted("Navigation landed on browser error page '{}' (check SSL certificate or network)", landed_view->url().to_string())));
+        auto execute_open = [this, run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission, wait_for_load = step.wait_for_load, timeout_ms](ViewImplementation& target_view, ActiveRun& target_run, URL::URL const& target_url) {
+            if (wait_for_load && target_url != URL::about_blank()) {
+                target_run.nav_wait_id = m_application.start_automation_navigation_wait(tab_id, timeout_ms, require_mcp, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id, require_mcp](ErrorOr<void> result) {
+                    if (!weak_self)
+                        return;
+                    if (auto active = weak_self->m_active_runs.get(run_id); active.has_value())
+                        active.value()->nav_wait_id.clear();
+                    if (result.is_error()) {
+                        weak_self->fail_run(run_id, MUST(String::formatted("Navigation failed: {}", result.error())));
                         return;
                     }
+                    if (auto landed_view = weak_self->m_application.find_automation_view(tab_id, require_mcp); landed_view.has_value()) {
+                        if (landed_view->url().scheme() == "about"sv && landed_view->url() != URL::about_blank()) {
+                            weak_self->fail_run(run_id, MUST(String::formatted("Navigation landed on browser error page '{}' (check SSL certificate or network)", landed_view->url().to_string())));
+                            return;
+                        }
+                    }
+                    weak_self->complete_current_step(run_id, idx);
+                });
+                target_view.load_from_browser_ui(target_url);
+                return;
+            }
+            target_view.load_from_browser_ui(target_url);
+            complete_current_step(run_id, idx);
+        };
+        if (run.require_mcp_permission && m_application.mcp_egress_requires_approval(url, view->url())) {
+            auto dest_origin = url.origin().serialize();
+            auto summary = MUST(String::formatted("Flow navigate to {} (egress guard active)", dest_origin));
+            auto details = MUST(String::formatted("Tab ID: {}\nCurrent URL: {}\nDestination URL: {}", run.tab_id, view->url().to_string(), url.to_string()));
+            m_application.request_mcp_user_approval(run.tab_id, "egress_navigation"_string, move(summary), move(details), [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, url, execute_open = move(execute_open)](bool approved) mutable {
+                if (!weak_self)
+                    return;
+                auto active = weak_self->m_active_runs.get(run_id);
+                if (!active.has_value())
+                    return;
+                auto& active_run = *active.value();
+                if (active_run.finished || active_run.step_index != idx)
+                    return;
+                if (weak_self->m_application.mcp_paused()) {
+                    weak_self->fail_run(run_id, "MCP automation is currently paused by the user"_string, "cancelled"sv);
+                    return;
                 }
-                weak_self->complete_current_step(run_id, idx);
+                if (!approved) {
+                    weak_self->fail_run(run_id, "Cross-origin flow navigation rejected by user (egress guard)"_string);
+                    return;
+                }
+                if (auto err = weak_self->m_application.check_mcp_mutation_allowed(tab_id, "navigate tab"sv, url); err.has_value()) {
+                    weak_self->fail_run(run_id, *err);
+                    return;
+                }
+                auto current_view = weak_self->m_application.find_automation_view(tab_id, true);
+                if (!current_view.has_value()) {
+                    weak_self->fail_run(run_id, "Target tab disappeared or permission was revoked"_string);
+                    return;
+                }
+                weak_self->m_application.approve_mcp_egress_origin(url);
+                execute_open(*current_view, active_run, url);
             });
-            view->load_from_browser_ui(url);
             return;
         }
-        view->load_from_browser_ui(url);
-        complete_current_step(run_id, idx);
+        execute_open(*view, run, url);
         return;
     }
 
     case FlowStep::Action::Reload: {
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "reload tab"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+        }
         if (step.wait_for_load) {
             run.nav_wait_id = m_application.start_automation_navigation_wait(run.tab_id, timeout_ms, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission](ErrorOr<void> result) {
                 if (!weak_self)
@@ -283,6 +347,12 @@ void FlowRunner::run_next_step(String const& run_id)
 
     case FlowStep::Action::Back:
     case FlowStep::Action::Forward: {
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, flow_action_name(step.action)); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+        }
         view->traverse_the_history_by_delta(step.action == FlowStep::Action::Back ? -1 : 1);
         run.step_timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(250), [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx] {
             if (weak_self)
@@ -303,9 +373,16 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::AssertUrl: {
-        if (run.require_mcp_permission && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
-            fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab URL until navigation commits to a new document"_string);
-            return;
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_read_allowed(run.tab_id, "inspect tab URL"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+            if (m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+                fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab URL until navigation commits to a new document"_string);
+                return;
+            }
+            m_application.record_mcp_sensitive_read(*view);
         }
         Optional<String> contains;
         Optional<String> equals;
@@ -323,16 +400,24 @@ void FlowRunner::run_next_step(String const& run_id)
     case FlowStep::Action::Fill:
     case FlowStep::Action::AssertText:
     case FlowStep::Action::Extract: {
-        bool locator_reads_text = step.locator.has_value()
-            && (step.locator->kind == FlowLocator::Kind::Text
-                || (step.locator->kind == FlowLocator::Kind::Role && step.locator->name.has_value() && !step.locator->name->is_empty()));
-        if (run.require_mcp_permission
-            && m_application.is_view_mcp_secret_tainted(run.tab_id)
-            && (step.action == FlowStep::Action::Extract
-                || step.action == FlowStep::Action::AssertText
-                || ((step.action == FlowStep::Action::WaitFor || step.action == FlowStep::Action::AssertVisible) && locator_reads_text))) {
-            fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab until navigation commits to a new document"_string);
-            return;
+        bool is_mutation = step.action == FlowStep::Action::Click || step.action == FlowStep::Action::Fill;
+        if (run.require_mcp_permission) {
+            if (is_mutation) {
+                if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, flow_action_name(step.action)); err.has_value()) {
+                    fail_run(run_id, *err);
+                    return;
+                }
+            } else {
+                if (auto err = m_application.check_mcp_read_allowed(run.tab_id, flow_action_name(step.action)); err.has_value()) {
+                    fail_run(run_id, *err);
+                    return;
+                }
+                if (m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+                    fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab until navigation commits to a new document"_string);
+                    return;
+                }
+                m_application.record_mcp_sensitive_read(*view);
+            }
         }
         auto locator = interpolate_locator(*step.locator, run.runtime_vars);
         JsonObject params;
@@ -346,23 +431,39 @@ void FlowRunner::run_next_step(String const& run_id)
                 params.set("equals"sv, interpolate_flow_variables(*step.equals, run.runtime_vars));
         }
         auto script = build_locator_action_script(flow_action_name(step.action), locator, params);
+        if (run.require_mcp_permission && is_mutation) {
+            auto origin_label = view->url().origin().is_opaque() ? view->url().to_string() : view->url().origin().serialize();
+            auto action_name = String::from_utf8_without_validation(flow_action_name(step.action).bytes());
+            auto summary = MUST(String::formatted("Flow '{}' on {} (egress guard active)", action_name, origin_label));
+            auto details = MUST(String::formatted("Tab ID: {}\nURL: {}\nNote: A sensitive non-'agent' tab was read in this MCP session.", run.tab_id, view->url().to_string()));
+            run_mcp_egress_gated_action(run_id, idx, *view, move(action_name), move(summary), move(details), [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, script = move(script), timeout_ms]() mutable {
+                if (weak_self)
+                    weak_self->execute_locator_step_attempt(run_id, idx, move(script), timeout_ms);
+            });
+            return;
+        }
         execute_locator_step_attempt(run_id, idx, move(script), timeout_ms);
         return;
     }
 
     case FlowStep::Action::Press: {
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "press key"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+        }
         auto key = interpolate_flow_variables(*step.key, run.runtime_vars);
+        String script;
         if (step.locator.has_value()) {
             auto locator = interpolate_locator(*step.locator, run.runtime_vars);
             JsonObject params;
             params.set("key"sv, key);
-            auto script = build_locator_action_script("press"sv, locator, params);
-            execute_locator_step_attempt(run_id, idx, move(script), timeout_ms);
-            return;
-        }
-        JsonObject cfg;
-        cfg.set("key"sv, key);
-        auto script = MUST(String::formatted(R"JS(return (function(cfg) {{
+            script = build_locator_action_script("press"sv, locator, params);
+        } else {
+            JsonObject cfg;
+            cfg.set("key"sv, key);
+            script = MUST(String::formatted(R"JS(return (function(cfg) {{
   var el = document.activeElement || document.body || document.documentElement;
   if (!el) return {{ ok: false, retryable: true, error: 'No active element' }};
   var init = {{ key: cfg.key, bubbles: true, cancelable: true }};
@@ -376,13 +477,28 @@ void FlowRunner::run_next_step(String const& run_id)
   }}
   return {{ ok: true }};
 }})({});)JS",
-            JsonValue { move(cfg) }.serialized()));
+                JsonValue { move(cfg) }.serialized()));
+        }
+        if (run.require_mcp_permission) {
+            auto origin_label = view->url().origin().is_opaque() ? view->url().to_string() : view->url().origin().serialize();
+            auto summary = MUST(String::formatted("Flow 'press' ({}) on {} (egress guard active)", key, origin_label));
+            auto details = MUST(String::formatted("Tab ID: {}\nURL: {}\nKey: {}", run.tab_id, view->url().to_string(), key));
+            run_mcp_egress_gated_action(run_id, idx, *view, "press"_string, move(summary), move(details), [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, script = move(script), timeout_ms]() mutable {
+                if (weak_self)
+                    weak_self->execute_locator_step_attempt(run_id, idx, move(script), timeout_ms);
+            });
+            return;
+        }
         execute_locator_step_attempt(run_id, idx, move(script), timeout_ms);
         return;
     }
 
     case FlowStep::Action::Eval: {
         if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "execute flow script"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
             if (m_application.mcp_security_policy().disable_eval_js) {
                 fail_run(run_id, "Flow eval step is disabled by --mcp-disable-eval-js policy"_string);
                 return;
@@ -391,6 +507,7 @@ void FlowRunner::run_next_step(String const& run_id)
                 fail_run(run_id, "Blocked by credential vault quarantine: eval is disabled on this tab until navigation commits to a new document"_string);
                 return;
             }
+            m_application.record_mcp_sensitive_read(*view);
         }
         JsonObject vars_json;
         for (auto const& [k, v] : run.runtime_vars)
@@ -403,22 +520,41 @@ void FlowRunner::run_next_step(String const& run_id)
         payload.set("script"sv, *step.script);
         payload.set("args"sv, move(args));
 
-        m_application.enqueue_automation_webdriver_command(run.tab_id, "execute_script"_string, move(payload), {}, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx](Web::WebDriver::Response response) {
+        auto run_eval = [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id = run.tab_id, require_mcp = run.require_mcp_permission, payload = move(payload)]() mutable {
             if (!weak_self)
                 return;
-            if (response.is_error()) {
-                weak_self->fail_run(run_id, MUST(String::formatted("JS error ({}): {}", response.error().error, response.error().message)));
-                return;
-            }
-            weak_self->complete_current_step(run_id, idx, response.value());
-        });
+            weak_self->m_application.enqueue_automation_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, require_mcp, [weak_self, run_id, idx](Web::WebDriver::Response response) {
+                if (!weak_self)
+                    return;
+                if (response.is_error()) {
+                    weak_self->fail_run(run_id, MUST(String::formatted("JS error ({}): {}", response.error().error, response.error().message)));
+                    return;
+                }
+                weak_self->complete_current_step(run_id, idx, response.value());
+            });
+        };
+        if (run.require_mcp_permission) {
+            auto origin_label = view->url().origin().is_opaque() ? view->url().to_string() : view->url().origin().serialize();
+            auto summary = MUST(String::formatted("Flow 'eval' on {} (egress guard active)", origin_label));
+            auto details = MUST(String::formatted("Tab ID: {}\nURL: {}\nNote: A sensitive non-'agent' tab was read in this MCP session.", run.tab_id, view->url().to_string()));
+            run_mcp_egress_gated_action(run_id, idx, *view, "eval"_string, move(summary), move(details), move(run_eval));
+            return;
+        }
+        run_eval();
         return;
     }
 
     case FlowStep::Action::Screenshot: {
-        if (run.require_mcp_permission && m_application.is_view_mcp_secret_tainted(run.tab_id)) {
-            fail_run(run_id, "Blocked by credential vault quarantine: screenshot is disabled on this tab until navigation commits to a new document"_string);
-            return;
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_read_allowed(run.tab_id, "take screenshot"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+            if (m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+                fail_run(run_id, "Blocked by credential vault quarantine: screenshot is disabled on this tab until navigation commits to a new document"_string);
+                return;
+            }
+            m_application.record_mcp_sensitive_read(*view);
         }
         m_application.enqueue_automation_webdriver_command(run.tab_id, "take_screenshot"_string, JsonValue {}, {}, run.require_mcp_permission, [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx](Web::WebDriver::Response response) {
             if (!weak_self)
@@ -459,6 +595,12 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::UploadFile: {
+        if (run.require_mcp_permission) {
+            if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "upload file"sv); err.has_value()) {
+                fail_run(run_id, *err);
+                return;
+            }
+        }
         if (!step.locator.has_value() || step.paths.is_empty()) {
             fail_run(run_id, "Step 'upload_file' requires both 'locator' and 'paths'"_string);
             return;
@@ -477,10 +619,100 @@ void FlowRunner::run_next_step(String const& run_id)
         }
         auto locator = interpolate_locator(*step.locator, run.runtime_vars);
         auto script = build_locator_action_script("resolve_upload_input"sv, locator, {});
+        if (run.require_mcp_permission) {
+            StringBuilder files_summary;
+            for (auto const& p : validated_paths) {
+                if (!files_summary.is_empty())
+                    files_summary.append(", "sv);
+                files_summary.append(LexicalPath::basename(p.to_byte_string()));
+            }
+            auto summary = MUST(String::formatted("Flow upload {} file(s) ({})", validated_paths.size(), files_summary.string_view()));
+            auto details = MUST(String::formatted("Tab ID: {}\nURL: {}\nFiles:\n{}", run.tab_id, view->url().to_string(), MUST(String::join('\n', validated_paths))));
+            auto expected_origin = view->url().origin().is_opaque() ? String {} : view->url().origin().serialize();
+            auto tab_id = run.tab_id;
+            m_application.request_mcp_user_approval(tab_id, "upload_file"_string, move(summary), move(details), [weak_self = make_weak_ptr<FlowRunner>(), run_id, idx, tab_id, expected_origin = move(expected_origin), script = move(script), validated_paths = move(validated_paths), timeout_ms](bool approved) mutable {
+                if (!weak_self)
+                    return;
+                auto active = weak_self->m_active_runs.get(run_id);
+                if (!active.has_value())
+                    return;
+                auto& active_run = *active.value();
+                if (active_run.finished || active_run.step_index != idx)
+                    return;
+                if (weak_self->m_application.mcp_paused()) {
+                    weak_self->fail_run(run_id, "MCP automation is currently paused by the user"_string, "cancelled"sv);
+                    return;
+                }
+                if (!approved) {
+                    weak_self->fail_run(run_id, "Flow file upload rejected by user or timed out"_string);
+                    return;
+                }
+                if (auto err = weak_self->m_application.check_mcp_mutation_allowed(tab_id, "upload file"sv); err.has_value()) {
+                    weak_self->fail_run(run_id, *err);
+                    return;
+                }
+                auto cur_view = weak_self->m_application.find_automation_view(tab_id, true);
+                if (!cur_view.has_value()) {
+                    weak_self->fail_run(run_id, "Target tab disappeared or permission was revoked"_string);
+                    return;
+                }
+                auto cur_origin = cur_view->url().origin().is_opaque() ? String {} : cur_view->url().origin().serialize();
+                if (cur_origin != expected_origin) {
+                    weak_self->fail_run(run_id, "Tab origin changed during flow file upload approval prompt (aborting for safety)"_string);
+                    return;
+                }
+                weak_self->execute_upload_step_attempt(run_id, idx, move(script), move(validated_paths), timeout_ms);
+            });
+            return;
+        }
         execute_upload_step_attempt(run_id, idx, move(script), move(validated_paths), timeout_ms);
         return;
     }
     }
+}
+
+void FlowRunner::run_mcp_egress_gated_action(String const& run_id, size_t step_index, ViewImplementation const& view, String action_kind, String summary, String details, Function<void()> on_approved)
+{
+    if (!m_application.mcp_egress_requires_approval(view.url(), view.url())) {
+        on_approved();
+        return;
+    }
+    auto expected_origin = view.url().origin().is_opaque() ? String {} : view.url().origin().serialize();
+    auto tab_id = view.view_id();
+    m_application.request_mcp_user_approval(tab_id, action_kind, move(summary), move(details), [weak_self = make_weak_ptr<FlowRunner>(), run_id, step_index, tab_id, expected_origin = move(expected_origin), action_kind, on_approved = move(on_approved)](bool approved) mutable {
+        if (!weak_self)
+            return;
+        auto active = weak_self->m_active_runs.get(run_id);
+        if (!active.has_value())
+            return;
+        auto& run = *active.value();
+        if (run.finished || run.step_index != step_index)
+            return;
+        if (weak_self->m_application.mcp_paused()) {
+            weak_self->fail_run(run_id, "MCP automation is currently paused by the user"_string, "cancelled"sv);
+            return;
+        }
+        if (!approved) {
+            weak_self->fail_run(run_id, MUST(String::formatted("Flow step '{}' rejected by egress guard (sensitive non-'agent' tab was read in this session)", action_kind)));
+            return;
+        }
+        if (auto err = weak_self->m_application.check_mcp_mutation_allowed(tab_id, action_kind); err.has_value()) {
+            weak_self->fail_run(run_id, *err);
+            return;
+        }
+        auto cur_view = weak_self->m_application.find_automation_view(tab_id, true);
+        if (!cur_view.has_value()) {
+            weak_self->fail_run(run_id, "Target tab disappeared or permission was revoked"_string);
+            return;
+        }
+        auto cur_origin = cur_view->url().origin().is_opaque() ? String {} : cur_view->url().origin().serialize();
+        if (cur_origin != expected_origin) {
+            weak_self->fail_run(run_id, MUST(String::formatted("Tab origin changed during '{}' approval prompt (aborting for safety)", action_kind)));
+            return;
+        }
+        weak_self->m_application.approve_mcp_egress_origin(cur_view->url());
+        on_approved();
+    });
 }
 
 void FlowRunner::execute_upload_step_attempt(String const& run_id, size_t step_index, String script, Vector<String> validated_paths, u32 timeout_ms)
@@ -643,6 +875,17 @@ void FlowRunner::poll_assert_url(String const& run_id, size_t step_index, Option
     auto& run = *entry.value();
     if (run.finished || run.step_index != step_index)
         return;
+
+    if (run.require_mcp_permission) {
+        if (m_application.mcp_paused()) {
+            fail_run(run_id, "MCP automation is currently paused by the user"_string, "cancelled"sv);
+            return;
+        }
+        if (m_application.is_view_mcp_secret_tainted(run.tab_id)) {
+            fail_run(run_id, "Blocked by credential vault quarantine: cannot inspect tainted tab URL until navigation commits to a new document"_string);
+            return;
+        }
+    }
 
     auto view = m_application.find_automation_view(run.tab_id, run.require_mcp_permission);
     if (!view.has_value()) {

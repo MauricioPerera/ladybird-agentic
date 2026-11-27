@@ -119,7 +119,8 @@ struct BrowserOptions {
     Vector<String> mcp_allowed_containers {};
     Vector<String> mcp_allowed_domains {};
     Vector<String> mcp_blocked_domains {};
-    bool mcp_disable_eval_js { false };
+    bool mcp_disable_eval_js { true };
+    bool mcp_auto_approve { false };
     size_t mcp_max_tabs { 16 };
     EnableContentBlocker enable_content_blocker { EnableContentBlocker::Yes };
     DisableSandbox disable_sandbox { DisableSandbox::No };

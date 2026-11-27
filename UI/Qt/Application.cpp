@@ -990,6 +990,7 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
         m_mcp_port = state.mcp_port;
         m_mcp_token = state.mcp_token;
     }
+    m_mcp_paused = state.mcp_paused;
     m_gpu_painting_enabled = state.gpu_painting_enabled;
     m_profile_is_temporary = state.profile_is_temporary;
 #    if defined(AK_OS_MACOS)
@@ -3273,11 +3274,21 @@ void Application::did_disable_mcp()
 {
     m_mcp_port = {};
     m_mcp_token = {};
+    m_mcp_paused = false;
     if (m_application_actions)
         m_application_actions->mcp_enabled_changed(false);
     for (auto* widget : QApplication::topLevelWidgets()) {
         if (auto* window = as_if<BrowserWindow>(widget))
             window->on_mcp_disabled();
+    }
+}
+
+void Application::did_change_mcp_paused(bool paused)
+{
+    m_mcp_paused = paused;
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->update_mcp_banner();
     }
 }
 

@@ -77,6 +77,7 @@ private:
     virtual void stop_request(u64 request_id) override;
     virtual void toggle_devtools_enabled() override;
     virtual void toggle_mcp_enabled() override;
+    virtual void mcp_set_paused(bool paused) override;
     virtual Messages::HubServer::CreateContainerResponse create_container(String name, String color) override;
     virtual Messages::HubServer::DeleteContainerResponse delete_container(String id) override;
     virtual void check_for_updates(WebView::UpdateCheckTrigger) override;
@@ -188,6 +189,7 @@ private:
     virtual void view_set_system_visibility_state(u64 view_id, Web::HTML::VisibilityState visibility_state) override;
     virtual void view_set_pinned(u64 view_id, bool pinned) override;
     virtual void view_set_mcp_access_allowed(u64 view_id, bool allowed) override;
+    virtual void view_set_mcp_access_mode(u64 view_id, u8 mode) override;
     virtual void view_set_current_tab_of_window(u64 view_id, bool current_tab_of_window) override;
     virtual void view_set_presents_from_cpu_memory(u64 view_id, bool presents_from_cpu_memory) override;
     virtual void view_set_hosts_remote_layer(u64 view_id, bool hosts_remote_layer) override;

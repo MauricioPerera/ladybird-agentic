@@ -91,6 +91,13 @@
 
 namespace WebView {
 
+enum class MCPAccessMode : u8 {
+    Blocked = 0,
+    ReadOnly = 1,
+    SameOrigin = 2,
+    Full = 3,
+};
+
 class MicrophoneAuthorizerForTesting;
 
 struct GeolocationRequestKey {
@@ -245,8 +252,11 @@ public:
     // Whether discarding the view would let a process exit, which is how its memory comes back.
     bool discarding_ends_a_process() const;
     void set_pinned(bool pinned);
-    bool is_mcp_access_allowed() const { return m_is_private == IsPrivate::No && m_mcp_access_allowed; }
+    bool is_mcp_access_allowed() const { return m_is_private == IsPrivate::No && m_mcp_access_mode != MCPAccessMode::Blocked; }
+    MCPAccessMode mcp_access_mode() const { return m_is_private == IsPrivate::Yes ? MCPAccessMode::Blocked : m_mcp_access_mode; }
+    Optional<URL::Origin> const& mcp_pinned_origin() const { return m_mcp_pinned_origin; }
     void set_mcp_access_allowed(bool);
+    void set_mcp_access_mode(MCPAccessMode);
     void set_current_tab_of_window(bool current_tab_of_window);
     // When the user last stopped seeing the view, if they don't see it now.
     Optional<MonotonicTime> hidden_since() const { return m_hidden_since; }
@@ -711,6 +721,7 @@ public:
     Function<void(Utf16String const& message)> on_request_set_prompt_text;
     Function<void()> on_before_browser_initiated_navigation;
     Function<void(URL::URL const&, URL::Origin const&, ExternalURLHandler const&, Function<void(bool)>)> on_request_external_url_confirmation;
+    Function<void(String const& action_kind, String const& summary, String const& details, Function<void(bool)>)> on_request_mcp_action_approval;
     Function<void()> on_request_accept_dialog;
     Function<void()> on_request_website_issue_report;
     Function<void()> on_request_screenshot;
@@ -1389,7 +1400,8 @@ protected:
     bool m_changed_favicon_while_hidden { false };
     RefPtr<Gfx::Bitmap const> m_favicon;
     bool m_pinned { false };
-    bool m_mcp_access_allowed { false };
+    MCPAccessMode m_mcp_access_mode { MCPAccessMode::Blocked };
+    Optional<URL::Origin> m_mcp_pinned_origin;
     // NB: The current tab of a minimized window is hidden, but the user sees it again as soon as they bring the window
     //     back.
     bool m_current_tab_of_window { false };

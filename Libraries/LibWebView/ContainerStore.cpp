@@ -51,6 +51,7 @@ Vector<TabContainer> default_tab_containers()
         { "work"_string, "Work"_string, "#f97316"_string },
         { "banking"_string, "Banking"_string, "#10b981"_string },
         { "shopping"_string, "Shopping"_string, "#ec4899"_string },
+        { "agent"_string, "Agent"_string, "#8b5cf6"_string },
     };
 }
 

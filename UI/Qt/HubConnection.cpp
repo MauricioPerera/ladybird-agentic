@@ -243,6 +243,19 @@ void HubConnection::view_request_external_url_confirmation(u64 view_id, u64 answ
     });
 }
 
+void HubConnection::view_request_mcp_action_approval(u64 view_id, u64 answer_id, String action_kind, String summary, String details)
+{
+    auto* view = RemoteView::find(view_id);
+    if (!view || !view->on_request_mcp_action_approval) {
+        async_view_answer(view_id, answer_id, false);
+        return;
+    }
+    view->on_request_mcp_action_approval(action_kind, summary, details, [view_id, answer_id](bool answer) {
+        if (auto* hub = HubConnection::the_if_connected())
+            hub->async_view_answer(view_id, answer_id, answer);
+    });
+}
+
 void HubConnection::view_request_permission(u64 view_id, u64 answer_id, WebView::PermissionPromptRequest request)
 {
     auto* view = RemoteView::find(view_id);
@@ -331,6 +344,11 @@ void HubConnection::app_did_enable_mcp(u16 port, String token)
 void HubConnection::app_did_disable_mcp()
 {
     Application::the().did_disable_mcp();
+}
+
+void HubConnection::app_mcp_paused_changed(bool paused)
+{
+    Application::the().did_change_mcp_paused(paused);
 }
 
 void HubConnection::app_gpu_painting_changed(bool gpu_painting_enabled)

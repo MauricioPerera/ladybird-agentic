@@ -236,6 +236,7 @@ public:
 
     Optional<u16> mcp_port() const { return m_mcp_port; }
     Optional<String> const& mcp_token() const { return m_mcp_token; }
+    bool mcp_paused() const { return m_mcp_paused; }
 
 private:
     void present_window(BrowserWindow&, WindowConfiguration const&, ShowWindow);
@@ -340,6 +341,7 @@ private:
     void did_disable_devtools();
     void did_enable_mcp(u16 port, String token);
     void did_disable_mcp();
+    void did_change_mcp_paused(bool paused);
     void did_change_gpu_painting(bool enabled);
     void update_cpu_painting_bars() const;
     void on_recently_closed_entries_changed() const;
@@ -354,6 +356,7 @@ private:
     Optional<u16> m_devtools_port;
     Optional<u16> m_mcp_port;
     Optional<String> m_mcp_token;
+    bool m_mcp_paused { false };
     bool m_gpu_painting_enabled { true };
     bool m_cpu_painting_bar_dismissed { false };
 

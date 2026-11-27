@@ -170,6 +170,7 @@ struct Hub::InitialState {
     bool mcp_enabled;
     Optional<u16> mcp_port;
     Optional<String> mcp_token;
+    bool mcp_paused;
     ByteString profile_identifier;
     ByteString profile_identity;
     bool profile_is_temporary;
@@ -233,6 +234,7 @@ struct Hub::ViewState {
     String container_id;
     bool is_loading;
     bool mcp_access_allowed;
+    u8 mcp_access_mode;
     bool crash_overlay_active;
     String crash_overlay_failed_url;
     bool crash_overlay_is_for_memory_limit;
@@ -327,6 +329,7 @@ endpoint HubClient
     app_did_disable_devtools() =|
     app_did_enable_mcp(u16 port, String token) =|
     app_did_disable_mcp() =|
+    app_mcp_paused_changed(bool paused) =|
     app_gpu_painting_changed(bool gpu_painting_enabled) =|
     app_open_urls_in_new_tabs(Vector<URL::URL> urls) =|
     app_activate_or_open_tab_with_url(URL::URL url) =|
@@ -351,6 +354,7 @@ endpoint HubClient
     view_favicon_change(u64 view_id, Optional<Gfx::ShareableBitmap> favicon) =|
     view_request_before_unload(u64 view_id, u64 answer_id, String source) =|
     view_request_external_url_confirmation(u64 view_id, u64 answer_id, URL::URL url, URL::Origin initiator_origin, String application_name) =|
+    view_request_mcp_action_approval(u64 view_id, u64 answer_id, String action_kind, String summary, String details) =|
     view_request_permission(u64 view_id, u64 answer_id, WebView::PermissionPromptRequest request) =|
     view_request_date_picker(u64 view_id, Utf16String input_type, Utf16String value, Utf16String minimum, Utf16String maximum) =|
     view_request_dictionary_lookup(u64 view_id, WebView::DictionaryLookup lookup, Gfx::IntPoint position) =|

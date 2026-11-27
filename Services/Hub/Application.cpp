@@ -457,6 +457,13 @@ void Application::on_mcp_disabled() const
         ui->async_app_did_disable_mcp();
 }
 
+void Application::on_mcp_paused_changed(bool paused) const
+{
+    WebView::Application::on_mcp_paused_changed(paused);
+    if (auto* ui = ConnectionFromUI::the())
+        ui->async_app_mcp_paused_changed(paused);
+}
+
 void Application::on_compositor_gpu_painting_changed() const
 {
     if (auto* ui = ConnectionFromUI::the())

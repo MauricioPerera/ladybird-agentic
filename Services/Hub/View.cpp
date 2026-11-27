@@ -116,6 +116,16 @@ View::View(InitialState initial_state)
     set_page_background_color_to_system_canvas(m_websites_prefer_dark);
 }
 
+View::~View()
+{
+    for (auto& [_, on_answer] : m_pending_answers)
+        on_answer(false);
+    m_pending_answers.clear();
+    for (auto& [_, on_perm] : m_pending_permission_answers)
+        on_perm(Web::Permissions::PromptOutcome::Dismissed);
+    m_pending_permission_answers.clear();
+}
+
 void View::initialize(Optional<WebView::CanonicalTraversable&> traversable)
 {
     initialize_tab(Web::HTML::VisibilityState::Hidden, traversable);
@@ -236,6 +246,18 @@ void View::forward_callbacks_to_ui(bool is_tab)
             m_pending_answers.set(answer_id, move(on_complete));
             push_state_to_ui();
             ui->async_view_request_external_url_confirmation(view_id(), answer_id, url, initiator_origin, handler.application_name());
+        };
+
+        on_request_mcp_action_approval = [this](String const& action_kind, String const& summary, String const& details, Function<void(bool)> on_complete) {
+            auto* ui = ConnectionFromUI::the();
+            if (!ui) {
+                on_complete(false);
+                return;
+            }
+            auto answer_id = m_next_answer_id++;
+            m_pending_answers.set(answer_id, move(on_complete));
+            push_state_to_ui();
+            ui->async_view_request_mcp_action_approval(view_id(), answer_id, action_kind, summary, details);
         };
 
         on_request_permission = [this](WebView::PermissionPromptRequest const& request, WebView::PermissionPromptCallback on_outcome) {
@@ -657,6 +679,7 @@ ViewState View::current_state() const
     state.container_id = container_id();
     state.is_loading = is_loading();
     state.mcp_access_allowed = is_mcp_access_allowed();
+    state.mcp_access_mode = to_underlying(mcp_access_mode());
     state.zoom_level = zoom_level();
     state.can_navigate_back = can_navigate_back();
     state.can_navigate_forward = can_navigate_forward();

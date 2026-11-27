@@ -422,6 +422,20 @@ void ViewImplementation::update_displayed_url()
     if (m_displayed_url == displayed_url)
         return;
     m_displayed_url = move(displayed_url);
+
+    bool is_privileged = m_displayed_url.scheme() == "resource"sv || (m_displayed_url.scheme() == "about"sv && m_displayed_url != URL::about_blank());
+    if (m_mcp_access_mode != MCPAccessMode::Blocked && is_privileged) {
+        set_mcp_access_mode(MCPAccessMode::Blocked);
+    } else if (m_mcp_access_mode == MCPAccessMode::SameOrigin
+        && (!m_mcp_pinned_origin.has_value() || m_mcp_pinned_origin->is_opaque())
+        && m_displayed_url.scheme().is_one_of("http"sv, "https"sv)
+        && !m_displayed_url.origin().is_opaque()) {
+        m_mcp_pinned_origin = m_displayed_url.origin();
+        did_change_state();
+        if (Application::is_initialized())
+            Application::the().notify_mcp_audit_observers();
+    }
+
     if (on_url_change)
         on_url_change(m_displayed_url);
 }
@@ -867,17 +881,30 @@ void ViewImplementation::set_pinned(bool pinned)
 
 void ViewImplementation::set_mcp_access_allowed(bool allowed)
 {
-    if (m_is_private == IsPrivate::Yes || (url().scheme() == "about"sv && url() != URL::about_blank()))
-        allowed = false;
+    set_mcp_access_mode(allowed ? MCPAccessMode::Full : MCPAccessMode::Blocked);
+}
 
-    if (m_mcp_access_allowed == allowed)
+void ViewImplementation::set_mcp_access_mode(MCPAccessMode mode)
+{
+    if (m_is_private == IsPrivate::Yes || (url().scheme() == "about"sv && url() != URL::about_blank()))
+        mode = MCPAccessMode::Blocked;
+
+    if (m_mcp_access_mode == mode)
         return;
 
-    m_mcp_access_allowed = allowed;
-    if (allowed)
+    m_mcp_access_mode = mode;
+    if (mode == MCPAccessMode::SameOrigin)
+        m_mcp_pinned_origin = url().origin();
+    else
+        m_mcp_pinned_origin.clear();
+
+    if (mode != MCPAccessMode::Blocked) {
         page().async_start_sending_console_output(true, true);
-    else if (Application::is_initialized())
+        if (Application::is_initialized())
+            Application::the().notify_mcp_audit_observers();
+    } else if (Application::is_initialized()) {
         Application::the().did_revoke_mcp_access_for_view(view_id());
+    }
     did_change_state();
 }
 
@@ -4375,8 +4402,8 @@ void ViewImplementation::display_page_changed(RefPtr<WebContentPage> previous_pa
     // DevTools inspects the page that displays the tab, and no other. A client that took the console's messages or
     // errors takes those of this page too.
     page.async_set_has_devtools_client(m_devtools_connected);
-    bool want_console_messages = m_devtools_takes_console_messages || m_mcp_access_allowed;
-    bool want_console_errors = m_devtools_takes_console_errors || m_mcp_access_allowed;
+    bool want_console_messages = m_devtools_takes_console_messages || is_mcp_access_allowed();
+    bool want_console_errors = m_devtools_takes_console_errors || is_mcp_access_allowed();
     if (want_console_messages || want_console_errors)
         page.async_start_sending_console_output(want_console_messages, want_console_errors);
     handle_resize();

@@ -52,6 +52,7 @@ set(SOURCES
     ImageDecoderManager.cpp
     LingeringIndicator.cpp
     LocalFileRoot.cpp
+    MCPContentShield.cpp
     MediaSessionCoordinator.cpp
     NavigationLoader.cpp
     Omnibox.cpp
@@ -109,6 +110,7 @@ set(SOURCES
     WebDriverBrowserConnection.cpp
     WebUI.cpp
     WebUI/AboutUI.cpp
+    WebUI/AgentUI.cpp
     WebUI/ApplicationWebUI.cpp
     WebUI/CertificateUI.cpp
     WebUI/CrashReportsUI.cpp

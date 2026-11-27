@@ -44,6 +44,7 @@ public:
 
     ErrorOr<String> start_run(FlowRunRequest request, Function<void(FlowRunRecord const&)> on_complete = nullptr);
     bool cancel_run(StringView run_id);
+    void cancel_mcp_runs(StringView reason = "Paused"sv);
     void cancel_all_runs(StringView reason = "Cancelled"sv);
     void did_close_view(u64 view_id);
 
@@ -68,6 +69,7 @@ private:
     };
 
     void run_next_step(String const& run_id);
+    void run_mcp_egress_gated_action(String const& run_id, size_t step_index, ViewImplementation const& view, String action_kind, String summary, String details, Function<void()> on_approved);
     void execute_locator_step_attempt(String const& run_id, size_t step_index, String script, u32 timeout_ms);
     void execute_upload_step_attempt(String const& run_id, size_t step_index, String script, Vector<String> validated_paths, u32 timeout_ms);
     void poll_assert_url(String const& run_id, size_t step_index, Optional<String> contains, Optional<String> equals, u32 timeout_ms);

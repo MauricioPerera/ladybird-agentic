@@ -36,6 +36,9 @@ public:
     void close_all_sse_streams();
     size_t sse_client_count() const;
 
+    bool is_paused() const { return m_is_paused; }
+    void set_paused(bool paused) { m_is_paused = paused; }
+
     class Connection;
 
 private:
@@ -51,6 +54,7 @@ private:
     HashTable<NonnullRefPtr<Connection>> m_connections;
     HashTable<String> m_subscribed_resources;
     bool m_is_shutting_down { false };
+    bool m_is_paused { false };
 };
 
 }

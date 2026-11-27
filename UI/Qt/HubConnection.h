@@ -139,6 +139,7 @@ private:
     virtual void app_did_disable_devtools() override;
     virtual void app_did_enable_mcp(u16 port, String token) override;
     virtual void app_did_disable_mcp() override;
+    virtual void app_mcp_paused_changed(bool paused) override;
     virtual void app_gpu_painting_changed(bool gpu_painting_enabled) override;
     virtual void app_open_urls_in_new_tabs(Vector<URL::URL> urls) override;
     virtual void app_activate_or_open_tab_with_url(URL::URL url) override;
@@ -163,6 +164,7 @@ private:
     virtual void view_favicon_change(u64 view_id, Optional<Gfx::ShareableBitmap> favicon) override;
     virtual void view_request_before_unload(u64 view_id, u64 answer_id, String source) override;
     virtual void view_request_external_url_confirmation(u64 view_id, u64 answer_id, URL::URL url, URL::Origin initiator_origin, String application_name) override;
+    virtual void view_request_mcp_action_approval(u64 view_id, u64 answer_id, String action_kind, String summary, String details) override;
     virtual void view_request_permission(u64 view_id, u64 answer_id, WebView::PermissionPromptRequest request) override;
     virtual void view_request_date_picker(u64 view_id, Utf16String input_type, Utf16String value, Utf16String minimum, Utf16String maximum) override;
     virtual void view_request_dictionary_lookup(u64 view_id, WebView::DictionaryLookup lookup, Gfx::IntPoint position) override;

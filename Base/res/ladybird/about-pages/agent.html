@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Agent Security</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
+        <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
+        <style>
+            body {
+                max-width: 1180px;
+                padding: 36px 24px 64px 24px;
+            }
+
+            header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            header h1 {
+                flex: none;
+            }
+
+            .meta-bar {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+                min-width: 240px;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 10px;
+                border-radius: 999px;
+                background: var(--control);
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 500;
+            }
+
+            .badge.on {
+                color: #16a34a;
+            }
+
+            .badge.warn {
+                color: #d97706;
+            }
+
+            .badge.err {
+                color: #ef4444;
+            }
+
+            .header-actions {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+
+            button {
+                height: 30px;
+                padding: 0 12px;
+                border-radius: 7px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--control-hover);
+            }
+
+            button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+
+            button.primary {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            button.danger {
+                color: #ef4444;
+            }
+
+            .kpi-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(160px, 1fr));
+                gap: 12px;
+                margin-bottom: 18px;
+            }
+
+            .kpi-card {
+                border: 1px solid var(--border-color);
+                background: var(--card-background);
+                border-radius: 10px;
+                padding: 12px 14px;
+            }
+
+            .kpi-label {
+                font-size: 12px;
+                color: var(--muted);
+                margin-bottom: 6px;
+            }
+
+            .kpi-value {
+                font-size: 22px;
+                font-weight: 600;
+                line-height: 1.2;
+            }
+
+            .section-card {
+                border: 1px solid var(--border-color);
+                background: var(--card-background);
+                border-radius: 10px;
+                padding: 14px 16px;
+                margin-bottom: 18px;
+            }
+
+            .section-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                margin-bottom: 10px;
+                flex-wrap: wrap;
+            }
+
+            .section-head h2 {
+                margin: 0;
+                font-size: 15px;
+            }
+
+            .policy-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                font-size: 12px;
+            }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+
+            th,
+            td {
+                text-align: left;
+                padding: 8px 8px;
+                border-bottom: 1px solid var(--border-color);
+                vertical-align: top;
+            }
+
+            th {
+                font-size: 12px;
+                color: var(--muted);
+                font-weight: 600;
+            }
+
+            select {
+                height: 28px;
+                padding: 0 8px;
+                border-radius: 6px;
+                border: 1px solid var(--border-color);
+                background: var(--control);
+                color: var(--text);
+                font: inherit;
+                font-size: 12px;
+            }
+
+            .filters {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+
+            .filter-chip {
+                height: 26px;
+                padding: 0 10px;
+                border-radius: 999px;
+                font-size: 12px;
+            }
+
+            .filter-chip.active {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+            }
+
+            .mono {
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px;
+            }
+
+            .empty {
+                color: var(--muted);
+                font-size: 13px;
+                padding: 12px 0;
+            }
+
+            .signal-pill {
+                display: inline-block;
+                margin: 2px 4px 2px 0;
+                padding: 2px 6px;
+                border-radius: 5px;
+                background: rgba(239, 68, 68, 0.12);
+                color: #ef4444;
+                font-size: 11px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Agent Security Shield</h1>
+            <div class="meta-bar" id="metaBar"></div>
+            <div class="header-actions">
+                <button id="pauseBtn" class="primary">Pause Agent</button>
+                <button id="clearTaintBtn">Clear Egress Taint</button>
+                <button id="clearLogBtn" class="danger">Clear Audit Log</button>
+                <button id="refreshBtn">Refresh</button>
+            </div>
+        </header>
+
+        <div class="kpi-grid" id="kpiGrid"></div>
+
+        <section class="section-card">
+            <div class="section-head">
+                <h2>Security Policies &amp; Cross-Tab Egress Guard</h2>
+            </div>
+            <div class="policy-row" id="policyRow"></div>
+            <div id="egressDetail" class="empty"></div>
+        </section>
+
+        <section class="section-card">
+            <div class="section-head">
+                <h2>Open Tabs &amp; MCP Access Modes</h2>
+            </div>
+            <div id="tabsWrap"></div>
+        </section>
+
+        <section class="section-card">
+            <div class="section-head">
+                <h2>Live Agent Audit &amp; Prompt-Injection Telemetry</h2>
+                <div class="filters" id="filterBar"></div>
+            </div>
+            <div id="auditWrap"></div>
+        </section>
+
+        <script>
+            let state = null;
+            let currentFilter = "all";
+
+            const metaBar = document.getElementById("metaBar");
+            const kpiGrid = document.getElementById("kpiGrid");
+            const policyRow = document.getElementById("policyRow");
+            const egressDetail = document.getElementById("egressDetail");
+            const tabsWrap = document.getElementById("tabsWrap");
+            const filterBar = document.getElementById("filterBar");
+            const auditWrap = document.getElementById("auditWrap");
+            const pauseBtn = document.getElementById("pauseBtn");
+            const clearTaintBtn = document.getElementById("clearTaintBtn");
+            const clearLogBtn = document.getElementById("clearLogBtn");
+            const refreshBtn = document.getElementById("refreshBtn");
+
+            function clearChildren(node) {
+                while (node.firstChild) node.removeChild(node.firstChild);
+            }
+
+            function makeBadge(text, cls) {
+                const span = document.createElement("span");
+                span.className = cls ? `badge ${cls}` : "badge";
+                span.textContent = text;
+                return span;
+            }
+
+            function formatTime(ms) {
+                if (!ms) return "-";
+                try {
+                    return new Date(ms).toLocaleTimeString();
+                } catch (_) {
+                    return String(ms);
+                }
+            }
+
+            function renderMetaAndPolicy() {
+                clearChildren(metaBar);
+                if (!state) return;
+
+                if (state.mcpEnabled) {
+                    metaBar.appendChild(makeBadge(`MCP 127.0.0.1:${state.mcpPort || 7331}`, "on"));
+                } else {
+                    metaBar.appendChild(makeBadge("MCP Disabled", ""));
+                }
+
+                metaBar.appendChild(makeBadge(state.mcpPaused ? "Agent Paused (Kill Switch)" : "Agent Active", state.mcpPaused ? "err" : "on"));
+
+                const egressTainted = Boolean(state.egress && state.egress.tainted);
+                metaBar.appendChild(makeBadge(egressTainted ? "Egress Guard: Tainted" : "Egress Guard: Clean", egressTainted ? "warn" : "on"));
+
+                pauseBtn.textContent = state.mcpPaused ? "Resume Agent" : "Pause Agent";
+                clearTaintBtn.disabled = !egressTainted;
+
+                clearChildren(policyRow);
+                policyRow.appendChild(makeBadge(`eval_js: ${state.evalJsDisabled ? "Disabled (Default Secure)" : "Enabled"}`, state.evalJsDisabled ? "on" : "warn"));
+                policyRow.appendChild(makeBadge(`UI Approvals: ${state.autoApprove ? "Auto-Approve" : "Human Interactive"}`, state.autoApprove ? "warn" : "on"));
+                policyRow.appendChild(makeBadge(`Extension Install: ${state.allowExtensionInstall ? "Allowed (With Approval)" : "Disabled"}`, ""));
+                policyRow.appendChild(makeBadge(`Skill Write: ${state.allowSkillWrite ? "Enabled" : "Disabled"}`, ""));
+
+                const srcs = (state.egress && state.egress.sourceOrigins) || [];
+                const allowed = (state.egress && state.egress.allowedOrigins) || [];
+                if (egressTainted) {
+                    egressDetail.textContent = `Non-'agent' sensitive tab(s) read: ${srcs.join(", ") || "(unknown)"} | Approved egress origins: ${allowed.join(", ") || "(none)"}`;
+                } else {
+                    egressDetail.textContent = "No non-'agent' tab data has been read yet in this session.";
+                }
+            }
+
+            function renderKpis() {
+                clearChildren(kpiGrid);
+                if (!state || !state.stats) return;
+                const st = state.stats;
+                const items = [
+                    ["Total MCP Calls", st.totalCalls || 0],
+                    ["Blocked / Approvals Denied", `${st.blockedCalls || 0} / ${st.approvalsDenied || 0}`],
+                    ["Injection Signals Flagged", st.flaggedInjections || 0],
+                    ["Stripped Invisible / Comments", `${st.strippedInvisibleChars || 0} / ${st.strippedHtmlComments || 0}`],
+                ];
+                for (const [label, value] of items) {
+                    const card = document.createElement("div");
+                    card.className = "kpi-card";
+                    const l = document.createElement("div");
+                    l.className = "kpi-label";
+                    l.textContent = label;
+                    const v = document.createElement("div");
+                    v.className = "kpi-value";
+                    v.textContent = String(value);
+                    card.appendChild(l);
+                    card.appendChild(v);
+                    kpiGrid.appendChild(card);
+                }
+            }
+
+            function renderTabs() {
+                clearChildren(tabsWrap);
+                const tabs = (state && state.tabs) || [];
+                if (tabs.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "empty";
+                    empty.textContent = "No HTTP/HTTPS tabs open.";
+                    tabsWrap.appendChild(empty);
+                    return;
+                }
+
+                const table = document.createElement("table");
+                const thead = document.createElement("thead");
+                const hr = document.createElement("tr");
+                for (const col of ["Tab ID", "Container", "Title & URL", "Pinned Origin", "MCP Mode"]) {
+                    const th = document.createElement("th");
+                    th.textContent = col;
+                    hr.appendChild(th);
+                }
+                thead.appendChild(hr);
+                table.appendChild(thead);
+
+                const tbody = document.createElement("tbody");
+                for (const tab of tabs) {
+                    const tr = document.createElement("tr");
+
+                    const tdId = document.createElement("td");
+                    tdId.className = "mono";
+                    tdId.textContent = String(tab.id);
+                    tr.appendChild(tdId);
+
+                    const tdCont = document.createElement("td");
+                    tdCont.appendChild(makeBadge(tab.containerId || "default", tab.containerId === "agent" ? "on" : ""));
+                    if (tab.secretQuarantined) {
+                        tdCont.appendChild(document.createTextNode(" "));
+                        tdCont.appendChild(makeBadge("Vault Quarantined", "err"));
+                    }
+                    tr.appendChild(tdCont);
+
+                    const tdTitle = document.createElement("td");
+                    const titleDiv = document.createElement("div");
+                    titleDiv.textContent = tab.title || "(untitled)";
+                    const urlDiv = document.createElement("div");
+                    urlDiv.className = "mono";
+                    urlDiv.style.color = "var(--muted)";
+                    urlDiv.textContent = tab.url || "";
+                    tdTitle.appendChild(titleDiv);
+                    tdTitle.appendChild(urlDiv);
+                    tr.appendChild(tdTitle);
+
+                    const tdPinned = document.createElement("td");
+                    tdPinned.className = "mono";
+                    tdPinned.textContent = tab.pinnedOrigin || "-";
+                    tr.appendChild(tdPinned);
+
+                    const tdMode = document.createElement("td");
+                    const sel = document.createElement("select");
+                    for (const [val, text] of [
+                        ["blocked", "Blocked"],
+                        ["read_only", "Read-Only"],
+                        ["same_origin", "Same-Origin"],
+                        ["full", "Full"],
+                    ]) {
+                        const opt = document.createElement("option");
+                        opt.value = val;
+                        opt.textContent = text;
+                        if (val === tab.mcpAccessMode) opt.selected = true;
+                        sel.appendChild(opt);
+                    }
+                    sel.addEventListener("change", () => {
+                        ladybird.sendMessage("setTabMode", { tabId: tab.id, mode: sel.value });
+                    });
+                    tdMode.appendChild(sel);
+                    tr.appendChild(tdMode);
+
+                    tbody.appendChild(tr);
+                }
+                table.appendChild(tbody);
+                tabsWrap.appendChild(table);
+            }
+
+            function renderFilters() {
+                clearChildren(filterBar);
+                for (const [key, label] of [
+                    ["all", "All"],
+                    ["flagged", "Flagged Injections"],
+                    ["blocked", "Blocked / Denied"],
+                    ["approvals", "User Approvals"],
+                ]) {
+                    const btn = document.createElement("button");
+                    btn.className = key === currentFilter ? "filter-chip active" : "filter-chip";
+                    btn.textContent = label;
+                    btn.addEventListener("click", () => {
+                        currentFilter = key;
+                        renderFilters();
+                        renderAudit();
+                    });
+                    filterBar.appendChild(btn);
+                }
+            }
+
+            function renderAudit() {
+                clearChildren(auditWrap);
+                const entries = ((state && state.audit) || []).filter(entry => {
+                    if (currentFilter === "flagged") {
+                        return (entry.riskSignals && entry.riskSignals.length > 0) || entry.strippedInvisibleChars > 0 || entry.strippedHtmlComments > 0;
+                    }
+                    if (currentFilter === "blocked") {
+                        return entry.outcome === "blocked" || entry.outcome === "error" || entry.outcome === "approval_denied";
+                    }
+                    if (currentFilter === "approvals") {
+                        return entry.outcome === "approval_approved" || entry.outcome === "approval_denied";
+                    }
+                    return true;
+                });
+
+                if (entries.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "empty";
+                    empty.textContent = "No matching audit events.";
+                    auditWrap.appendChild(empty);
+                    return;
+                }
+
+                const table = document.createElement("table");
+                const thead = document.createElement("thead");
+                const hr = document.createElement("tr");
+                for (const col of ["Time", "Outcome", "Tool / Shield", "Tab / Origin", "Signals & Detail"]) {
+                    const th = document.createElement("th");
+                    th.textContent = col;
+                    hr.appendChild(th);
+                }
+                thead.appendChild(hr);
+                table.appendChild(thead);
+
+                const tbody = document.createElement("tbody");
+                for (const entry of entries) {
+                    const tr = document.createElement("tr");
+
+                    const tdTime = document.createElement("td");
+                    tdTime.className = "mono";
+                    tdTime.textContent = formatTime(entry.timestampMs);
+                    tr.appendChild(tdTime);
+
+                    const tdOutcome = document.createElement("td");
+                    let cls = "on";
+                    if (entry.outcome === "blocked" || entry.outcome === "approval_denied") cls = "err";
+                    else if (entry.outcome === "error" || entry.outcome === "shield_flagged") cls = "warn";
+                    tdOutcome.appendChild(makeBadge(entry.outcome, cls));
+                    tr.appendChild(tdOutcome);
+
+                    const tdTool = document.createElement("td");
+                    tdTool.className = "mono";
+                    tdTool.textContent = entry.toolName || "-";
+                    tr.appendChild(tdTool);
+
+                    const tdOrigin = document.createElement("td");
+                    tdOrigin.className = "mono";
+                    const tabPrefix = entry.tabId !== undefined && entry.tabId !== null ? `#${entry.tabId}` : "-";
+                    const contSuffix = entry.containerId ? ` [${entry.containerId}]` : "";
+                    tdOrigin.textContent = `${tabPrefix}${contSuffix} ${entry.origin || ""}`.trim();
+                    tr.appendChild(tdOrigin);
+
+                    const tdDetail = document.createElement("td");
+                    if (entry.riskSignals && entry.riskSignals.length > 0) {
+                        const sigWrap = document.createElement("div");
+                        for (const sig of entry.riskSignals) {
+                            const pill = document.createElement("span");
+                            pill.className = "signal-pill";
+                            pill.textContent = sig;
+                            sigWrap.appendChild(pill);
+                        }
+                        tdDetail.appendChild(sigWrap);
+                    }
+                    const detailDiv = document.createElement("div");
+                    detailDiv.className = "mono";
+                    detailDiv.textContent = entry.detail || "";
+                    tdDetail.appendChild(detailDiv);
+                    tr.appendChild(tdDetail);
+
+                    tbody.appendChild(tr);
+                }
+                table.appendChild(tbody);
+                auditWrap.appendChild(table);
+            }
+
+            pauseBtn.addEventListener("click", () => {
+                if (!state) return;
+                ladybird.sendMessage("setPaused", { paused: !state.mcpPaused });
+            });
+            clearTaintBtn.addEventListener("click", () => {
+                ladybird.sendMessage("clearEgressTaint");
+            });
+            clearLogBtn.addEventListener("click", () => {
+                ladybird.sendMessage("clearAuditLog");
+            });
+            refreshBtn.addEventListener("click", () => {
+                ladybird.sendMessage("loadState");
+            });
+
+            document.addEventListener("WebUIMessage", event => {
+                if (event.detail.name === "state") {
+                    state = event.detail.data;
+                    renderMetaAndPolicy();
+                    renderKpis();
+                    renderTabs();
+                    renderFilters();
+                    renderAudit();
+                }
+            });
+
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) ladybird.sendMessage("loadState");
+            });
+
+            renderFilters();
+            document.addEventListener("WebUILoaded", () => {
+                ladybird.sendMessage("loadState");
+            });
+        </script>
+    </body>
+</html>

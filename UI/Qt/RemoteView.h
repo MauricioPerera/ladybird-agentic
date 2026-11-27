@@ -94,7 +94,16 @@ public:
     void set_system_visibility_state(Web::HTML::VisibilityState visibility_state) { HubConnection::the().async_view_set_system_visibility_state(view_id(), move(visibility_state)); }
     void set_pinned(bool pinned) { HubConnection::the().async_view_set_pinned(view_id(), pinned); }
     bool is_mcp_access_allowed() const { return m_is_private == WebView::IsPrivate::No && m_state.mcp_access_allowed; }
+    WebView::MCPAccessMode mcp_access_mode() const
+    {
+        if (m_is_private == WebView::IsPrivate::Yes)
+            return WebView::MCPAccessMode::Blocked;
+        return m_state.mcp_access_mode <= to_underlying(WebView::MCPAccessMode::Full)
+            ? static_cast<WebView::MCPAccessMode>(m_state.mcp_access_mode)
+            : WebView::MCPAccessMode::Blocked;
+    }
     void set_mcp_access_allowed(bool allowed) { HubConnection::the().async_view_set_mcp_access_allowed(view_id(), m_is_private == WebView::IsPrivate::No && allowed); }
+    void set_mcp_access_mode(WebView::MCPAccessMode mode) { HubConnection::the().async_view_set_mcp_access_mode(view_id(), m_is_private == WebView::IsPrivate::No ? to_underlying(mode) : 0); }
     void set_current_tab_of_window(bool current_tab_of_window) { HubConnection::the().async_view_set_current_tab_of_window(view_id(), current_tab_of_window); }
     void set_presents_from_cpu_memory(bool presents_from_cpu_memory) { HubConnection::the().async_view_set_presents_from_cpu_memory(view_id(), presents_from_cpu_memory); }
     void set_hosts_remote_layer(bool hosts_remote_layer) { HubConnection::the().async_view_set_hosts_remote_layer(view_id(), hosts_remote_layer); }
@@ -394,6 +403,7 @@ public:
     decltype(Hub::View::on_request_set_prompt_text) on_request_set_prompt_text;
     decltype(Hub::View::on_before_browser_initiated_navigation) on_before_browser_initiated_navigation;
     Function<void(URL::URL const&, URL::Origin const&, String const& application_name, Function<void(bool)>)> on_request_external_url_confirmation;
+    decltype(Hub::View::on_request_mcp_action_approval) on_request_mcp_action_approval;
     decltype(Hub::View::on_request_accept_dialog) on_request_accept_dialog;
     decltype(Hub::View::on_request_website_issue_report) on_request_website_issue_report;
     decltype(Hub::View::on_request_screenshot) on_request_screenshot;

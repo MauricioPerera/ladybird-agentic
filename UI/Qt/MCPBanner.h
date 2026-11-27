@@ -8,9 +8,11 @@
 
 #include <AK/Types.h>
 #include <AK/kmalloc.h>
+#include <LibWebView/ViewImplementation.h>
 
 #include <QWidget>
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 
@@ -24,11 +26,13 @@ public:
 
     explicit MCPBanner(QWidget* parent = nullptr);
 
-    void update_state(u16 port, bool tab_loaded, bool tab_allowed);
+    void update_state(u16 port, bool tab_loaded, WebView::MCPAccessMode mode, bool paused);
     void show_copied_feedback();
 
 signals:
-    void toggle_current_tab_access_requested();
+    void tab_access_mode_selected(WebView::MCPAccessMode);
+    void toggle_pause_requested();
+    void open_agent_requested();
     void open_flows_requested();
     void open_skills_requested();
     void open_vault_requested();
@@ -41,7 +45,8 @@ private:
     void update_chrome_style();
 
     QLabel* m_label { nullptr };
-    QPushButton* m_tab_access_button { nullptr };
+    QComboBox* m_tab_mode_combo { nullptr };
+    QPushButton* m_pause_button { nullptr };
     QPushButton* m_copy_config_button { nullptr };
     bool m_is_updating_chrome_style { false };
     u64 m_copy_feedback_generation { 0 };

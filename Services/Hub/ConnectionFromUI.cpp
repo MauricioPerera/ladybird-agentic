@@ -636,6 +636,7 @@ Messages::HubServer::InitializeResponse ConnectionFromUI::initialize()
     state.mcp_enabled = Application::the().mcp_enabled();
     state.mcp_port = Application::the().mcp_port();
     state.mcp_token = Application::the().mcp_token();
+    state.mcp_paused = Application::the().mcp_paused();
     auto const& profile = Application::profile();
     state.config_directory = profile.paths().config;
     state.data_directory = profile.paths().data;
@@ -807,6 +808,11 @@ void ConnectionFromUI::toggle_mcp_enabled()
 {
     if (auto result = Application::the().toggle_mcp_enabled(); result.is_error())
         static_cast<WebView::Application&>(Application::the()).display_error_dialog(String::from_utf8_with_replacement_character(ByteString::formatted("Unable to start MCP server: {}", result.error())));
+}
+
+void ConnectionFromUI::mcp_set_paused(bool paused)
+{
+    Application::the().set_mcp_paused(paused);
 }
 
 void ConnectionFromUI::set_preferred_contrast(Web::CSS::PreferredContrast contrast)
@@ -1142,6 +1148,14 @@ void ConnectionFromUI::view_set_mcp_access_allowed(u64 view_id, bool allowed)
 {
     if (auto* view = find_view(view_id))
         view->set_mcp_access_allowed(allowed);
+}
+
+void ConnectionFromUI::view_set_mcp_access_mode(u64 view_id, u8 mode)
+{
+    if (auto* view = find_view(view_id)) {
+        auto clamped = mode <= to_underlying(WebView::MCPAccessMode::Full) ? static_cast<WebView::MCPAccessMode>(mode) : WebView::MCPAccessMode::Blocked;
+        view->set_mcp_access_mode(clamped);
+    }
 }
 
 void ConnectionFromUI::view_set_current_tab_of_window(u64 view_id, bool current_tab_of_window)

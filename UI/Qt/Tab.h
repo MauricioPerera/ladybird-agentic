@@ -286,6 +286,7 @@ private:
     QPointer<QDialog> m_date_picker_dialog;
     QPointer<QFileDialog> m_file_picker_dialog;
     QPointer<QMessageBox> m_external_url_confirmation_dialog;
+    QPointer<QMessageBox> m_mcp_approval_dialog;
     PermissionPromptQueue m_permission_prompts;
 
     bool m_suppress_javascript_dialogs_until_navigation { false };

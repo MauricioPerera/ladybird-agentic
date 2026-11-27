@@ -51,11 +51,12 @@ TEST_CASE(container_store_defaults_and_persistence)
         ScopeGuard observer_guard { [&] { store.remove_observer(observer); } };
 
         auto defaults = store.list_containers();
-        EXPECT_EQ(defaults.size(), 4uz);
+        EXPECT_EQ(defaults.size(), 5uz);
         EXPECT(store.get_container("personal"sv).has_value());
         EXPECT(store.get_container("work"sv).has_value());
         EXPECT(store.get_container("banking"sv).has_value());
         EXPECT(store.get_container("shopping"sv).has_value());
+        EXPECT(store.get_container("agent"sv).has_value());
 
         EXPECT(store.create_container("   "_string, "#22cc88"_string).is_error());
         EXPECT(store.create_container("Bad Color"_string, "red"_string).is_error());
@@ -65,11 +66,11 @@ TEST_CASE(container_store_defaults_and_persistence)
         EXPECT_EQ(created.name, "Client A"_string);
         EXPECT_EQ(created.color, "#22cc88"_string);
         EXPECT_EQ(observer.changes, 1uz);
-        EXPECT_EQ(store.list_containers().size(), 5uz);
+        EXPECT_EQ(store.list_containers().size(), 6uz);
     }
 
     WebView::ContainerStore reloaded(persistence_path);
-    EXPECT_EQ(reloaded.list_containers().size(), 5uz);
+    EXPECT_EQ(reloaded.list_containers().size(), 6uz);
     auto persisted = reloaded.get_container("client-a"sv);
     EXPECT(persisted.has_value());
     EXPECT_EQ(persisted->name, "Client A"_string);

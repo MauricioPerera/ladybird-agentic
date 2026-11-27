@@ -13,6 +13,7 @@
 
 namespace WebView {
 
+class AgentUI;
 class Application;
 class ApplyHistoryStep;
 class AudioServerControlClient;

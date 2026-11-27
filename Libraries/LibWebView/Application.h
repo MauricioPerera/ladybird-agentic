@@ -81,6 +81,35 @@ struct PinchEvent;
 
 namespace WebView {
 
+struct MCPAuditEntry {
+    i64 timestamp_ms { 0 };
+    String tool_name;
+    Optional<u64> tab_id;
+    String origin;
+    String container_id;
+    String outcome;
+    String detail;
+    u64 stripped_invisible_chars { 0 };
+    u64 stripped_html_comments { 0 };
+    Vector<String> risk_signals;
+};
+
+struct MCPAuditStats {
+    u64 total_calls { 0 };
+    u64 blocked_calls { 0 };
+    u64 approvals_requested { 0 };
+    u64 approvals_denied { 0 };
+    u64 stripped_invisible_chars { 0 };
+    u64 stripped_html_comments { 0 };
+    u64 flagged_injections { 0 };
+};
+
+class MCPAuditObserver {
+public:
+    virtual ~MCPAuditObserver() = default;
+    virtual void mcp_state_changed() = 0;
+};
+
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
 
@@ -417,6 +446,24 @@ public:
     Optional<u16> mcp_port() const;
     Optional<String> const& mcp_token() const { return m_mcp_token; }
     ErrorOr<void> toggle_mcp_enabled();
+    bool mcp_paused() const { return m_mcp_paused; }
+    void set_mcp_paused(bool paused);
+    void add_mcp_audit_observer(MCPAuditObserver&);
+    void remove_mcp_audit_observer(MCPAuditObserver&);
+    Vector<MCPAuditEntry> const& mcp_audit_entries() const { return m_mcp_audit_entries; }
+    MCPAuditStats const& mcp_audit_stats() const { return m_mcp_audit_stats; }
+    bool mcp_egress_tainted() const { return m_mcp_egress_tainted; }
+    HashTable<String> const& mcp_egress_allowed_origins() const { return m_mcp_egress_allowed_origins; }
+    HashTable<String> const& mcp_egress_source_origins() const { return m_mcp_egress_source_origins; }
+    void clear_mcp_egress_taint();
+    void clear_mcp_audit_log();
+    void record_mcp_sensitive_read(ViewImplementation const&);
+    void record_mcp_shield_event(StringView tool_name, Optional<u64> tab_id, u64 stripped_invisible, u64 stripped_comments, Vector<String> const& risk_signals);
+    void record_mcp_audit_event(String tool_name, Optional<u64> tab_id, String outcome, StringView detail, u64 stripped_invisible = 0, u64 stripped_comments = 0, Vector<String> risk_signals = {});
+    void notify_mcp_audit_observers();
+    bool mcp_egress_requires_approval(URL::URL const& destination_url, Optional<URL::URL> const& current_view_url = {}) const;
+    void approve_mcp_egress_origin(URL::URL const& origin_url);
+    void request_mcp_user_approval_any_view(String action_kind, String summary, String details, Function<void(bool approved)> callback);
     void did_revoke_mcp_access_for_view(u64 view_id);
     void did_close_mcp_view(u64 view_id);
     void record_mcp_console_output(u64 view_id, ConsoleOutput const&);
@@ -444,6 +491,9 @@ public:
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
+    Optional<String> check_mcp_read_allowed(u64 tab_id, StringView action_description) const;
+    Optional<String> check_mcp_mutation_allowed(u64 tab_id, StringView action_description, Optional<URL::URL> const& target_url = {}) const;
+    void request_mcp_user_approval(u64 tab_id, String action_kind, String summary, String details, Function<void(bool approved)> callback);
     Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab, bool require_mcp_permission = false) const;
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
     u64 start_automation_navigation_wait(u64 view_id, u32 timeout_ms, bool require_mcp_permission, Function<void(ErrorOr<void>)> on_complete);
@@ -527,6 +577,7 @@ protected:
         (void)token;
     }
     virtual void on_mcp_disabled() const { }
+    virtual void on_mcp_paused_changed(bool paused) const { (void)paused; }
     virtual void on_compositor_gpu_painting_changed() const { }
 
     Main::Arguments& arguments() { return m_arguments; }
@@ -743,6 +794,7 @@ private:
     virtual void list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallComplete) override;
     virtual void fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
     virtual void login_with_credential_tool(u64 tab_id, String credential_id, Optional<String> username_ref, Optional<String> username_selector, Optional<String> password_ref, Optional<String> password_selector, Optional<String> totp_ref, Optional<String> totp_selector, Optional<String> submit_ref, Optional<String> submit_selector, bool wait_for_navigation, MCP::OnToolCallComplete) override;
+    virtual void on_mcp_tool_audit(StringView tool_name, Optional<u64> tab_id, bool is_error, StringView summary) override;
 
     static Application* s_the;
 
@@ -895,6 +947,13 @@ private:
 
     OwnPtr<MCP::MCPServer> m_mcp;
     Optional<String> m_mcp_token;
+    bool m_mcp_paused { false };
+    bool m_mcp_egress_tainted { false };
+    HashTable<String> m_mcp_egress_source_origins;
+    HashTable<String> m_mcp_egress_allowed_origins;
+    Vector<MCPAuditEntry> m_mcp_audit_entries;
+    MCPAuditStats m_mcp_audit_stats;
+    Vector<MCPAuditObserver*> m_mcp_audit_observers;
     OwnPtr<FlowStore> m_flow_store;
     OwnPtr<FlowRunner> m_flow_runner;
     OwnPtr<ExtensionStore> m_extension_store;
@@ -994,6 +1053,12 @@ private:
     void handle_browser_notification_event(MCPNotificationEntry);
     void finish_mcp_notification_wait(u64 wait_id, MCP::ToolCallResult);
     static JsonObject mcp_notification_entry_to_json(MCPNotificationEntry const&);
+    void cancel_mcp_approvals_for_view(u64 view_id);
+    void cancel_all_mcp_approvals();
+    void request_mcp_approval_on_view(Optional<ViewImplementation&>, Optional<u64> tab_id, String action_kind, String summary, String details, Function<void(bool approved)> callback);
+
+    struct PendingMCPApproval;
+    Vector<WeakPtr<PendingMCPApproval>> m_pending_mcp_approvals;
 
     HashMap<u64, OwnPtr<MCPViewQueue>> m_mcp_content_queues;
     HashMap<u64, u64> m_mcp_command_to_view;

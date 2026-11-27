@@ -113,6 +113,7 @@ private:
     virtual void on_devtools_disabled() const override;
     virtual void on_mcp_enabled(u16 port, String const& token) const override;
     virtual void on_mcp_disabled() const override;
+    virtual void on_mcp_paused_changed(bool paused) const override;
     virtual void on_compositor_gpu_painting_changed() const override;
     virtual void create_platform_actions() override;
     virtual Optional<String> ui_font_family() const override;

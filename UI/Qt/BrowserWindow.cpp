@@ -464,11 +464,17 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     main_layout->addWidget(m_devtools_banner);
 
     m_mcp_banner = new MCPBanner(main_widget);
-    connect(m_mcp_banner, &MCPBanner::toggle_current_tab_access_requested, this, [this] {
+    connect(m_mcp_banner, &MCPBanner::tab_access_mode_selected, this, [this](WebView::MCPAccessMode mode) {
         if (this->is_private() == WebView::IsPrivate::Yes)
             return;
         if (m_current_tab && m_current_tab->is_loaded() && m_current_tab->view().is_private() == WebView::IsPrivate::No)
-            m_current_tab->view().set_mcp_access_allowed(!m_current_tab->view().is_mcp_access_allowed());
+            m_current_tab->view().set_mcp_access_mode(mode);
+    });
+    connect(m_mcp_banner, &MCPBanner::toggle_pause_requested, this, [] {
+        HubConnection::the().async_mcp_set_paused(!Application::the().mcp_paused());
+    });
+    connect(m_mcp_banner, &MCPBanner::open_agent_requested, this, [] {
+        Application::the().activate_or_open_tab_with_url(URL::URL::about("agent"sv));
     });
     connect(m_mcp_banner, &MCPBanner::open_flows_requested, this, [] {
         ApplicationActions::the().open_flows_page_action().activate();
@@ -802,8 +808,8 @@ void BrowserWindow::update_mcp_banner()
     }
 
     bool tab_loaded = m_current_tab && m_current_tab->is_loaded();
-    bool tab_allowed = tab_loaded && m_current_tab->view().is_mcp_access_allowed();
-    m_mcp_banner->update_state(*port, tab_loaded, tab_allowed);
+    auto mode = tab_loaded ? m_current_tab->view().mcp_access_mode() : WebView::MCPAccessMode::Blocked;
+    m_mcp_banner->update_state(*port, tab_loaded, mode, Application::the().mcp_paused());
     m_mcp_banner->show();
 }
 

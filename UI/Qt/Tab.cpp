@@ -533,6 +533,8 @@ void Tab::initialize(Optional<u64> hub_view_id)
         }
         if (m_external_url_confirmation_dialog)
             m_external_url_confirmation_dialog->close();
+        if (m_mcp_approval_dialog)
+            m_mcp_approval_dialog->close();
         m_permission_prompts.ignore_all();
     };
 
@@ -573,6 +575,38 @@ void Tab::initialize(Optional<u64> hub_view_id)
         dialog->open();
     };
 
+    view().on_request_mcp_action_approval = [this](String const& action_kind, String const& summary, String const& details, auto on_complete) {
+        if (m_javascript_dialog->is_open() || m_color_picker_dialog || m_external_url_confirmation_dialog || m_mcp_approval_dialog) {
+            on_complete(false);
+            return;
+        }
+
+        hide_hover_label();
+
+        auto title = MUST(String::formatted("Approve Agent Action ({})", action_kind));
+        auto* dialog = new QMessageBox(&view());
+        m_mcp_approval_dialog = dialog;
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setIcon(QMessageBox::Icon::Warning);
+        dialog->setWindowTitle(qstring_from_ak_string(title));
+        dialog->setTextFormat(Qt::PlainText);
+        dialog->setText(qstring_from_ak_string(summary));
+        if (!details.is_empty())
+            dialog->setDetailedText(qstring_from_ak_string(details));
+        auto* approve_button = dialog->addButton("Approve", QMessageBox::ButtonRole::AcceptRole);
+        dialog->addButton(QMessageBox::StandardButton::Cancel);
+        dialog->setDefaultButton(QMessageBox::StandardButton::Cancel);
+
+        QObject::connect(dialog, &QDialog::finished, this, [this, dialog = QPointer<QMessageBox> { dialog }, approve_button, on_complete = AK::move(on_complete)](auto) mutable {
+            auto accepted = dialog && dialog->clickedButton() == approve_button;
+            if (m_mcp_approval_dialog == dialog)
+                m_mcp_approval_dialog = nullptr;
+            on_complete(accepted);
+        });
+
+        dialog->open();
+    };
+
     m_permission_prompts.create_popover = [this](WebView::PermissionPromptRequest const& request) {
         auto* popover = new PermissionPromptPopover(this, request);
         popover->update_chrome_style(palette());
@@ -605,7 +639,7 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_state_change = [this](Hub::ViewState const& previous_state) {
         if (previous_state.page_mute_state != view().page_mute_state())
             emit audio_state_changed(tab_index());
-        if (previous_state.mcp_access_allowed != view().is_mcp_access_allowed())
+        if (previous_state.mcp_access_allowed != view().is_mcp_access_allowed() || previous_state.mcp_access_mode != to_underlying(view().mcp_access_mode()))
             emit mcp_access_changed(tab_index());
     };
 
@@ -935,10 +969,28 @@ void Tab::create_tab_context_menu()
             view().toggle_page_mute_state();
     });
 
-    auto* mcp_access_action = new QAction("Allow &MCP Access", this);
-    QObject::connect(mcp_access_action, &QAction::triggered, this, [this]() {
+    auto* mcp_access_menu = new QMenu("MCP &Access", this);
+    auto* mcp_block_action = mcp_access_menu->addAction("Blocked");
+    auto* mcp_readonly_action = mcp_access_menu->addAction("Read-Only");
+    auto* mcp_sameorigin_action = mcp_access_menu->addAction("Same-Origin");
+    auto* mcp_full_action = mcp_access_menu->addAction("Full Access");
+    for (auto* a : { mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_full_action })
+        a->setCheckable(true);
+    QObject::connect(mcp_block_action, &QAction::triggered, this, [this]() {
         if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
-            view().set_mcp_access_allowed(!view().is_mcp_access_allowed());
+            view().set_mcp_access_mode(WebView::MCPAccessMode::Blocked);
+    });
+    QObject::connect(mcp_readonly_action, &QAction::triggered, this, [this]() {
+        if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
+            view().set_mcp_access_mode(WebView::MCPAccessMode::ReadOnly);
+    });
+    QObject::connect(mcp_sameorigin_action, &QAction::triggered, this, [this]() {
+        if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
+            view().set_mcp_access_mode(WebView::MCPAccessMode::SameOrigin);
+    });
+    QObject::connect(mcp_full_action, &QAction::triggered, this, [this]() {
+        if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
+            view().set_mcp_access_mode(WebView::MCPAccessMode::Full);
     });
 
     auto* move_to_new_window_action = new QAction("Move to New &Window", this);
@@ -993,7 +1045,7 @@ void Tab::create_tab_context_menu()
     m_context_menu->addAction(duplicate_tab_action);
     m_context_menu->addAction(m_pin_tab_action);
     m_context_menu->addAction(mute_tab_action);
-    m_context_menu->addAction(mcp_access_action);
+    m_context_menu->addMenu(mcp_access_menu);
     m_context_menu->addSeparator();
     m_context_menu->addAction(move_to_new_window_action);
     m_context_menu->addAction(copy_link_action);
@@ -1004,7 +1056,7 @@ void Tab::create_tab_context_menu()
     m_context_menu->addSeparator();
     m_context_menu->addAction(Application::the().reopen_recently_closed_tab_action());
 
-    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, reopen_in_container_menu, close_following_tabs_action, mute_tab_action, mcp_access_action, move_to_new_window_action]() {
+    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, reopen_in_container_menu, close_following_tabs_action, mute_tab_action, mcp_access_menu, mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_full_action, move_to_new_window_action]() {
         auto is_horizontal = m_window->tab_widget().tab_bar()->tab_layout() == TabLayout::Horizontal;
         new_tab_action->setText(is_horizontal ? "New Tab to the &Right" : "New Tab &Below");
         close_following_tabs_action->setText(is_horizontal ? "Close Tabs to the R&ight" : "Close Tabs B&elow");
@@ -1042,9 +1094,13 @@ void Tab::create_tab_context_menu()
         mute_tab_action->setText(is_loaded() && view().page_mute_state() == Web::HTML::MuteState::Muted ? "Un&mute Tab" : "&Mute Tab");
         bool mcp_non_private = view().is_private() == WebView::IsPrivate::No;
         bool mcp_available = is_loaded() && mcp_non_private;
-        mcp_access_action->setVisible(mcp_non_private);
-        mcp_access_action->setEnabled(mcp_available);
-        mcp_access_action->setText(mcp_available && view().is_mcp_access_allowed() ? "Revoke &MCP Access" : "Allow &MCP Access");
+        mcp_access_menu->menuAction()->setVisible(mcp_non_private);
+        mcp_access_menu->setEnabled(mcp_available);
+        auto current_mode = mcp_available ? view().mcp_access_mode() : WebView::MCPAccessMode::Blocked;
+        mcp_block_action->setChecked(current_mode == WebView::MCPAccessMode::Blocked);
+        mcp_readonly_action->setChecked(current_mode == WebView::MCPAccessMode::ReadOnly);
+        mcp_sameorigin_action->setChecked(current_mode == WebView::MCPAccessMode::SameOrigin);
+        mcp_full_action->setChecked(current_mode == WebView::MCPAccessMode::Full);
         move_to_new_window_action->setEnabled(m_window->tab_count() > 1);
     });
 }
@@ -1052,6 +1108,11 @@ void Tab::create_tab_context_menu()
 // The window's toolbar can hold the address field while the tab goes away with the window.
 Tab::~Tab()
 {
+    if (m_mcp_approval_dialog) {
+        auto* dialog = m_mcp_approval_dialog.data();
+        m_mcp_approval_dialog = nullptr;
+        dialog->reject();
+    }
     stop_recording();
     if (m_deferred_tab.has_value() && m_deferred_tab->discarded_tab_state_id.has_value())
         WebContentView::forget_state_of_discarded_tab(*m_deferred_tab->discarded_tab_state_id);

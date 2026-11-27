@@ -257,6 +257,7 @@ public:
     void on_devtools_disabled();
     void on_mcp_enabled();
     void on_mcp_disabled();
+    void update_mcp_banner();
 
     void set_window_rect(Optional<Web::DevicePixels> x, Optional<Web::DevicePixels> y, Optional<Web::DevicePixels> width, Optional<Web::DevicePixels> height);
     // Returns the rect made no larger than the bounds, and moved to be inside them.
@@ -338,7 +339,6 @@ private:
     void toggle_window_maximized();
     bool start_window_move();
     void set_always_on_top(bool);
-    void update_mcp_banner();
 
     QIcon icon_for_page_mute_state(Tab&) const;
     QString tool_tip_for_page_mute_state(Tab&) const;
