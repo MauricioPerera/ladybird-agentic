@@ -6,11 +6,8 @@
 
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 import { LADYBIRD_MANIFEST, SERVER_PATH, createLadybirdEngine } from '../index.mjs';
 
 const TEST_TOKEN = 'test-ladybird-token';
@@ -254,13 +251,8 @@ test('LSP Engine Protocol v1 round-trip against mock Ladybird MCP server', async
   }
 });
 
-const e2eRepoPath = process.env.E2E_REPO_PATH;
-const e2eClientPath = e2eRepoPath ? path.join(e2eRepoPath, 'packages/core/dist/engine/protocol/client.js') : '';
-const e2eTransportPath = e2eRepoPath ? path.join(e2eRepoPath, 'packages/core/dist/engine/protocol/transport.js') : '';
-
-test('e2e connectEngine + spawnTransport integration check', { skip: !e2eClientPath || !fs.existsSync(e2eClientPath) || !fs.existsSync(e2eTransportPath) }, async () => {
-  const { connectEngine } = await import(pathToFileURL(e2eClientPath).href);
-  const { spawnTransport } = await import(pathToFileURL(e2eTransportPath).href);
+test('e2e connectEngine + spawnTransport integration check', async () => {
+  const { connectEngine, spawnTransport } = await import('e2e/engine');
 
   const mock = await startMockMcpServer();
   const controller = new AbortController();

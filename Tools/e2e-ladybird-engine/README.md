@@ -34,3 +34,15 @@ export default {
 ```
 
 Alternatively, without `e2e`, open `about:flows` directly inside Ladybird or call Ladybird's native MCP flow tools (`list_flows`, `save_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`).
+
+## 3. Verify the adapter
+
+Use Node 24.16.0. From the repository root, install the locked `e2e` 0.24.0 package and run the two protocol cases and their regression checks.
+
+```sh
+npm ci --prefix Tools/e2e-ladybird-engine --ignore-scripts --engine-strict
+node --test Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs
+node --test Tools/e2e-ladybird-engine/test/pinned-engine-oracle.test.mjs
+```
+
+The cases use a synthetic MCP server on loopback. The integration case imports the installed `e2e/engine` entry point. A missing package fails the run. See the [KDD contract](../../knowledge/contracts/ladybird-e2e-adapter-oracle.md) for the required evidence.
