@@ -1103,6 +1103,9 @@ static Optional<Web::HTML::PreparedNavigationDescriptor> navigation_from_page(We
     if (navigation.url.scheme() == "file"sv && !may_navigate_to_a_local_file(requesting_client))
         return {};
     navigation.initiator_origin_snapshot = initiator_origin.release_value();
+    if (Application::is_initialized()
+        && Application::the().is_offline_app_mode_navigation_blocked(URL::about_blank(), navigation.initiator_origin_snapshot, navigation.url))
+        return {};
     return navigation;
 }
 
@@ -2749,6 +2752,12 @@ void WebContentPage::did_request_navigation_start(Web::HTML::CrossProcessId navi
     }
     if (start_request.has_value())
         start_request->initiator_origin = initiator_origin.release_value();
+    if (start_request.has_value()
+        && Application::is_initialized()
+        && Application::the().is_offline_app_mode_navigation_blocked(target_navigable->active_document_url(), start_request->initiator_origin, url)) {
+        async_cancel_navigation_params_creation(navigable_id, navigation_id);
+        return;
+    }
 
     if (!start_request.has_value()) {
         if (url.scheme() != "javascript"sv) {

@@ -207,6 +207,8 @@ static JsonObject service_tab_state_to_json(AppServiceConfig const& cfg, Optiona
     perms.set("open"sv, true);
     perms.set("navigate"sv, cfg.allow_navigate);
     perms.set("notifications"sv, cfg.allow_notifications);
+    perms.set("read"sv, cfg.allow_read);
+    perms.set("webmcp"sv, cfg.allow_webmcp);
     perms.set("eval"sv, cfg.allow_eval);
     perms.set("flows"sv, cfg.allow_flows);
     perms.set("network"sv, cfg.allow_network);
@@ -375,6 +377,17 @@ static StringView mcp_access_mode_name(AppMCPAccess access)
         return "full"sv;
     case AppMCPAccess::WebMCPOnly:
         return "webmcp-only"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView network_policy_name(AppNetworkPolicy policy)
+{
+    switch (policy) {
+    case AppNetworkPolicy::Unrestricted:
+        return "unrestricted"sv;
+    case AppNetworkPolicy::Offline:
+        return "offline"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -1106,6 +1119,10 @@ private:
             return;
         }
         if (path_only.starts_with("/__ladybird_webhook/"sv)) {
+            if (m_server->manifest().permissions.network == AppNetworkPolicy::Offline) {
+                send_ipc_error(403, "Forbidden: Inbound webhooks are disabled in offline App Mode"sv);
+                return;
+            }
             handle_webhook_request(request, path_only);
             return;
         }
@@ -1121,6 +1138,24 @@ private:
             return;
         }
         if (path_only == "/__ladybird_bridge.js"sv) {
+            if (auto sec_fetch_site = find_header(request, "Sec-Fetch-Site"sv); sec_fetch_site.has_value()) {
+                auto trimmed = sec_fetch_site->trim_whitespace();
+                if (!trimmed.equals_ignoring_ascii_case("same-origin"sv) && !trimmed.equals_ignoring_ascii_case("none"sv)) {
+                    send_ipc_error(403, "Forbidden: Cross-site access to bridge script denied"sv);
+                    return;
+                }
+            }
+            auto expected_origin = m_server->origin();
+            if (auto origin = find_header(request, "Origin"sv); origin.has_value() && !constant_time_equals(origin->trim_whitespace().bytes(), expected_origin.bytes())) {
+                send_ipc_error(403, "Forbidden: Origin mismatch on bridge script"sv);
+                return;
+            }
+            if (auto referer = find_header(request, "Referer"sv); referer.has_value()) {
+                if (auto parsed_ref = URL::Parser::basic_parse(*referer); !parsed_ref.has_value() || parsed_ref->origin().is_opaque() || parsed_ref->origin().serialize() != expected_origin) {
+                    send_ipc_error(403, "Forbidden: Cross-origin Referer on bridge script"sv);
+                    return;
+                }
+            }
             auto script = m_server->build_bridge_script();
             send_raw_http_response(200, "application/javascript; charset=utf-8"sv, script.bytes(), send_body);
             return;
@@ -1239,6 +1274,7 @@ private:
         builder.append("Cache-Control: no-cache\r\n"sv);
         builder.append("Connection: keep-alive\r\n"sv);
         builder.append("X-Content-Type-Options: nosniff\r\n"sv);
+        builder.append("Cross-Origin-Resource-Policy: same-origin\r\n"sv);
         builder.append("\r\n"sv);
         builder.append(": connected\n\n"sv);
 
@@ -1328,6 +1364,8 @@ private:
             result.set("port"sv, static_cast<u64>(m_server->local_port()));
             result.set("stablePort"sv, m_server->is_using_stable_port());
             result.set("mcpAccess"sv, mcp_access_mode_name(manifest.mcp.access));
+            result.set("networkPolicy"sv, network_policy_name(manifest.permissions.network));
+            result.set("crossOriginIsolated"sv, manifest.permissions.cross_origin_isolated);
             result.set("account"sv, move(account_obj));
             if (auto mcp_port = m_server->current_mcp_port(); mcp_port.has_value())
                 result.set("mcpPort"sv, static_cast<u64>(*mcp_port));
@@ -1854,6 +1892,12 @@ private:
             return;
         }
 
+        if (manifest.permissions.network == AppNetworkPolicy::Offline
+            && command->is_one_of("tabs.registerService"sv, "tabs.open"sv, "tabs.focus"sv, "tabs.navigate"sv, "tabs.eval"sv, "tabs.readMarkdown"sv, "tabs.listTools"sv, "tabs.callTool"sv, "tabs.runFlow"sv, "triggers.save"sv)) {
+            send_ipc_error(403, "Forbidden: Service tab operations and triggers are disabled in offline App Mode"sv);
+            return;
+        }
+
         if (*command == "tabs.registerService"sv) {
             if (!manifest.permissions.allow_dynamic_services) {
                 send_ipc_error(403, "Forbidden: Dynamic services are disabled in manifest"sv);
@@ -1886,6 +1930,8 @@ private:
                     && existing->container == new_cfg.container
                     && existing->allow_navigate == new_cfg.allow_navigate
                     && existing->allow_notifications == new_cfg.allow_notifications
+                    && existing->allow_read == new_cfg.allow_read
+                    && existing->allow_webmcp == new_cfg.allow_webmcp
                     && existing->allow_eval == new_cfg.allow_eval
                     && existing->allow_flows == new_cfg.allow_flows
                     && existing->allow_network == new_cfg.allow_network) {
@@ -2155,6 +2201,127 @@ private:
             return;
         }
 
+        if (*command == "tabs.readMarkdown"sv) {
+            auto service_id = args.get_string("serviceId"sv);
+            if (!service_id.has_value() || service_id->is_empty()) {
+                send_ipc_error(400, "Missing string argument 'serviceId'"sv);
+                return;
+            }
+            Optional<String> root_selector;
+            if (args.has("rootSelector"sv) && !args.get("rootSelector"sv)->is_null()) {
+                auto raw_sel = args.get_string("rootSelector"sv);
+                if (!raw_sel.has_value()) {
+                    send_ipc_error(400, "'rootSelector' must be a string"sv);
+                    return;
+                }
+                if (!raw_sel->is_empty())
+                    root_selector = *raw_sel;
+            }
+            bool main_content_only = args.get_bool("mainContentOnly"sv).value_or(true);
+            bool include_links = args.get_bool("includeLinks"sv).value_or(true);
+            bool include_images = args.get_bool("includeImages"sv).value_or(false);
+            size_t max_chars = static_cast<size_t>(clamp<u64>(args.get_u64("maxChars"sv).value_or(40000), 500, 200000));
+
+            auto svc = m_server->find_effective_service(*service_id);
+            if (!svc.has_value() || !svc->allow_read) {
+                send_ipc_error(403, "Forbidden: 'read' permission is disabled or service undeclared"sv);
+                return;
+            }
+
+            NonnullRefPtr<Connection> self_ref { *this };
+            m_server->read_service_tab_markdown(*service_id, move(root_selector), main_content_only, include_links, include_images, max_chars, [self_ref, svc_id = *service_id](Optional<JsonValue> value, Optional<String> error) mutable {
+                if (self_ref->m_closed)
+                    return;
+                if (error.has_value()) {
+                    self_ref->send_ipc_error(400, *error);
+                    return;
+                }
+                JsonObject result;
+                if (value.has_value() && value->is_object())
+                    result = value->as_object();
+                else if (value.has_value())
+                    result.set("result"sv, move(*value));
+                result.set("serviceId"sv, svc_id);
+                self_ref->send_ipc_ok(move(result));
+            });
+            return;
+        }
+
+        if (*command == "tabs.listTools"sv) {
+            auto service_id = args.get_string("serviceId"sv);
+            if (!service_id.has_value() || service_id->is_empty()) {
+                send_ipc_error(400, "Missing string argument 'serviceId'"sv);
+                return;
+            }
+            bool include_declarative = args.get_bool("includeDeclarative"sv).value_or(true);
+            auto svc = m_server->find_effective_service(*service_id);
+            if (!svc.has_value() || !svc->allow_webmcp) {
+                send_ipc_error(403, "Forbidden: 'webmcp' permission is disabled or service undeclared"sv);
+                return;
+            }
+
+            NonnullRefPtr<Connection> self_ref { *this };
+            m_server->list_service_tab_tools(*service_id, include_declarative, [self_ref, svc_id = *service_id](Optional<JsonValue> value, Optional<String> error) mutable {
+                if (self_ref->m_closed)
+                    return;
+                if (error.has_value()) {
+                    self_ref->send_ipc_error(400, *error);
+                    return;
+                }
+                JsonObject result;
+                if (value.has_value() && value->is_object())
+                    result = value->as_object();
+                else if (value.has_value())
+                    result.set("tools"sv, move(*value));
+                result.set("serviceId"sv, svc_id);
+                self_ref->send_ipc_ok(move(result));
+            });
+            return;
+        }
+
+        if (*command == "tabs.callTool"sv) {
+            auto service_id = args.get_string("serviceId"sv);
+            auto tool_name = args.get_string("toolName"sv);
+            if (!service_id.has_value() || service_id->is_empty() || !tool_name.has_value() || tool_name->is_empty()) {
+                send_ipc_error(400, "Missing string argument 'serviceId' or 'toolName'"sv);
+                return;
+            }
+            JsonObject tool_args;
+            if (args.has("arguments"sv) && !args.get("arguments"sv)->is_null()) {
+                auto maybe_args = args.get_object("arguments"sv);
+                if (!maybe_args.has_value()) {
+                    send_ipc_error(400, "'arguments' must be a JSON object"sv);
+                    return;
+                }
+                tool_args = *maybe_args;
+            }
+
+            auto svc = m_server->find_effective_service(*service_id);
+            if (!svc.has_value() || !svc->allow_webmcp) {
+                send_ipc_error(403, "Forbidden: 'webmcp' permission is disabled or service undeclared"sv);
+                return;
+            }
+
+            NonnullRefPtr<Connection> self_ref { *this };
+            m_server->call_service_tab_tool(*service_id, *tool_name, move(tool_args), [self_ref, svc_id = *service_id, t_name = *tool_name](Optional<JsonValue> value, Optional<String> error) mutable {
+                if (self_ref->m_closed)
+                    return;
+                if (error.has_value()) {
+                    self_ref->send_ipc_error(400, *error);
+                    return;
+                }
+                JsonObject result;
+                if (value.has_value() && value->is_object())
+                    result = value->as_object();
+                else if (value.has_value())
+                    result.set("result"sv, move(*value));
+                result.set("serviceId"sv, svc_id);
+                result.set("toolName"sv, t_name);
+                self_ref->send_ipc_ok(move(result));
+            });
+            return;
+        }
+
         if (*command == "tabs.network"sv) {
             Optional<String> filter_service = args.get_string("serviceId"sv).copy();
             if (filter_service.has_value() && !filter_service->is_empty()) {
@@ -2239,6 +2406,11 @@ private:
                 if (filter_service.has_value() && !filter_service->is_empty() && ev.service_id != *filter_service)
                     continue;
                 if (!type_filters.is_empty() && !type_filters.contains_slow(ev.type))
+                    continue;
+                auto ev_svc = m_server->find_effective_service(ev.service_id);
+                if (ev.type == "notification"sv && (!ev_svc.has_value() || !ev_svc->allow_notifications))
+                    continue;
+                if (ev.type == "network"sv && (!ev_svc.has_value() || !ev_svc->allow_network))
                     continue;
                 JsonObject obj;
                 obj.set("seq"sv, ev.seq);
@@ -2584,6 +2756,17 @@ private:
         header_builder.append("Connection: close\r\n"sv);
         header_builder.append("Cache-Control: no-store\r\n"sv);
         header_builder.append("X-Content-Type-Options: nosniff\r\n"sv);
+        header_builder.append("Cross-Origin-Resource-Policy: same-origin\r\n"sv);
+        if (m_server) {
+            auto const& perms = m_server->manifest().permissions;
+            if (perms.network == AppNetworkPolicy::Offline) {
+                header_builder.append("Content-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; frame-src 'self' blob:; form-action 'self'; object-src 'none'; base-uri 'self'\r\n"sv);
+            }
+            if (perms.cross_origin_isolated) {
+                header_builder.append("Cross-Origin-Opener-Policy: same-origin\r\n"sv);
+                header_builder.append("Cross-Origin-Embedder-Policy: require-corp\r\n"sv);
+            }
+        }
         header_builder.appendff("Content-Type: {}\r\n", content_type);
         header_builder.appendff("Content-Length: {}\r\n", content_length_override.value_or(body.size()));
         if (!extra_headers.is_empty())
@@ -2733,6 +2916,9 @@ AppModeServer::AppModeServer(
     , m_on_service_close(move(config.on_service_close))
     , m_on_service_list(move(config.on_service_list))
     , m_on_service_eval(move(config.on_service_eval))
+    , m_on_service_read_markdown(move(config.on_service_read_markdown))
+    , m_on_service_list_tools(move(config.on_service_list_tools))
+    , m_on_service_call_tool(move(config.on_service_call_tool))
     , m_on_service_register_consent(move(config.on_service_register_consent))
     , m_on_flows_list(move(config.on_flows_list))
     , m_on_flows_get(move(config.on_flows_get))
@@ -3505,6 +3691,33 @@ void AppModeServer::eval_service_tab(StringView service_id, String script, Funct
     m_on_service_eval(service_id, move(script), move(on_complete));
 }
 
+void AppModeServer::read_service_tab_markdown(StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)
+{
+    if (!m_on_service_read_markdown) {
+        on_complete({}, "Service tab markdown reader is unavailable in this runtime"_string);
+        return;
+    }
+    m_on_service_read_markdown(service_id, move(root_selector), main_content_only, include_links, include_images, max_chars, move(on_complete));
+}
+
+void AppModeServer::list_service_tab_tools(StringView service_id, bool include_declarative, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)
+{
+    if (!m_on_service_list_tools) {
+        on_complete({}, "Service tab WebMCP discovery is unavailable in this runtime"_string);
+        return;
+    }
+    m_on_service_list_tools(service_id, include_declarative, move(on_complete));
+}
+
+void AppModeServer::call_service_tab_tool(StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)
+{
+    if (!m_on_service_call_tool) {
+        on_complete({}, "Service tab WebMCP invocation is unavailable in this runtime"_string);
+        return;
+    }
+    m_on_service_call_tool(service_id, move(tool_name), move(arguments), move(on_complete));
+}
+
 ErrorOr<void> AppModeServer::on_new_client()
 {
     auto client = TRY(m_server->accept());
@@ -3570,6 +3783,8 @@ String AppModeServer::build_bridge_script() const
     perms.set("clipboardWrite"sv, m_manifest.permissions.clipboard_write);
     perms.set("systemInfo"sv, m_manifest.permissions.system_info);
     perms.set("dynamicServices"sv, m_manifest.permissions.allow_dynamic_services);
+    perms.set("network"sv, network_policy_name(m_manifest.permissions.network));
+    perms.set("crossOriginIsolated"sv, m_manifest.permissions.cross_origin_isolated);
 
     JsonObject account_obj;
     account_obj.set("id"sv, m_account_id);
@@ -3815,6 +4030,9 @@ String AppModeServer::build_bridge_script() const
       notifications: (options) => invoke('tabs.notifications', options || {}),
       network: (options) => invoke('tabs.network', options || {}),
       events: (options) => invoke('tabs.events', options || {}),
+      readMarkdown: (serviceId, options) => invoke('tabs.readMarkdown', Object.assign({ serviceId }, options || {})),
+      listTools: (serviceId, options) => invoke('tabs.listTools', Object.assign({ serviceId }, options || {})),
+      callTool: (serviceId, toolName, args) => invoke('tabs.callTool', { serviceId, toolName, arguments: args || {} }),
       eval: (serviceId, script) => invoke('tabs.eval', { serviceId, script }),
       runFlow: (serviceId, options) => invoke('tabs.runFlow', Object.assign({ serviceId }, options || {})),
       onNotification: (serviceIdOrCb, maybeCb, maybeOpts) => subscribeSseStream(

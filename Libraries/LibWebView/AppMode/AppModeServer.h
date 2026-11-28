@@ -118,6 +118,9 @@ struct WEBVIEW_API AppModeServerConfig {
     Function<ErrorOr<bool>(StringView service_id)> on_service_close {};
     Function<Vector<AppServiceTabState>()> on_service_list {};
     Function<void(StringView service_id, String script, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)> on_service_eval {};
+    Function<void(StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)> on_service_read_markdown {};
+    Function<void(StringView service_id, bool include_declarative, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)> on_service_list_tools {};
+    Function<void(StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete)> on_service_call_tool {};
     Function<void(AppServiceConfig const& service, Function<void(bool approved)> on_decision)> on_service_register_consent {};
     Function<Vector<FlowDefinition>()> on_flows_list {};
     Function<Optional<FlowDefinition>(StringView flow_id)> on_flows_get {};
@@ -160,6 +163,9 @@ public:
     ErrorOr<bool> close_service_tab(StringView service_id);
     Vector<AppServiceTabState> list_service_tabs() const;
     void eval_service_tab(StringView service_id, String script, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete);
+    void read_service_tab_markdown(StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete);
+    void list_service_tab_tools(StringView service_id, bool include_declarative, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete);
+    void call_service_tab_tool(StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue> value, Optional<String> error)> on_complete);
     Vector<AppServiceNotification> const& service_notifications() const { return m_service_notifications; }
     u64 last_notification_seq() const { return m_next_notification_seq > 1 ? m_next_notification_seq - 1 : 0; }
     Vector<AppServiceNetworkEvent> const& service_network_events() const { return m_service_network_events; }
@@ -243,6 +249,9 @@ private:
     Function<ErrorOr<bool>(StringView)> m_on_service_close;
     Function<Vector<AppServiceTabState>()> m_on_service_list;
     Function<void(StringView, String, Function<void(Optional<JsonValue>, Optional<String>)>)> m_on_service_eval;
+    Function<void(StringView, Optional<String>, bool, bool, bool, size_t, Function<void(Optional<JsonValue>, Optional<String>)>)> m_on_service_read_markdown;
+    Function<void(StringView, bool, Function<void(Optional<JsonValue>, Optional<String>)>)> m_on_service_list_tools;
+    Function<void(StringView, String, JsonObject, Function<void(Optional<JsonValue>, Optional<String>)>)> m_on_service_call_tool;
     Function<void(AppServiceConfig const&, Function<void(bool)>)> m_on_service_register_consent;
     Function<Vector<FlowDefinition>()> m_on_flows_list;
     Function<Optional<FlowDefinition>(StringView)> m_on_flows_get;

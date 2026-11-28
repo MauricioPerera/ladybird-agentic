@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/HashMap.h>
 #include <AK/NumericLimits.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
@@ -132,6 +133,7 @@ struct BrowserOptions {
     bool mcp_allow_skill_write { false };
     Optional<String> mcp_vault_passphrase {};
     Vector<String> mcp_allowed_containers {};
+    HashMap<String, String> mcp_container_policies {};
     Vector<String> mcp_allowed_domains {};
     Vector<String> mcp_blocked_domains {};
     bool mcp_allow_private_network { false };

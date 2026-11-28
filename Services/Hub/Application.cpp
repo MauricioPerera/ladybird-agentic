@@ -92,7 +92,11 @@ View& Application::create_view(View::InitialState initial_state, Optional<WebVie
         && (mcp_enabled() || browser_options().mcp_port.has_value())
         && view_reference.is_private() == WebView::IsPrivate::No
         && !view_reference.owner_view_id().has_value()) {
-        view_reference.set_mcp_access_mode(WebView::MCPAccessMode::Full);
+        auto policy_mode = effective_container_mcp_policy(view_reference.container_id());
+        auto initial_mode = browser_options().mcp_webmcp_only
+            ? WebView::MCPAccessMode::WebMCPOnly
+            : policy_mode.value_or(WebView::MCPAccessMode::Full);
+        view_reference.set_mcp_access_mode(initial_mode);
     }
     return view_reference;
 }

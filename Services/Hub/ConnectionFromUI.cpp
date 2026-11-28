@@ -1168,7 +1168,7 @@ void ConnectionFromUI::view_set_mcp_access_allowed(u64 view_id, bool allowed)
 void ConnectionFromUI::view_set_mcp_access_mode(u64 view_id, u8 mode)
 {
     if (auto* view = find_view(view_id)) {
-        auto clamped = mode <= to_underlying(WebView::MCPAccessMode::Full) ? static_cast<WebView::MCPAccessMode>(mode) : WebView::MCPAccessMode::Blocked;
+        auto clamped = mode <= to_underlying(WebView::MCPAccessMode::WebMCPOnly) ? static_cast<WebView::MCPAccessMode>(mode) : WebView::MCPAccessMode::Blocked;
         view->set_mcp_access_mode(clamped);
     }
 }

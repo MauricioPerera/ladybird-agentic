@@ -96,6 +96,7 @@ enum class MCPAccessMode : u8 {
     ReadOnly = 1,
     SameOrigin = 2,
     Full = 3,
+    WebMCPOnly = 4,
 };
 
 class MicrophoneAuthorizerForTesting;

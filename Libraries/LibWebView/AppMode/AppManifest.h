@@ -35,6 +35,8 @@ struct WEBVIEW_API AppServiceConfig {
     String container {};
     bool allow_navigate { true };
     bool allow_notifications { false };
+    bool allow_read { false };
+    bool allow_webmcp { false };
     bool allow_eval { false };
     bool allow_flows { false };
     bool allow_network { false };
@@ -43,6 +45,11 @@ struct WEBVIEW_API AppServiceConfig {
 enum class AppMCPAccess : u8 {
     Full,
     WebMCPOnly,
+};
+
+enum class AppNetworkPolicy : u8 {
+    Unrestricted,
+    Offline,
 };
 
 struct WEBVIEW_API AppMCPConfig {
@@ -60,6 +67,8 @@ struct WEBVIEW_API AppPermissions {
     bool clipboard_write { false };
     bool system_info { true };
     bool allow_dynamic_services { false };
+    AppNetworkPolicy network { AppNetworkPolicy::Unrestricted };
+    bool cross_origin_isolated { false };
 };
 
 struct WEBVIEW_API AppManifest {

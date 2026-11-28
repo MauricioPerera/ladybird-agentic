@@ -24,6 +24,8 @@ static StringView access_mode_key(MCPAccessMode mode)
         return "same_origin"sv;
     case MCPAccessMode::Full:
         return "full"sv;
+    case MCPAccessMode::WebMCPOnly:
+        return "webmcp_only"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -38,6 +40,8 @@ static Optional<MCPAccessMode> parse_access_mode(StringView mode)
         return MCPAccessMode::SameOrigin;
     if (mode == "full"sv)
         return MCPAccessMode::Full;
+    if (mode == "webmcp_only"sv)
+        return MCPAccessMode::WebMCPOnly;
     return {};
 }
 

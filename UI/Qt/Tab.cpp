@@ -973,8 +973,9 @@ void Tab::create_tab_context_menu()
     auto* mcp_block_action = mcp_access_menu->addAction("Blocked");
     auto* mcp_readonly_action = mcp_access_menu->addAction("Read-Only");
     auto* mcp_sameorigin_action = mcp_access_menu->addAction("Same-Origin");
+    auto* mcp_webmcp_action = mcp_access_menu->addAction("WebMCP-Only");
     auto* mcp_full_action = mcp_access_menu->addAction("Full Access");
-    for (auto* a : { mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_full_action })
+    for (auto* a : { mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_webmcp_action, mcp_full_action })
         a->setCheckable(true);
     QObject::connect(mcp_block_action, &QAction::triggered, this, [this]() {
         if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
@@ -987,6 +988,10 @@ void Tab::create_tab_context_menu()
     QObject::connect(mcp_sameorigin_action, &QAction::triggered, this, [this]() {
         if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
             view().set_mcp_access_mode(WebView::MCPAccessMode::SameOrigin);
+    });
+    QObject::connect(mcp_webmcp_action, &QAction::triggered, this, [this]() {
+        if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
+            view().set_mcp_access_mode(WebView::MCPAccessMode::WebMCPOnly);
     });
     QObject::connect(mcp_full_action, &QAction::triggered, this, [this]() {
         if (is_loaded() && view().is_private() == WebView::IsPrivate::No)
@@ -1056,7 +1061,7 @@ void Tab::create_tab_context_menu()
     m_context_menu->addSeparator();
     m_context_menu->addAction(Application::the().reopen_recently_closed_tab_action());
 
-    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, reopen_in_container_menu, close_following_tabs_action, mute_tab_action, mcp_access_menu, mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_full_action, move_to_new_window_action]() {
+    QObject::connect(m_context_menu, &QMenu::aboutToShow, this, [this, new_tab_action, reopen_in_container_menu, close_following_tabs_action, mute_tab_action, mcp_access_menu, mcp_block_action, mcp_readonly_action, mcp_sameorigin_action, mcp_webmcp_action, mcp_full_action, move_to_new_window_action]() {
         auto is_horizontal = m_window->tab_widget().tab_bar()->tab_layout() == TabLayout::Horizontal;
         new_tab_action->setText(is_horizontal ? "New Tab to the &Right" : "New Tab &Below");
         close_following_tabs_action->setText(is_horizontal ? "Close Tabs to the R&ight" : "Close Tabs B&elow");
@@ -1100,6 +1105,7 @@ void Tab::create_tab_context_menu()
         mcp_block_action->setChecked(current_mode == WebView::MCPAccessMode::Blocked);
         mcp_readonly_action->setChecked(current_mode == WebView::MCPAccessMode::ReadOnly);
         mcp_sameorigin_action->setChecked(current_mode == WebView::MCPAccessMode::SameOrigin);
+        mcp_webmcp_action->setChecked(current_mode == WebView::MCPAccessMode::WebMCPOnly);
         mcp_full_action->setChecked(current_mode == WebView::MCPAccessMode::Full);
         move_to_new_window_action->setEnabled(m_window->tab_count() > 1);
     });

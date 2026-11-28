@@ -476,6 +476,7 @@ public:
     void record_mcp_network_response_headers(u64 view_id, u64 request_id, u32 status_code, Optional<String> const& reason_phrase);
     void record_mcp_network_request_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const&);
     bool has_app_mode_server() const { return m_app_mode_server != nullptr; }
+    bool is_offline_app_mode_navigation_blocked(URL::URL const& active_doc_url, URL::Origin const& initiator_origin, URL::URL const& target_url) const;
     void record_app_service_network_started(u64 view_id, u64 request_id, URL::URL const&, ByteString const& method, Optional<String> const& initiator_type);
     void record_app_service_network_headers(u64 view_id, u64 request_id, u32 status_code);
     void record_app_service_network_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const&);
@@ -488,6 +489,8 @@ public:
     SkillStore& skill_store();
     VaultStore& vault_store();
     MCPSecurityPolicy mcp_security_policy() const;
+    Optional<MCPAccessMode> effective_container_mcp_policy(StringView container_id) const;
+    String effective_tab_mcp_access_mode_name(ViewImplementation const& view) const;
     Vector<MCP::SkillMatchHint> matching_skill_hints_for_url(URL::URL const&) const;
     JsonArray matching_skills_json_for_url(URL::URL const&) const;
     Vector<MCP::CredentialMatchHint> matching_credential_hints_for_view(URL::URL const&, StringView container_id) const;
@@ -501,8 +504,8 @@ public:
     void did_finish_load_for_extensions(ViewImplementation&, URL::URL const&);
     void inject_webmcp_shim_if_needed(ViewImplementation&, URL::URL const&);
     Optional<ViewImplementation&> find_automation_view(u64 tab_id, bool require_mcp_permission) const;
-    Optional<String> check_mcp_read_allowed(u64 tab_id, StringView action_description) const;
-    Optional<String> check_mcp_mutation_allowed(u64 tab_id, StringView action_description, Optional<URL::URL> const& target_url = {}) const;
+    Optional<String> check_mcp_read_allowed(u64 tab_id, StringView action_description, bool is_webmcp_operation = false) const;
+    Optional<String> check_mcp_mutation_allowed(u64 tab_id, StringView action_description, Optional<URL::URL> const& target_url = {}, bool is_webmcp_operation = false) const;
     void request_mcp_user_approval(u64 tab_id, String action_kind, String summary, String details, Function<void(bool approved)> callback);
     Optional<ViewImplementation&> open_automation_tab(Web::HTML::ActivateTab, bool require_mcp_permission = false) const;
     void enqueue_automation_webdriver_command(u64 view_id, String name, JsonValue payload, Vector<String> arguments, bool require_mcp_permission, Function<void(Web::WebDriver::Response)> on_complete);
@@ -624,6 +627,9 @@ private:
     ErrorOr<void> launch_mcp_server();
     void ensure_notification_observer();
     Optional<ViewImplementation&> find_or_adopt_service_view(AppServiceConfig const&, Optional<StringView> preferred_container = {});
+    void app_service_read_markdown(StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue>, Optional<String>)> on_complete);
+    void app_service_list_tools(StringView service_id, bool include_declarative, Function<void(Optional<JsonValue>, Optional<String>)> on_complete);
+    void app_service_call_tool(StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue>, Optional<String>)> on_complete);
     void write_app_runtime_descriptor();
     void remove_app_runtime_descriptor();
     void fail_mcp_requests_for_view(u64 view_id, StringView message);
@@ -821,6 +827,9 @@ private:
     virtual void list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallComplete) override;
     virtual void fill_credential_tool(u64 tab_id, String credential_id, String field, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
     virtual void login_with_credential_tool(u64 tab_id, String credential_id, Optional<String> username_ref, Optional<String> username_selector, Optional<String> password_ref, Optional<String> password_selector, Optional<String> totp_ref, Optional<String> totp_selector, Optional<String> submit_ref, Optional<String> submit_selector, bool wait_for_navigation, MCP::OnToolCallComplete) override;
+    virtual void capture_tab_artifact(u64 tab_id, String kind, Optional<String> label, Optional<String> root_selector, bool main_content_only, bool include_links, size_t max_chars, Optional<String> tool_name, JsonObject arguments, MCP::OnToolCallComplete) override;
+    virtual void list_tab_artifacts(Optional<String> source_container, MCP::OnToolCallComplete) override;
+    virtual void clear_tab_artifacts(Optional<String> artifact_id, MCP::OnToolCallComplete) override;
     virtual void on_mcp_tool_audit(StringView tool_name, Optional<u64> tab_id, bool is_error, StringView summary) override;
 
     static Application* s_the;
@@ -1111,6 +1120,27 @@ private:
     Vector<JsonObject> m_mcp_network_intercept_rules;
     ByteString m_mcp_network_intercept_rules_json;
     u64 m_next_mcp_network_rule_id { 1 };
+
+    struct MCPTabArtifact {
+        String id;
+        String label;
+        u64 source_tab_id { 0 };
+        String source_url;
+        String source_origin;
+        String source_container;
+        String kind;
+        String mime_type;
+        String text_payload;
+        Optional<JsonValue> json_payload {};
+        size_t byte_length { 0 };
+        String sha256;
+        String preview;
+        i64 created_at_ms { 0 };
+        bool tainted { false };
+    };
+    void call_page_tool_impl(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, bool require_read_only, MCP::OnToolCallComplete);
+    Vector<MCPTabArtifact> m_mcp_tab_artifacts;
+    u64 m_next_mcp_artifact_id { 1 };
 
     struct HeadlessSessionState;
     HeadlessWebView& register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView>, MCPAccessMode, bool activate, bool exit_on_last_close);

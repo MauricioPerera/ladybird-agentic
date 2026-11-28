@@ -8,6 +8,8 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/Error.h>
+#include <AK/Function.h>
+#include <AK/HashMap.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/Optional.h>
@@ -53,6 +55,7 @@ struct WEBVIEW_API EncryptedVaultBlob {
 
 struct WEBVIEW_API MCPSecurityPolicy {
     Vector<String> allowed_containers {};
+    HashMap<String, String> container_policies {};
     Vector<String> allowed_domains {};
     Vector<String> blocked_domains {};
     bool allow_private_network { false };
@@ -78,8 +81,16 @@ WEBVIEW_API String scrub_secrets_from_string(StringView input, ReadonlySpan<Stri
 WEBVIEW_API bool mcp_domain_matches_pattern(StringView host, StringView pattern);
 WEBVIEW_API bool mcp_host_is_private_or_internal(StringView host);
 WEBVIEW_API ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPolicy const& policy);
+WEBVIEW_API ErrorOr<HashMap<String, String>> mcp_parse_container_policies(StringView raw_spec);
+WEBVIEW_API Optional<StringView> mcp_container_policy_mode(StringView container_id, MCPSecurityPolicy const& policy);
 WEBVIEW_API ErrorOr<String> mcp_resolve_container_against_policy(Optional<String> requested_container, MCPSecurityPolicy const& policy);
 WEBVIEW_API bool mcp_container_is_allowed_by_policy(StringView container_id, MCPSecurityPolicy const& policy);
+WEBVIEW_API ErrorOr<JsonValue> mcp_resolve_artifact_references(
+    JsonValue const& input,
+    Function<Optional<JsonValue>(StringView artifact_id)> const& resolver,
+    Vector<String>& out_resolved_ids,
+    size_t max_depth = 16,
+    size_t max_expanded_bytes = 4 * 1024 * 1024);
 
 WEBVIEW_API Vector<String> vault_credential_available_fields(VaultCredential const&);
 WEBVIEW_API JsonObject serialize_vault_credential_metadata(VaultCredential const&);

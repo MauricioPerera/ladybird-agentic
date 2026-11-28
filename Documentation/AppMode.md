@@ -11,7 +11,7 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
 | Persistent KV store | `Libraries/LibWebView/AppMode/AppKVStore.{h,cpp}` | SQLite-backed JSON key-value store (`AppStore.db`) scoped per app and account profile |
 | Multi-account registry | `Libraries/LibWebView/AppMode/AppAccountRegistry.{h,cpp}` | Tracks registered account slugs, labels, timestamps, and profile mappings in `<data>/AppAccounts/<app-id>.json` |
 | Application & runtime discovery | `Libraries/LibWebView/Application.{h,cpp}` | Synchronous App Mode MCP launch, `--account`, `--mcp-webmcp-only`, and live `<data>/AppRuntime/<app-id>--<account-id>.json` tracking |
-| GUI tab integration | `Services/Hub/Application.cpp`, `UI/Qt/BrowserWindow.cpp` | Chromeless window sizing/icon/title and automatic `MCPAccessMode::Full` grant on non-private App Mode views |
+| GUI tab integration | `Services/Hub/Application.cpp`, `UI/Qt/BrowserWindow.cpp` | Chromeless window sizing/icon/title and automatic `MCPAccessMode` policy grant (`Full`, `WebMCPOnly` when `--mcp-webmcp-only` / `mcp.access: "webmcp-only"`, or container policy ceiling) on non-private App Mode views |
 | MCP server privacy boundary | `Libraries/LibMCP/{MCPDelegate.h,MCPServer.cpp}` | Enforces `webmcp-only` boundary across `initialize`, `tools/list`, `tools/call`, `resources/*`, and `skills/*` |
 | Developer & lifecycle CLI | `Meta/ladybird-app.py` | `init`, `validate`, `run`, `connect`, `status`, `stop`, `accounts`, `package` |
 
@@ -31,7 +31,8 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
     "height": 720,
     "minWidth": 360,
     "minHeight": 240,
-    "resizable": true
+    "resizable": true,
+    "showTabBar": false
   },
   "mcp": {
     "enabled": true,
@@ -41,6 +42,8 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
     "allowedDomains": []
   },
   "permissions": {
+    "network": "unrestricted",
+    "crossOriginIsolated": false,
     "fsRead": ["workspace"],
     "fsWrite": ["workspace"],
     "storage": true,
@@ -67,7 +70,9 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
   - `"full"` (default): Standard Ladybird MCP server capabilities.
   - `"webmcp-only"`: Requires `mcp.allowWebMCP: true`. Restricts MCP agents strictly to `list_tabs`, `get_active_tab`, `list_page_tools`, and `call_page_tool`.
 - `permissions.dynamicServices`: When `true`, enables `window.ladybirdApp.tabs.registerService(...)` and `removeService(...)` at runtime and persists dynamic services per account profile.
-- `services.<id>`: Declares isolated site tabs backed by dedicated container profiles (`container`), strict origin allowlists (`origins`), and per-service capabilities (`open`, `navigate`, `notifications`, `eval`, `flows`, `network`).
+- `permissions.network`: `"unrestricted"` (default) or `"offline"`. When `"offline"`, `AppModeServer` emits an airgap `Content-Security-Policy` confining script, fetch/XHR/WebSocket (`connect-src 'self'`), frames, workers, media, and forms strictly to the app's own local origin (`127.0.0.1:<port>`).
+- `permissions.crossOriginIsolated`: When `true`, `AppModeServer` emits `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and `Cross-Origin-Resource-Policy: same-origin` (including on SSE event streams), enabling `self.crossOriginIsolated`, `SharedArrayBuffer`, and shared Wasm memory.
+- `services.<id>`: Declares isolated site tabs backed by dedicated container profiles (`container`), strict origin allowlists (`origins`), and per-service capabilities (`open`, `navigate`, `notifications`, `read`, `webmcp`, `eval`, `flows`, `network`).
 
 ---
 
@@ -86,12 +91,12 @@ Passing `--account <slug>` isolates every storage layer for the same app:
 
 Include `<script src="/__ladybird_bridge.js"></script>` in `<head>` before app scripts.
 
-- `window.ladybirdApp.info`: Frozen boot metadata (`id`, `name`, `version`, `origin`, `port`, `stablePort`, `mcpAccess`, `account`, `permissions`).
-- `window.ladybirdApp.system.info()`: Live IPC query returning runtime state including `mcpPort` and `mcpAccess`.
+- `window.ladybirdApp.info`: Frozen boot metadata (`id`, `name`, `version`, `origin`, `port`, `stablePort`, `mcpAccess`, `account`, `permissions` including `network` and `crossOriginIsolated`).
+- `window.ladybirdApp.system.info()`: Live IPC query returning runtime state including `mcpPort`, `mcpAccess`, `networkPolicy`, and `crossOriginIsolated`.
 - `window.ladybirdApp.fs`: `listDir(path)`, `readText(path)`, `writeText(path, content)`, `deleteFile(path)`, `stat(path)`, `mkdir(path)`, `readBytes(path, { offset?, count? })`, `writeBytes(path, data)`, `fileUrl(path)` (binary reads/writes use authenticated `/__ladybird_fs/<path>` up to 128 MiB with HTTP `Range` support).
 - `window.ladybirdApp.kv`: `get(key)`, `set(key, value)`, `delete(key)`, `list(prefix?)`, `clear(prefix?)`.
 - `window.ladybirdApp.accounts`: `current()`, `list()`, `create(id, label?)`, `launch(id, options?)`.
-- `window.ladybirdApp.tabs`: `list()`, `open(serviceId, options?)`, `focus(serviceId)`, `navigate(serviceId, url)`, `close(serviceId)`, `registerService(service)` (triggers a native user consent dialog on GUI windows whenever origins, container, or permissions are new/changed), `removeService(serviceId)`, `notifications(options?)`, `network(options?)`, `events(options?)`, `eval(serviceId, script)` (supports top-level `await` / returned Promises up to 10s), `runFlow(serviceId, options?)`, `onNotification(...)`, `onNetwork(...)`, `onEvent(...)` (backed by real-time `EventSource` SSE push on `GET /__ladybird_events?token=...` with automatic polling fallback).
+- `window.ladybirdApp.tabs`: `list()`, `open(serviceId, options?)`, `focus(serviceId)`, `navigate(serviceId, url)`, `close(serviceId)`, `registerService(service)` (triggers a native user consent dialog on GUI windows whenever origins, container, or permissions are new/changed), `removeService(serviceId)`, `notifications(options?)`, `network(options?)`, `events(options?)`, `readMarkdown(serviceId, options?)` (requires `"read"`, extracts visible page Markdown + scrubs vault secrets without exposing `"eval"`), `listTools(serviceId, options?)` and `callTool(serviceId, toolName, args?)` (require `"webmcp"`, invoke the target tab's WebMCP tools with interactive approval on consequential tools and vault secret scrubbing), `eval(serviceId, script)` (supports top-level `await` / returned Promises up to 10s), `runFlow(serviceId, options?)`, `onNotification(...)`, `onNetwork(...)`, `onEvent(...)` (backed by real-time `EventSource` SSE push on `GET /__ladybird_events?token=...` with automatic polling fallback).
 - `window.ladybirdApp.flows`: `list()`, `get(flowId)`, `save(flow)`, `delete(flowId)`, `getRun(runId)`, `listRuns(options?)`, `cancelRun(runId)`.
 - `window.ladybirdApp.triggers`: `list()`, `save(trigger)` (supports `interval`, `notification`, `network`, `navigation`, `webhook`, and native 5-field `cron` with `cronExpr`), `delete(id)`, `setEnabled(id, enabled)`.
 - `window.ladybirdApp.app.quit()`: Cleanly exits the app instance.

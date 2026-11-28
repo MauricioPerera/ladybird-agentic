@@ -248,6 +248,23 @@ ErrorOr<AppManifest> parse_local_manifest_object(JsonObject const& obj, ByteStri
                 return Error::from_string_literal("Manifest 'permissions.dynamicServices' must be a boolean");
             permissions.allow_dynamic_services = *dynamic_services;
         }
+        if (perm_obj->has("network"sv) && !perm_obj->get("network"sv)->is_null()) {
+            auto network = perm_obj->get_string("network"sv);
+            if (!network.has_value())
+                return Error::from_string_literal("Manifest 'permissions.network' must be 'unrestricted' or 'offline'");
+            if (*network == "unrestricted"sv)
+                permissions.network = AppNetworkPolicy::Unrestricted;
+            else if (*network == "offline"sv)
+                permissions.network = AppNetworkPolicy::Offline;
+            else
+                return Error::from_string_literal("Manifest 'permissions.network' must be 'unrestricted' or 'offline'");
+        }
+        if (perm_obj->has("crossOriginIsolated"sv) && !perm_obj->get("crossOriginIsolated"sv)->is_null()) {
+            auto coi = perm_obj->get_bool("crossOriginIsolated"sv);
+            if (!coi.has_value())
+                return Error::from_string_literal("Manifest 'permissions.crossOriginIsolated' must be a boolean");
+            permissions.cross_origin_isolated = *coi;
+        }
     }
 
     Vector<AppServiceConfig> services;
@@ -347,6 +364,8 @@ ErrorOr<AppServiceConfig> AppManifest::parse_service_config(StringView service_i
 
     bool allow_navigate = true;
     bool allow_notifications = false;
+    bool allow_read = false;
+    bool allow_webmcp = false;
     bool allow_eval = false;
     bool allow_flows = false;
     bool allow_network = false;
@@ -365,6 +384,10 @@ ErrorOr<AppServiceConfig> AppManifest::parse_service_config(StringView service_i
                 allow_navigate = true;
             else if (perm_str == "notifications"sv)
                 allow_notifications = true;
+            else if (perm_str == "read"sv)
+                allow_read = true;
+            else if (perm_str == "webmcp"sv)
+                allow_webmcp = true;
             else if (perm_str == "eval"sv)
                 allow_eval = true;
             else if (perm_str == "flows"sv)
@@ -372,7 +395,7 @@ ErrorOr<AppServiceConfig> AppManifest::parse_service_config(StringView service_i
             else if (perm_str == "network"sv)
                 allow_network = true;
             else
-                return Error::from_string_literal("Service permission must be one of: open, navigate, notifications, eval, flows, network");
+                return Error::from_string_literal("Service permission must be one of: open, navigate, notifications, read, webmcp, eval, flows, network");
         }
     }
 
@@ -384,6 +407,8 @@ ErrorOr<AppServiceConfig> AppManifest::parse_service_config(StringView service_i
         .container = move(container),
         .allow_navigate = allow_navigate,
         .allow_notifications = allow_notifications,
+        .allow_read = allow_read,
+        .allow_webmcp = allow_webmcp,
         .allow_eval = allow_eval,
         .allow_flows = allow_flows,
         .allow_network = allow_network,
@@ -407,6 +432,10 @@ JsonObject AppManifest::serialize_service_config(AppServiceConfig const& cfg)
         perms.must_append("navigate"sv);
     if (cfg.allow_notifications)
         perms.must_append("notifications"sv);
+    if (cfg.allow_read)
+        perms.must_append("read"sv);
+    if (cfg.allow_webmcp)
+        perms.must_append("webmcp"sv);
     if (cfg.allow_eval)
         perms.must_append("eval"sv);
     if (cfg.allow_flows)

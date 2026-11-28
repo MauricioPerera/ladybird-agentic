@@ -38,6 +38,7 @@ MCPBanner::MCPBanner(QWidget* parent)
     m_tab_mode_combo->addItem("Tab: Blocked", to_underlying(WebView::MCPAccessMode::Blocked));
     m_tab_mode_combo->addItem("Tab: Read-Only", to_underlying(WebView::MCPAccessMode::ReadOnly));
     m_tab_mode_combo->addItem("Tab: Same-Origin", to_underlying(WebView::MCPAccessMode::SameOrigin));
+    m_tab_mode_combo->addItem("Tab: WebMCP-Only", to_underlying(WebView::MCPAccessMode::WebMCPOnly));
     m_tab_mode_combo->addItem("Tab: Full", to_underlying(WebView::MCPAccessMode::Full));
     connect(m_tab_mode_combo, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (index < 0)
@@ -88,6 +89,9 @@ void MCPBanner::update_state(u16 port, bool tab_loaded, WebView::MCPAccessMode m
         break;
     case WebView::MCPAccessMode::SameOrigin:
         mode_text = "Same-Origin"sv;
+        break;
+    case WebView::MCPAccessMode::WebMCPOnly:
+        mode_text = "WebMCP-Only"sv;
         break;
     case WebView::MCPAccessMode::Full:
         mode_text = "Full"sv;

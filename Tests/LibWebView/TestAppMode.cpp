@@ -1462,3 +1462,290 @@ TEST_CASE(app_mode_sse_events_cron_and_service_consent)
     EXPECT(server2->find_trigger("morning-cron"sv).has_value());
     EXPECT(server2->find_effective_service("crm-ext"sv).has_value());
 }
+
+TEST_CASE(app_mode_offline_airgap_and_cross_origin_isolation)
+{
+    Core::EventLoop loop;
+    Test::TemporaryDirectory temp { "TestAppModeOffline"sv };
+    auto root = MUST(FileSystem::real_path(temp.path().string()));
+    auto app_dir = LexicalPath::join(root, "offline-app"sv).string();
+    auto data_dir = LexicalPath::join(root, "data"sv).string();
+    MUST(Core::Directory::create(app_dir, Core::Directory::CreateDirectories::Yes));
+    MUST(Core::Directory::create(data_dir, Core::Directory::CreateDirectories::Yes));
+
+    auto index_path = LexicalPath::join(app_dir, "index.html"sv).string();
+    auto index_file = MUST(Core::File::open(index_path, Core::File::OpenMode::Write));
+    MUST(index_file->write_until_depleted("<!doctype html><html><body>Offline Wasm App</body></html>"sv.bytes()));
+    index_file->close();
+
+    auto write_manifest = [&](StringView filename, StringView content) {
+        auto path = LexicalPath::join(app_dir, filename).string();
+        auto f = MUST(Core::File::open(path, Core::File::OpenMode::Write));
+        MUST(f->write_until_depleted(content.bytes()));
+        f->close();
+        return path;
+    };
+
+    // Invalid network policy and invalid crossOriginIsolated type must be rejected
+    auto bad_net = write_manifest("bad-net.json"sv, R"JSON({
+        "id": "bad-net",
+        "name": "Bad Net",
+        "permissions": { "network": "tor-only" }
+    })JSON"sv);
+    EXPECT(WebView::AppManifest::load_from_file(bad_net).is_error());
+
+    auto bad_coi = write_manifest("bad-coi.json"sv, R"JSON({
+        "id": "bad-coi",
+        "name": "Bad COI",
+        "permissions": { "crossOriginIsolated": "yes" }
+    })JSON"sv);
+    EXPECT(WebView::AppManifest::load_from_file(bad_coi).is_error());
+
+    // Offline + crossOriginIsolated manifest
+    auto offline_path = write_manifest("ladybird-app.json"sv, R"JSON({
+        "id": "offline-wasm",
+        "name": "Offline Wasm App",
+        "permissions": {
+            "network": "offline",
+            "crossOriginIsolated": true
+        }
+    })JSON"sv);
+    auto offline_manifest = MUST(WebView::AppManifest::load_from_file(offline_path));
+    EXPECT_EQ(offline_manifest.permissions.network, WebView::AppNetworkPolicy::Offline);
+    EXPECT(offline_manifest.permissions.cross_origin_isolated);
+
+    {
+        auto server = MUST(WebView::AppModeServer::create({
+            .manifest = offline_manifest,
+            .data_directory = data_dir,
+            .disable_sql_database = true,
+            .enable_webmcp_shim = false,
+        }));
+        auto port = server->local_port();
+        auto origin = server->origin();
+        auto token = server->session_token();
+
+        auto page = send_app_http(port, "GET"sv, "/"sv);
+        EXPECT_EQ(page.status_code, 200);
+        EXPECT(page.headers.contains("Content-Security-Policy:"sv));
+        EXPECT(page.headers.contains("connect-src 'self'"sv));
+        EXPECT(page.headers.contains("'wasm-unsafe-eval'"sv));
+        EXPECT(page.headers.contains("form-action 'self'"sv));
+        EXPECT(page.headers.contains("Cross-Origin-Opener-Policy: same-origin"sv));
+        EXPECT(page.headers.contains("Cross-Origin-Embedder-Policy: require-corp"sv));
+        EXPECT(page.headers.contains("Cross-Origin-Resource-Policy: same-origin"sv));
+
+        auto bridge = send_app_http(port, "GET"sv, "/__ladybird_bridge.js"sv);
+        EXPECT_EQ(bridge.status_code, 200);
+        EXPECT(bridge.headers.contains("Cross-Origin-Embedder-Policy: require-corp"sv));
+        EXPECT(bridge.headers.contains("Cross-Origin-Resource-Policy: same-origin"sv));
+        EXPECT(bridge.body.contains("\"network\":\"offline\""sv));
+        EXPECT(bridge.body.contains("\"crossOriginIsolated\":true"sv));
+
+        auto info = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"system.info","args":{}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+        EXPECT_EQ(info.status_code, 200);
+        EXPECT(info.body.contains("\"networkPolicy\":\"offline\""sv));
+        EXPECT(info.body.contains("\"crossOriginIsolated\":true"sv));
+
+        // Offline App Mode must block networked service IPC commands and inbound webhooks
+        auto blocked_open = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.open","args":{"serviceId":"mail"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+        EXPECT_EQ(blocked_open.status_code, 403);
+        auto blocked_reg = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.registerService","args":{"id":"x"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+        EXPECT_EQ(blocked_reg.status_code, 403);
+        auto blocked_call = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.callTool","args":{"serviceId":"mail","toolName":"t"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+        EXPECT_EQ(blocked_call.status_code, 403);
+        auto blocked_hook = send_app_http(port, "POST"sv, "/__ladybird_webhook/hook1"sv, R"({"x":1})"sv);
+        EXPECT_EQ(blocked_hook.status_code, 403);
+
+        // SSE stream must include Cross-Origin-Resource-Policy: same-origin under COEP
+        auto sse_socket = MUST(Core::TCPSocket::connect(Core::SocketAddress { IPv4Address { 127, 0, 0, 1 }, port }));
+        StringBuilder sse_req;
+        sse_req.appendff("GET /__ladybird_events?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept: text/event-stream\r\n\r\n", token, port);
+        MUST(sse_socket->write_until_depleted(sse_req.string_view().bytes()));
+        MUST(sse_socket->set_blocking(false));
+
+        StringBuilder sse_buf;
+        sse_socket->on_ready_to_read = [&] {
+            Array<u8, 4096> chunk;
+            for (;;) {
+                auto r = sse_socket->read_some(chunk);
+                if (r.is_error() || r.value().is_empty())
+                    break;
+                sse_buf.append(StringView { r.value() });
+            }
+        };
+        bool timed_out = false;
+        auto timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(3), [&] { timed_out = true; });
+        timer->start();
+        Core::EventLoop::current().spin_until([&] {
+            return timed_out || sse_buf.string_view().contains(": connected\n\n"sv);
+        });
+        timer->stop();
+        sse_socket->close();
+        EXPECT(!timed_out);
+        EXPECT(sse_buf.string_view().contains("Cross-Origin-Resource-Policy: same-origin"sv));
+    }
+
+    // Default unrestricted manifest must not emit offline CSP or COEP
+    auto default_path = write_manifest("default.json"sv, R"JSON({
+        "id": "default-app",
+        "name": "Default App"
+    })JSON"sv);
+    auto default_manifest = MUST(WebView::AppManifest::load_from_file(default_path));
+    EXPECT_EQ(default_manifest.permissions.network, WebView::AppNetworkPolicy::Unrestricted);
+    EXPECT(!default_manifest.permissions.cross_origin_isolated);
+
+    auto default_server = MUST(WebView::AppModeServer::create({
+        .manifest = default_manifest,
+        .data_directory = data_dir,
+        .disable_sql_database = true,
+        .enable_webmcp_shim = false,
+    }));
+    auto default_page = send_app_http(default_server->local_port(), "GET"sv, "/"sv);
+    EXPECT_EQ(default_page.status_code, 200);
+    EXPECT(!default_page.headers.contains("Content-Security-Policy:"sv));
+    EXPECT(!default_page.headers.contains("Cross-Origin-Embedder-Policy:"sv));
+    EXPECT(default_page.headers.contains("Cross-Origin-Resource-Policy: same-origin"sv));
+
+    // Bridge script must always emit CORP: same-origin and reject cross-site fetches even when COI is false
+    auto default_bridge = send_app_http(default_server->local_port(), "GET"sv, "/__ladybird_bridge.js"sv);
+    EXPECT_EQ(default_bridge.status_code, 200);
+    EXPECT(default_bridge.headers.contains("Cross-Origin-Resource-Policy: same-origin"sv));
+
+    auto cross_site_bridge = send_app_http(default_server->local_port(), "GET"sv, "/__ladybird_bridge.js"sv, {}, {}, {}, "Sec-Fetch-Site: cross-site\r\n"sv);
+    EXPECT_EQ(cross_site_bridge.status_code, 403);
+}
+
+TEST_CASE(app_mode_service_read_markdown_and_webmcp_ipc)
+{
+    Core::EventLoop loop;
+    Test::TemporaryDirectory temp { "TestAppModeInterTab"sv };
+    auto root = MUST(FileSystem::real_path(temp.path().string()));
+    auto app_dir = LexicalPath::join(root, "app"sv).string();
+    auto data_dir = LexicalPath::join(root, "data"sv).string();
+    MUST(Core::Directory::create(app_dir, Core::Directory::CreateDirectories::Yes));
+    MUST(Core::Directory::create(data_dir, Core::Directory::CreateDirectories::Yes));
+
+    auto index_file = MUST(Core::File::open(LexicalPath::join(app_dir, "index.html"sv).string(), Core::File::OpenMode::Write));
+    MUST(index_file->write_until_depleted("<!doctype html><html><body>Hub</body></html>"sv.bytes()));
+    index_file->close();
+
+    auto manifest_path = LexicalPath::join(app_dir, "ladybird-app.json"sv).string();
+    auto mf = MUST(Core::File::open(manifest_path, Core::File::OpenMode::Write));
+    MUST(mf->write_until_depleted(R"JSON({
+        "id": "intertab-broker",
+        "name": "Inter-Tab Broker",
+        "services": {
+            "reader": {
+                "label": "Reader Only",
+                "defaultUrl": "https://mail.example.com/",
+                "origins": ["https://mail.example.com"],
+                "container": "work",
+                "permissions": ["open", "read"]
+            },
+            "tools": {
+                "label": "Tools Only",
+                "defaultUrl": "https://github.example.com/",
+                "origins": ["https://github.example.com"],
+                "container": "work",
+                "permissions": ["open", "webmcp"]
+            }
+        }
+    })JSON"sv.bytes()));
+    mf->close();
+
+    auto manifest = MUST(WebView::AppManifest::load_from_file(manifest_path));
+    auto reader_svc = manifest.find_service("reader"sv);
+    auto tools_svc = manifest.find_service("tools"sv);
+    EXPECT(reader_svc.has_value());
+    EXPECT(tools_svc.has_value());
+    EXPECT(reader_svc->allow_read);
+    EXPECT(!reader_svc->allow_webmcp);
+    EXPECT(!tools_svc->allow_read);
+    EXPECT(tools_svc->allow_webmcp);
+
+    auto ser_reader = WebView::AppManifest::serialize_service_config(*reader_svc).serialized();
+    EXPECT(ser_reader.contains("\"read\""sv));
+    EXPECT(!ser_reader.contains("\"webmcp\""sv));
+
+    auto server = MUST(WebView::AppModeServer::create({
+        .manifest = move(manifest),
+        .data_directory = data_dir,
+        .disable_sql_database = true,
+        .enable_webmcp_shim = false,
+        .on_service_list = []() -> Vector<WebView::AppServiceTabState> { return {}; },
+        .on_service_read_markdown = [](StringView service_id, Optional<String> root_selector, bool main_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+            JsonObject out;
+            out.set("markdown"sv, MUST(String::formatted("# Markdown from {}", service_id)));
+            out.set("mainContentOnly"sv, main_only);
+            out.set("includeLinks"sv, include_links);
+            out.set("includeImages"sv, include_images);
+            out.set("maxChars"sv, static_cast<u64>(max_chars));
+            if (root_selector.has_value())
+                out.set("rootSelector"sv, *root_selector);
+            on_complete(JsonValue { move(out) }, {});
+        },
+        .on_service_list_tools = [](StringView service_id, bool include_declarative, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+            JsonObject out;
+            JsonArray tools;
+            JsonObject tool;
+            tool.set("name"sv, "get_issue"sv);
+            tools.must_append(move(tool));
+            out.set("tools"sv, move(tools));
+            out.set("includeDeclarative"sv, include_declarative);
+            out.set("fromService"sv, service_id);
+            on_complete(JsonValue { move(out) }, {});
+        },
+        .on_service_call_tool = [](StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+            JsonObject out;
+            out.set("ok"sv, true);
+            out.set("called"sv, tool_name);
+            out.set("argId"sv, arguments.get_i64("id"sv).value_or(0));
+            out.set("fromService"sv, service_id);
+            on_complete(JsonValue { move(out) }, {});
+        },
+    }));
+
+    auto port = server->local_port();
+    auto origin = server->origin();
+    auto token = server->session_token();
+
+    auto list_res = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.list","args":{}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(list_res.status_code, 200);
+    EXPECT(list_res.body.contains("\"read\":true"sv));
+    EXPECT(list_res.body.contains("\"webmcp\":true"sv));
+
+    // tabs.readMarkdown permitted on 'reader', forbidden on 'tools'
+    auto ok_md = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.readMarkdown","args":{"serviceId":"reader","rootSelector":"main","maxChars":2500}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(ok_md.status_code, 200);
+    EXPECT(ok_md.body.contains("# Markdown from reader"sv));
+    EXPECT(ok_md.body.contains("\"serviceId\":\"reader\""sv));
+
+    auto denied_md = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.readMarkdown","args":{"serviceId":"tools"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(denied_md.status_code, 403);
+
+    // tabs.listTools & tabs.callTool permitted on 'tools', forbidden on 'reader'
+    auto ok_tools = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.listTools","args":{"serviceId":"tools"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(ok_tools.status_code, 200);
+    EXPECT(ok_tools.body.contains("\"get_issue\""sv));
+
+    auto denied_tools = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.listTools","args":{"serviceId":"reader"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(denied_tools.status_code, 403);
+
+    auto ok_call = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.callTool","args":{"serviceId":"tools","toolName":"get_issue","arguments":{"id":42}}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(ok_call.status_code, 200);
+    EXPECT(ok_call.body.contains("\"argId\":42"sv));
+    EXPECT(ok_call.body.contains("\"toolName\":\"get_issue\""sv));
+
+    auto denied_call = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.callTool","args":{"serviceId":"reader","toolName":"get_issue"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(denied_call.status_code, 403);
+
+    auto bad_call = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"tabs.callTool","args":{"serviceId":"tools"}})"sv, origin.bytes_as_string_view(), token.bytes_as_string_view());
+    EXPECT_EQ(bad_call.status_code, 400);
+
+    auto bridge = send_app_http(port, "GET"sv, "/__ladybird_bridge.js"sv);
+    EXPECT_EQ(bridge.status_code, 200);
+    EXPECT(bridge.body.contains("readMarkdown:"sv));
+    EXPECT(bridge.body.contains("listTools:"sv));
+    EXPECT(bridge.body.contains("callTool:"sv));
+}

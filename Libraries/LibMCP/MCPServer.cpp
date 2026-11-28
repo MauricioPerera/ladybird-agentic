@@ -943,7 +943,7 @@ static JsonArray build_tool_definitions(bool webmcp_only = false)
         JsonObject props;
         props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed tab."sv));
         props.set("name"sv, make_prop("string"sv, "Name of the WebMCP tool to invoke."sv));
-        props.set("arguments"sv, make_prop("object"sv, "JSON object of tool input arguments matching the tool's inputSchema (default: {})."sv));
+        props.set("arguments"sv, make_prop("object"sv, "JSON object of tool input arguments matching the tool's inputSchema (default: {}). String values matching '$artifact:<id>' are substituted directly from captured browser tab artifacts without passing payload bytes through the model."sv));
         props.set("confirm_consequential"sv, [] {
             auto p = make_prop("boolean"sv, "Set true only after user confirmation when calling a tool annotated as consequentialHint or destructiveHint."sv);
             p.set("default"sv, false);
@@ -951,9 +951,58 @@ static JsonArray build_tool_definitions(bool webmcp_only = false)
         }());
         tools.must_append(make_tool_schema(
             "call_page_tool"sv,
-            "Invoke a WebMCP tool discovered via list_page_tools inside an MCP-allowed tab. Supports async execute() handlers and declarative forms. Consequential/destructive tools require confirm_consequential: true."sv,
+            "Invoke a WebMCP tool discovered via list_page_tools inside an MCP-allowed tab. Supports async execute() handlers, declarative forms, and '$artifact:<id>' tab-to-tab handoff references inside arguments. Consequential/destructive tools require confirm_consequential: true."sv,
             move(props),
             Array { "tab_id"sv, "name"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of an MCP-allowed source tab."sv));
+        static constexpr Array artifact_kinds { "markdown"sv, "text"sv, "webmcp_tool"sv };
+        props.set("kind"sv, make_string_enum_prop("Capture mode: 'markdown' (cleaned Markdown), 'text' (visible innerText), or 'webmcp_tool' (JSON output of a WebMCP tool call, works in webmcp_only mode)."sv, artifact_kinds));
+        props.set("label"sv, make_prop("string"sv, "Optional short human-readable label for the captured artifact."sv));
+        props.set("root_selector"sv, make_prop("string"sv, "Optional CSS selector scoping markdown/text capture."sv));
+        props.set("main_content_only"sv, [] {
+            auto p = make_prop("boolean"sv, "For 'markdown', prefer <main>/<article> and skip boilerplate nav/footer/aside (default: true)."sv);
+            p.set("default"sv, true);
+            return p;
+        }());
+        props.set("include_links"sv, [] {
+            auto p = make_prop("boolean"sv, "For 'markdown', keep links as [text](url) (default: true)."sv);
+            p.set("default"sv, true);
+            return p;
+        }());
+        props.set("max_chars"sv, [] {
+            auto p = make_prop("integer"sv, "Maximum characters captured for markdown/text (default: 200000, max: 2000000)."sv);
+            p.set("default"sv, 200000);
+            return p;
+        }());
+        props.set("tool_name"sv, make_prop("string"sv, "Required when kind='webmcp_tool': WebMCP tool name on the source tab."sv));
+        props.set("arguments"sv, make_prop("object"sv, "Optional arguments object when kind='webmcp_tool'."sv));
+        tools.must_append(make_tool_schema(
+            "capture_tab_artifact"sv,
+            "Capture page content or a WebMCP tool output from a source tab into an ephemeral browser-held artifact (up to 2 MiB) and return only a compact artifact_id + metadata + short preview so it can be passed into another tab's call_page_tool via '$artifact:<id>' without flooding model tokens."sv,
+            move(props),
+            Array { "tab_id"sv }));
+    }
+
+    {
+        JsonObject props;
+        props.set("source_container"sv, make_prop("string"sv, "Optional container_id filter."sv));
+        tools.must_append(make_tool_schema(
+            "list_tab_artifacts"sv,
+            "List ephemeral browser-held tab artifacts (id, label, kind, source tab/origin/container, byte_length, sha256, preview) available for '$artifact:<id>' handoff."sv,
+            move(props)));
+    }
+
+    {
+        JsonObject props;
+        props.set("artifact_id"sv, make_prop("string"sv, "Optional artifact_id to remove; clears all session artifacts when omitted."sv));
+        tools.must_append(make_tool_schema(
+            "clear_tab_artifacts"sv,
+            "Clear one or all ephemeral browser-held tab artifacts."sv,
+            move(props)));
     }
 
     {
@@ -1792,6 +1841,8 @@ private:
                 obj.set("is_default_mcp"sv, container.is_default_mcp);
                 obj.set("mcp_allowed"sv, container.mcp_allowed);
                 obj.set("ephemeral"sv, container.ephemeral);
+                if (container.mcp_policy.has_value() && !container.mcp_policy->is_empty())
+                    obj.set("mcp_policy"sv, *container.mcp_policy);
                 containers_json.must_append(move(obj));
             }
             JsonObject payload;
@@ -2587,6 +2638,80 @@ private:
                 move(submit_selector),
                 wait_for_navigation,
                 move(complete));
+            return;
+        }
+
+        if (tool_name == "capture_tab_artifact"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            String kind = "markdown"_string;
+            if (arguments.has("kind"sv) && !arguments.get("kind"sv)->is_null()) {
+                auto maybe_kind = arguments.get_string("kind"sv);
+                if (!maybe_kind.has_value())
+                    return fail_invalid_params("Parameter 'kind' must be a string"sv);
+                kind = *maybe_kind;
+            }
+            if (kind != "markdown"sv && kind != "text"sv && kind != "webmcp_tool"sv)
+                return fail_invalid_params("Parameter 'kind' must be one of: markdown, text, webmcp_tool"sv);
+            Optional<String> label;
+            if (arguments.has("label"sv) && !arguments.get("label"sv)->is_null()) {
+                auto maybe_label = arguments.get_string("label"sv);
+                if (!maybe_label.has_value())
+                    return fail_invalid_params("Parameter 'label' must be a string"sv);
+                label = *maybe_label;
+            }
+            Optional<String> root_selector;
+            if (arguments.has("root_selector"sv) && !arguments.get("root_selector"sv)->is_null()) {
+                auto maybe_sel = arguments.get_string("root_selector"sv);
+                if (!maybe_sel.has_value())
+                    return fail_invalid_params("Parameter 'root_selector' must be a string"sv);
+                root_selector = *maybe_sel;
+            }
+            bool main_content_only = arguments.get_bool("main_content_only"sv).value_or(true);
+            bool include_links = arguments.get_bool("include_links"sv).value_or(true);
+            size_t max_chars = static_cast<size_t>(arguments.get_u64("max_chars"sv).value_or(200000));
+            Optional<String> target_tool_name;
+            if (arguments.has("tool_name"sv) && !arguments.get("tool_name"sv)->is_null()) {
+                auto maybe_tool = arguments.get_string("tool_name"sv);
+                if (!maybe_tool.has_value())
+                    return fail_invalid_params("Parameter 'tool_name' must be a string"sv);
+                target_tool_name = *maybe_tool;
+            }
+            if (kind == "webmcp_tool"sv && (!target_tool_name.has_value() || target_tool_name->is_empty()))
+                return fail_invalid_params("Parameter 'tool_name' is required when kind='webmcp_tool'"sv);
+            JsonObject tool_args;
+            if (arguments.has("arguments"sv) && !arguments.get("arguments"sv)->is_null()) {
+                auto maybe_args = arguments.get_object("arguments"sv);
+                if (!maybe_args.has_value())
+                    return fail_invalid_params("Parameter 'arguments' must be an object"sv);
+                tool_args = *maybe_args;
+            }
+            delegate.capture_tab_artifact(*tab_id, move(kind), move(label), move(root_selector), main_content_only, include_links, max_chars, move(target_tool_name), move(tool_args), move(complete));
+            return;
+        }
+
+        if (tool_name == "list_tab_artifacts"sv) {
+            Optional<String> source_container;
+            if (arguments.has("source_container"sv) && !arguments.get("source_container"sv)->is_null()) {
+                auto maybe_container = arguments.get_string("source_container"sv);
+                if (!maybe_container.has_value())
+                    return fail_invalid_params("Parameter 'source_container' must be a string"sv);
+                source_container = *maybe_container;
+            }
+            delegate.list_tab_artifacts(move(source_container), move(complete));
+            return;
+        }
+
+        if (tool_name == "clear_tab_artifacts"sv) {
+            Optional<String> artifact_id;
+            if (arguments.has("artifact_id"sv) && !arguments.get("artifact_id"sv)->is_null()) {
+                auto maybe_id = arguments.get_string("artifact_id"sv);
+                if (!maybe_id.has_value())
+                    return fail_invalid_params("Parameter 'artifact_id' must be a string"sv);
+                artifact_id = *maybe_id;
+            }
+            delegate.clear_tab_artifacts(move(artifact_id), move(complete));
             return;
         }
 

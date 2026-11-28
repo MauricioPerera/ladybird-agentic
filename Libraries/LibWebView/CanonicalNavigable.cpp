@@ -190,6 +190,12 @@ void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescripto
     auto user_involvement = navigation.user_involvement;
     auto const& navigation_id = navigation.navigation_id;
 
+    if (Application::is_initialized() && Application::the().is_offline_app_mode_navigation_blocked(active_document_url(), navigation.initiator_origin_snapshot, url)) {
+        if (auto* webdriver_bidi = WebDriverBiDi::the())
+            webdriver_bidi->navigation_failed(*this, { .id = navigation_id, .status = WebDriverBiDi::NavigationStatusType::Canceled, .url = url });
+        return;
+    }
+
     // 9. If navigable's active document's unload counter is greater than 0, then invoke WebDriver BiDi navigation failed
     //    with navigable and a WebDriver BiDi navigation status whose id is navigationId, status is "canceled", and url
     //    is url, and return.

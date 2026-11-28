@@ -424,9 +424,11 @@ void ViewImplementation::update_displayed_url()
     m_displayed_url = move(displayed_url);
 
     bool is_privileged = m_displayed_url.scheme() == "resource"sv || (m_displayed_url.scheme() == "about"sv && m_displayed_url != URL::about_blank());
+    bool is_same_origin_effective = m_mcp_access_mode == MCPAccessMode::SameOrigin
+        || (Application::is_initialized() && Application::the().effective_container_mcp_policy(container_id()) == MCPAccessMode::SameOrigin);
     if (m_mcp_access_mode != MCPAccessMode::Blocked && is_privileged) {
         set_mcp_access_mode(MCPAccessMode::Blocked);
-    } else if (m_mcp_access_mode == MCPAccessMode::SameOrigin
+    } else if (is_same_origin_effective
         && (!m_mcp_pinned_origin.has_value() || m_mcp_pinned_origin->is_opaque())
         && m_displayed_url.scheme().is_one_of("http"sv, "https"sv)
         && !m_displayed_url.origin().is_opaque()) {
@@ -886,7 +888,7 @@ void ViewImplementation::set_mcp_access_allowed(bool allowed)
 
 void ViewImplementation::set_mcp_access_mode(MCPAccessMode mode)
 {
-    if (m_is_private == IsPrivate::Yes || (url().scheme() == "about"sv && url() != URL::about_blank()))
+    if (m_is_private == IsPrivate::Yes || url().scheme() == "resource"sv || (url().scheme() == "about"sv && url() != URL::about_blank()))
         mode = MCPAccessMode::Blocked;
 
     if (m_mcp_access_mode == mode)
@@ -960,6 +962,9 @@ void ViewImplementation::load(Web::HTML::PreparedNavigationDescriptor navigation
 
 void ViewImplementation::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab)
 {
+    if (Application::is_initialized() && Application::the().is_offline_app_mode_navigation_blocked(this->url(), this->url().origin(), url))
+        return;
+
     if (auto* view = create_view_for_new_tab_or_window(is_private())) {
         view->load_from_browser_ui(url);
         return;

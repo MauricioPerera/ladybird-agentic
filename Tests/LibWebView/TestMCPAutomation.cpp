@@ -1349,7 +1349,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 62u);
+    EXPECT_EQ(tools->size(), 65u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -1365,6 +1365,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     Optional<JsonObject> add_network_rule_tool;
     Optional<JsonObject> list_page_tools_tool;
     Optional<JsonObject> call_page_tool_tool;
+    Optional<JsonObject> capture_tab_artifact_tool;
     bool found_cancel_flow_run = false;
     bool found_install_extension = false;
     bool found_inject_extension = false;
@@ -1377,6 +1378,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     bool found_wait_for = false;
     bool found_list_network_rules = false;
     bool found_clear_network_rules = false;
+    bool found_list_tab_artifacts = false;
+    bool found_clear_tab_artifacts = false;
     for (size_t i = 0; i < tools->size(); ++i) {
         auto tool = tools->at(i).as_object();
         auto name = tool.get_string("name"sv).value_or(String {});
@@ -1426,6 +1429,12 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             found_list_network_rules = true;
         else if (name == "clear_network_rules"sv)
             found_clear_network_rules = true;
+        else if (name == "capture_tab_artifact"sv)
+            capture_tab_artifact_tool = tool;
+        else if (name == "list_tab_artifacts"sv)
+            found_list_tab_artifacts = true;
+        else if (name == "clear_tab_artifacts"sv)
+            found_clear_tab_artifacts = true;
         else if (name == "get_console_logs"sv)
             found_console = true;
         else if (name == "get_network_requests"sv)
@@ -1453,6 +1462,10 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("action"sv));
     EXPECT(found_list_network_rules);
     EXPECT(found_clear_network_rules);
+    EXPECT(capture_tab_artifact_tool.has_value());
+    EXPECT(capture_tab_artifact_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("kind"sv));
+    EXPECT(found_list_tab_artifacts);
+    EXPECT(found_clear_tab_artifacts);
     EXPECT(list_page_tools_tool.has_value());
     EXPECT(call_page_tool_tool.has_value());
     EXPECT(call_page_tool_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("arguments"sv));
@@ -3685,4 +3698,134 @@ TEST_CASE(mcp_webmcp_only_privacy_gate)
         auto call_res = call_mcp_tool(*port, token, 13, "call_page_tool"sv, move(call_args));
         EXPECT(!call_res.get_bool("isError"sv).value_or(true));
     }
+}
+
+TEST_CASE(mcp_container_policies_parsing_and_enforcement)
+{
+    auto policies = MUST(WebView::mcp_parse_container_policies("work=read_only, banking=blocked, personal=webmcp-only, dev=Same_Origin, agent=full"sv));
+    EXPECT_EQ(policies.size(), 5uz);
+    EXPECT_EQ(policies.get("work"sv).value(), "read_only"sv);
+    EXPECT_EQ(policies.get("banking"sv).value(), "blocked"sv);
+    EXPECT_EQ(policies.get("personal"sv).value(), "webmcp_only"sv);
+    EXPECT_EQ(policies.get("dev"sv).value(), "same_origin"sv);
+    EXPECT_EQ(policies.get("agent"sv).value(), "full"sv);
+
+    // Invalid syntax / mode / container ID must be rejected
+    EXPECT(WebView::mcp_parse_container_policies("work"sv).is_error());
+    EXPECT(WebView::mcp_parse_container_policies("work=admin"sv).is_error());
+    EXPECT(WebView::mcp_parse_container_policies("../bad=read_only"sv).is_error());
+    EXPECT(WebView::mcp_parse_container_policies("work=read_only,"sv).is_error());
+
+    WebView::MCPSecurityPolicy policy;
+    policy.container_policies = move(policies);
+
+    EXPECT_EQ(WebView::mcp_container_policy_mode("work"sv, policy).value(), "read_only"sv);
+    EXPECT_EQ(WebView::mcp_container_policy_mode("agent-ephemeral-abc123"sv, policy).value(), "full"sv);
+    EXPECT(!WebView::mcp_container_policy_mode("shopping"sv, policy).has_value());
+
+    EXPECT(!WebView::mcp_container_is_allowed_by_policy("banking"sv, policy));
+    EXPECT(WebView::mcp_container_is_allowed_by_policy("work"sv, policy));
+    EXPECT(WebView::mcp_container_is_allowed_by_policy("personal"sv, policy));
+
+    auto blocked_resolve = WebView::mcp_resolve_container_against_policy("banking"_string, policy);
+    EXPECT(blocked_resolve.is_error());
+
+    auto work_resolve = WebView::mcp_resolve_container_against_policy("work"_string, policy);
+    EXPECT(!work_resolve.is_error());
+    EXPECT_EQ(work_resolve.value(), "work"sv);
+
+    // With --mcp-allowed-containers skipping a blocked default, first non-blocked allowed container is chosen
+    policy.allowed_containers.append("banking"_string);
+    policy.allowed_containers.append("work"_string);
+    auto auto_resolve = WebView::mcp_resolve_container_against_policy(OptionalNone {}, policy);
+    EXPECT(!auto_resolve.is_error());
+    EXPECT_EQ(auto_resolve.value(), "work"sv);
+}
+
+TEST_CASE(mcp_artifact_reference_resolution)
+{
+    JsonObject inner;
+    inner.set("markdown"sv, "$artifact:art-1"_string);
+    inner.set("meta"sv, "$artifact:art-2"_string);
+    JsonArray items;
+    items.must_append("$artifact:art-1"_string);
+    items.must_append("literal-value"_string);
+
+    JsonObject root;
+    root.set("nested"sv, move(inner));
+    root.set("items"sv, move(items));
+    root.set("count"sv, 3);
+
+    JsonObject art2_obj;
+    art2_obj.set("ticket"sv, 42);
+    art2_obj.set("status"sv, "open"_string);
+
+    Vector<String> resolved_ids;
+    Function<Optional<JsonValue>(StringView)> resolver = [&](StringView id) -> Optional<JsonValue> {
+        if (id == "art-1"sv)
+            return JsonValue { "# Title\n\nBody"_string };
+        if (id == "art-2"sv)
+            return JsonValue { art2_obj };
+        return {};
+    };
+
+    auto resolved_val = MUST(WebView::mcp_resolve_artifact_references(JsonValue { root }, resolver, resolved_ids));
+    EXPECT(resolved_val.is_object());
+    auto const& resolved_obj = resolved_val.as_object();
+    EXPECT_EQ(resolved_obj.get_object("nested"sv)->get_string("markdown"sv).value(), "# Title\n\nBody"sv);
+    EXPECT_EQ(resolved_obj.get_object("nested"sv)->get_object("meta"sv)->get_i64("ticket"sv).value(), 42);
+    EXPECT_EQ(resolved_obj.get_array("items"sv)->at(0).as_string(), "# Title\n\nBody"sv);
+    EXPECT_EQ(resolved_obj.get_array("items"sv)->at(1).as_string(), "literal-value"sv);
+    EXPECT_EQ(resolved_obj.get_i64("count"sv).value(), 3);
+    EXPECT_EQ(resolved_ids.size(), 2uz);
+
+    // Unknown or empty artifact ID must fail
+    JsonObject missing_ref;
+    missing_ref.set("data"sv, "$artifact:missing"_string);
+    Vector<String> missing_ids;
+    EXPECT(WebView::mcp_resolve_artifact_references(JsonValue { missing_ref }, resolver, missing_ids).is_error());
+
+    JsonObject empty_ref;
+    empty_ref.set("data"sv, "$artifact:"_string);
+    Vector<String> empty_ids;
+    EXPECT(WebView::mcp_resolve_artifact_references(JsonValue { empty_ref }, resolver, empty_ids).is_error());
+
+    // Second-order literal "$artifact:..." inside a resolved artifact must stay literal (non-recursive)
+    Function<Optional<JsonValue>(StringView)> second_order_resolver = [&](StringView id) -> Optional<JsonValue> {
+        if (id == "outer"sv)
+            return JsonValue { "$artifact:secret"_string };
+        if (id == "secret"sv)
+            return JsonValue { "TOP_SECRET_VALUE"_string };
+        return {};
+    };
+    JsonObject second_order;
+    second_order.set("val"sv, "$artifact:outer"_string);
+    Vector<String> so_ids;
+    auto so_resolved = MUST(WebView::mcp_resolve_artifact_references(JsonValue { second_order }, second_order_resolver, so_ids));
+    EXPECT_EQ(so_resolved.as_object().get_string("val"sv).value(), "$artifact:secret"sv);
+    EXPECT_EQ(so_ids.size(), 1uz);
+
+    // Nesting depth > 16 must fail
+    JsonValue deep = "$artifact:art-1"_string;
+    for (size_t i = 0; i < 18; ++i) {
+        JsonObject wrap;
+        wrap.set("k"sv, move(deep));
+        deep = JsonValue { move(wrap) };
+    }
+    Vector<String> deep_ids;
+    EXPECT(WebView::mcp_resolve_artifact_references(deep, resolver, deep_ids, 16, 1024 * 1024).is_error());
+
+    // Size cap must fail cleanly (including overflow-safe boundary check)
+    Vector<String> capped_ids;
+    EXPECT(WebView::mcp_resolve_artifact_references(JsonValue { root }, resolver, capped_ids, 16, 10).is_error());
+
+    Vector<String> overflow_ids;
+    Function<Optional<JsonValue>(StringView)> huge_resolver = [&](StringView) -> Optional<JsonValue> {
+        return JsonValue { "1234567890123456"_string };
+    };
+    JsonObject two_refs;
+    two_refs.set("a"sv, "$artifact:big"_string);
+    two_refs.set("b"sv, "$artifact:big"_string);
+    auto near_limit = WebView::mcp_resolve_artifact_references(JsonValue { two_refs }, huge_resolver, overflow_ids, 16, 20);
+    EXPECT(near_limit.is_error());
 }

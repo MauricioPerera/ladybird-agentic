@@ -422,18 +422,82 @@ ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPo
     return {};
 }
 
+static Optional<StringView> normalize_mcp_container_policy_mode(StringView mode)
+{
+    auto trimmed = mode.trim_whitespace();
+    if (trimmed.equals_ignoring_ascii_case("blocked"sv))
+        return "blocked"sv;
+    if (trimmed.equals_ignoring_ascii_case("read_only"sv) || trimmed.equals_ignoring_ascii_case("read-only"sv))
+        return "read_only"sv;
+    if (trimmed.equals_ignoring_ascii_case("same_origin"sv) || trimmed.equals_ignoring_ascii_case("same-origin"sv))
+        return "same_origin"sv;
+    if (trimmed.equals_ignoring_ascii_case("webmcp_only"sv) || trimmed.equals_ignoring_ascii_case("webmcp-only"sv))
+        return "webmcp_only"sv;
+    if (trimmed.equals_ignoring_ascii_case("full"sv))
+        return "full"sv;
+    return {};
+}
+
+ErrorOr<HashMap<String, String>> mcp_parse_container_policies(StringView raw_spec)
+{
+    HashMap<String, String> policies;
+    if (raw_spec.trim_whitespace().is_empty())
+        return policies;
+
+    for (auto entry : raw_spec.split_view(',', SplitBehavior::KeepEmpty)) {
+        auto trimmed = entry.trim_whitespace();
+        if (trimmed.is_empty())
+            return Error::from_string_literal("Empty entry in --mcp-container-policies");
+        auto eq_pos = trimmed.find('=');
+        if (!eq_pos.has_value())
+            return Error::from_string_literal("Expected '<container>=<mode>' in --mcp-container-policies");
+        auto container_id = trimmed.substring_view(0, *eq_pos).trim_whitespace();
+        auto raw_mode = trimmed.substring_view(*eq_pos + 1).trim_whitespace();
+        if (!is_valid_container_id(container_id))
+            return Error::from_string_literal("Invalid container ID in --mcp-container-policies");
+        auto normalized_mode = normalize_mcp_container_policy_mode(raw_mode);
+        if (!normalized_mode.has_value())
+            return Error::from_string_literal("Invalid mode in --mcp-container-policies (expected blocked, read_only, same_origin, webmcp_only, or full)");
+        policies.set(TRY(String::from_utf8(container_id)), TRY(String::from_utf8(*normalized_mode)));
+    }
+    return policies;
+}
+
+Optional<StringView> mcp_container_policy_mode(StringView container_id, MCPSecurityPolicy const& policy)
+{
+    if (auto it = policy.container_policies.find(container_id); it != policy.container_policies.end())
+        return it->value.bytes_as_string_view();
+    if (container_id.starts_with("agent-ephemeral-"sv)) {
+        if (auto it = policy.container_policies.find("agent"sv); it != policy.container_policies.end())
+            return it->value.bytes_as_string_view();
+    }
+    return {};
+}
+
 ErrorOr<String> mcp_resolve_container_against_policy(Optional<String> requested_container, MCPSecurityPolicy const& policy)
 {
     String requested = requested_container.value_or(String {});
-    if (policy.allowed_containers.is_empty())
-        return requested.is_empty() ? "agent"_string : requested;
+    if (policy.allowed_containers.is_empty()) {
+        auto resolved = requested.is_empty() ? "agent"_string : requested;
+        if (mcp_container_policy_mode(resolved, policy) == "blocked"sv)
+            return Error::from_string_literal("Tab container is blocked by MCP container policy (--mcp-container-policies)");
+        return resolved;
+    }
 
-    if (requested.is_empty())
-        return policy.allowed_containers.first();
+    if (requested.is_empty()) {
+        for (auto const& candidate : policy.allowed_containers) {
+            if (mcp_container_policy_mode(candidate, policy) != "blocked"sv)
+                return candidate;
+        }
+        return Error::from_string_literal("No non-blocked allowed container available (--mcp-container-policies)");
+    }
 
     for (auto const& allowed : policy.allowed_containers) {
-        if (allowed == requested)
+        if (allowed == requested) {
+            if (mcp_container_policy_mode(requested, policy) == "blocked"sv)
+                return Error::from_string_literal("Tab container is blocked by MCP container policy (--mcp-container-policies)");
             return requested;
+        }
     }
 
     return Error::from_string_literal("Tab container rejected by MCP container isolation policy (--mcp-allowed-containers)");
@@ -441,6 +505,8 @@ ErrorOr<String> mcp_resolve_container_against_policy(Optional<String> requested_
 
 bool mcp_container_is_allowed_by_policy(StringView container_id, MCPSecurityPolicy const& policy)
 {
+    if (mcp_container_policy_mode(container_id, policy) == "blocked"sv)
+        return false;
     if (policy.allowed_containers.is_empty())
         return true;
     for (auto const& allowed : policy.allowed_containers) {
@@ -448,6 +514,75 @@ bool mcp_container_is_allowed_by_policy(StringView container_id, MCPSecurityPoli
             return true;
     }
     return false;
+}
+
+ErrorOr<JsonValue> mcp_resolve_artifact_references(
+    JsonValue const& input,
+    Function<Optional<JsonValue>(StringView artifact_id)> const& resolver,
+    Vector<String>& out_resolved_ids,
+    size_t max_depth,
+    size_t max_expanded_bytes)
+{
+    size_t total_expanded_bytes = 0;
+
+    auto resolve_recursive = [&](auto& self, JsonValue const& value, size_t depth) -> ErrorOr<JsonValue> {
+        if (depth > max_depth)
+            return Error::from_string_literal("Artifact reference nesting depth exceeded");
+
+        if (value.is_string()) {
+            auto sv = value.as_string().bytes_as_string_view();
+            if (!sv.starts_with("$artifact:"sv))
+                return value;
+            auto artifact_id = sv.substring_view("$artifact:"sv.length());
+            if (artifact_id.is_empty())
+                return Error::from_string_literal("Empty MCP artifact reference '$artifact:'");
+            auto resolved = resolver(artifact_id);
+            if (!resolved.has_value())
+                return Error::from_string_literal("Unknown or expired MCP tab artifact reference");
+            size_t added_bytes = 0;
+            if (resolved->is_string()) {
+                added_bytes = resolved->as_string().bytes().size();
+            } else {
+                auto serialized_payload = resolved->serialized();
+                added_bytes = serialized_payload.bytes().size();
+            }
+            if (added_bytes > max_expanded_bytes || total_expanded_bytes > max_expanded_bytes - added_bytes)
+                return Error::from_string_literal("Expanded MCP artifact payload exceeds size limit");
+            total_expanded_bytes += added_bytes;
+            auto id_str = TRY(String::from_utf8(artifact_id));
+            if (!out_resolved_ids.contains_slow(id_str))
+                out_resolved_ids.append(move(id_str));
+            return resolved.release_value();
+        }
+
+        if (value.is_array()) {
+            JsonArray out_arr;
+            for (auto const& item : value.as_array().values())
+                out_arr.must_append(TRY(self(self, item, depth + 1)));
+            return JsonValue { move(out_arr) };
+        }
+
+        if (value.is_object()) {
+            JsonObject out_obj;
+            ErrorOr<void> err;
+            value.as_object().for_each_member([&](String const& key, JsonValue const& member) {
+                if (err.is_error())
+                    return;
+                auto resolved_member = self(self, member, depth + 1);
+                if (resolved_member.is_error()) {
+                    err = resolved_member.release_error();
+                    return;
+                }
+                out_obj.set(key, resolved_member.release_value());
+            });
+            TRY(err);
+            return JsonValue { move(out_obj) };
+        }
+
+        return value;
+    };
+
+    return resolve_recursive(resolve_recursive, input, 0);
 }
 
 Vector<String> vault_credential_available_fields(VaultCredential const& cred)

@@ -98,7 +98,7 @@ public:
     {
         if (m_is_private == WebView::IsPrivate::Yes)
             return WebView::MCPAccessMode::Blocked;
-        return m_state.mcp_access_mode <= to_underlying(WebView::MCPAccessMode::Full)
+        return m_state.mcp_access_mode <= to_underlying(WebView::MCPAccessMode::WebMCPOnly)
             ? static_cast<WebView::MCPAccessMode>(m_state.mcp_access_mode)
             : WebView::MCPAccessMode::Blocked;
     }

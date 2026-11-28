@@ -28,6 +28,7 @@
 #include <LibCore/System.h>
 #include <LibCore/TimeZoneWatcher.h>
 #include <LibCore/Timer.h>
+#include <LibCrypto/Hash/Hash.h>
 #include <LibDatabase/Database.h>
 #include <LibDevTools/DevToolsServer.h>
 #include <LibDevTools/FirefoxClient.h>
@@ -149,36 +150,37 @@ static constexpr double default_display_refresh_rate = 60.0;
 
 static JsonObject build_async_eval_payload(String script, u32 timeout_ms = 10000)
 {
-    static constexpr auto wrapper = R"JS(
-const userScript = arguments[0];
-const timeoutMs = Math.max(100, Math.min(30000, Number(arguments[1]) || 10000));
-const done = arguments[arguments.length - 1];
-let settled = false;
-const finish = (res) => {
-  if (settled) return;
-  settled = true;
-  clearTimeout(timer);
-  try { done(res); } catch (e) {}
+    StringBuilder js;
+    js.append(R"JS(
+const __lb_timeout_ms = Math.max(100, Math.min(30000, Number(arguments[0]) || 10000));
+const __lb_done = arguments[arguments.length - 1];
+let __lb_settled = false;
+const __lb_finish = (res) => {
+  if (__lb_settled) return;
+  __lb_settled = true;
+  clearTimeout(__lb_timer);
+  try { __lb_done(res); } catch (e) {}
 };
-const timer = setTimeout(() => {
-  finish({ __lb_eval_err: 'Script execution timed out after ' + timeoutMs + 'ms' });
-}, timeoutMs);
+const __lb_timer = setTimeout(() => {
+  __lb_finish({ __lb_eval_err: 'Script execution timed out after ' + __lb_timeout_ms + 'ms' });
+}, __lb_timeout_ms);
 try {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const fn = new AsyncFunction(userScript);
-  Promise.resolve(fn.call(globalThis)).then(
-    (val) => finish({ __lb_eval_ok: true, value: val === undefined ? null : val }),
-    (err) => finish({ __lb_eval_err: String(err && err.stack ? err.stack : (err && err.message ? err.message : err)) })
+  Promise.resolve((async function() {
+)JS"sv);
+    js.append(script);
+    js.append(R"JS(
+}).call(globalThis)).then(
+    (val) => __lb_finish({ __lb_eval_ok: true, value: val === undefined ? null : val }),
+    (err) => __lb_finish({ __lb_eval_err: String(err && err.stack ? err.stack : (err && err.message ? err.message : err)) })
   );
 } catch (err) {
-  finish({ __lb_eval_err: String(err && err.message ? err.message : err) });
+  __lb_finish({ __lb_eval_err: String(err && err.message ? err.message : err) });
 }
-)JS"sv;
+)JS"sv);
     JsonArray args;
-    args.must_append(move(script));
     args.must_append(static_cast<u64>(timeout_ms));
     JsonObject payload;
-    payload.set("script"sv, MUST(String::from_utf8(wrapper)));
+    payload.set("script"sv, MUST(js.to_string()));
     payload.set("args"sv, move(args));
     return payload;
 }
@@ -435,6 +437,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool mcp_allow_skill_write = false;
     Optional<StringView> mcp_vault_passphrase;
     Optional<StringView> mcp_allowed_containers_arg;
+    Optional<StringView> mcp_container_policies_arg;
     Optional<StringView> mcp_allowed_domains_arg;
     Optional<StringView> mcp_blocked_domains_arg;
     bool mcp_allow_private_network = false;
@@ -666,6 +669,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_allow_skill_write, "Allow creating, editing, or deleting Agent Skills via the MCP server", "mcp-allow-skill-write", 0);
     args_parser.add_option(mcp_vault_passphrase, "Passphrase for decrypting/encrypting the blind Credential Vault (alternative to OS keychain / LADYBIRD_VAULT_PASSPHRASE)", "mcp-vault-passphrase", 0, "passphrase");
     args_parser.add_option(mcp_allowed_containers_arg, "Comma-separated list of tab container IDs that MCP may open or access", "mcp-allowed-containers", 0, "containers");
+    args_parser.add_option(mcp_container_policies_arg, "Comma-separated per-container default/ceiling MCP access policies (e.g. 'work=read_only,banking=blocked,personal=webmcp_only')", "mcp-container-policies", 0, "policies");
     args_parser.add_option(mcp_allowed_domains_arg, "Comma-separated domain allowlist for MCP navigation (supports *.domain.com)", "mcp-allowed-domains", 0, "domains");
     args_parser.add_option(mcp_blocked_domains_arg, "Comma-separated domain denylist for MCP navigation (supports *.domain.com)", "mcp-blocked-domains", 0, "domains");
     args_parser.add_option(mcp_allow_private_network, "Allow MCP agents to navigate to localhost/private/LAN IP addresses (disables default SSRF protection)", "mcp-allow-private-network", 0);
@@ -826,6 +830,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         }
     };
     parse_csv_list(mcp_allowed_containers_arg, m_browser_options.mcp_allowed_containers, true);
+    if (mcp_container_policies_arg.has_value() && !mcp_container_policies_arg->trim_whitespace().is_empty()) {
+        auto parsed_policies = mcp_parse_container_policies(*mcp_container_policies_arg);
+        if (parsed_policies.is_error())
+            return parsed_policies.release_error();
+        m_browser_options.mcp_container_policies = parsed_policies.release_value();
+    }
     parse_csv_list(mcp_allowed_domains_arg, m_browser_options.mcp_allowed_domains);
     parse_csv_list(mcp_blocked_domains_arg, m_browser_options.mcp_blocked_domains);
     m_browser_options.mcp_max_tabs = max<size_t>(1, m_browser_options.mcp_max_tabs);
@@ -1090,7 +1100,13 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                         }
                     }
 
-                    auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, MCPAccessMode::Full, effective_container);
+                    auto svc_policy = effective_container_mcp_policy(effective_container);
+                    auto initial_mode = m_browser_options.mcp_webmcp_only
+                        ? MCPAccessMode::WebMCPOnly
+                        : svc_policy.value_or(MCPAccessMode::Full);
+                    if (initial_mode == MCPAccessMode::Blocked)
+                        return Error::from_string_literal("Service container is blocked by MCP container policy (--mcp-container-policies)");
+                    auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, initial_mode, effective_container);
                     if (!view.has_value() || view->is_private() == IsPrivate::Yes)
                         return Error::from_string_literal("UI unavailable to open service tab");
 
@@ -1209,8 +1225,17 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                         on_complete(move(val), {});
                     });
                 },
+                .on_service_read_markdown = [this](StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+                    app_service_read_markdown(service_id, move(root_selector), main_content_only, include_links, include_images, max_chars, move(on_complete));
+                },
+                .on_service_list_tools = [this](StringView service_id, bool include_declarative, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+                    app_service_list_tools(service_id, include_declarative, move(on_complete));
+                },
+                .on_service_call_tool = [this](StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+                    app_service_call_tool(service_id, move(tool_name), move(arguments), move(on_complete));
+                },
                 .on_service_register_consent = [this, app_name = app_manifest->name](AppServiceConfig const& service, Function<void(bool approved)> on_decision) {
-                    if (m_browser_options.headless_mode.has_value() || m_browser_options.mcp_auto_approve) {
+                    if (m_browser_options.headless_mode.has_value() && m_browser_options.mcp_auto_approve) {
                         on_decision(true);
                         return;
                     }
@@ -1271,6 +1296,10 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                         perms.append("navigate"sv);
                     if (service.allow_notifications)
                         perms.append("notifications"sv);
+                    if (service.allow_read)
+                        perms.append("read"sv);
+                    if (service.allow_webmcp)
+                        perms.append("webmcp"sv);
                     if (service.allow_eval)
                         perms.append("eval"sv);
                     if (service.allow_flows)
@@ -3467,7 +3496,11 @@ ErrorOr<int> Application::execute()
                 if (m_browser_options.urls.size() > 1)
                     return Error::from_string_literal("Headless mode currently only supports at most one URL");
                 auto initial_url = m_browser_options.urls.is_empty() ? URL::about_blank() : m_browser_options.urls.first();
-                auto& headless_view = register_headless_mcp_view(view.release_nonnull(), MCPAccessMode::Full, true, false);
+                auto effective_initial_container = view->container_id().is_empty() ? "agent"_string : view->container_id();
+                auto initial_mode = m_browser_options.mcp_webmcp_only
+                    ? MCPAccessMode::WebMCPOnly
+                    : effective_container_mcp_policy(effective_initial_container).value_or(MCPAccessMode::Full);
+                auto& headless_view = register_headless_mcp_view(view.release_nonnull(), initial_mode, true, false);
                 if (initial_url != URL::about_blank())
                     headless_view.load_from_browser_ui(initial_url);
             } else {
@@ -5472,6 +5505,8 @@ static StringView mcp_access_mode_name(MCPAccessMode mode)
         return "same_origin"sv;
     case MCPAccessMode::Full:
         return "full"sv;
+    case MCPAccessMode::WebMCPOnly:
+        return "webmcp_only"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -5731,6 +5766,7 @@ ErrorOr<void> Application::toggle_mcp_enabled()
         m_mcp_egress_tainted = false;
         m_mcp_egress_source_origins.clear();
         m_mcp_egress_allowed_origins.clear();
+        m_mcp_tab_artifacts.clear();
         m_mcp_ephemeral_container_id.clear();
         m_container_sessions.remove_all_matching([](auto const& key, auto const&) {
             return is_ephemeral_container_id(key);
@@ -5951,13 +5987,33 @@ void Application::on_mcp_tool_audit(StringView tool_name, Optional<u64> tab_id, 
             || summary.contains("denied"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("rejected"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("disabled"sv, CaseSensitivity::CaseInsensitive)
+            || summary.contains("Blocked"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("Read-Only"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("Same-Origin"sv, CaseSensitivity::CaseInsensitive)
+            || summary.contains("WebMCP-Only"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("egress"sv, CaseSensitivity::CaseInsensitive)
             || summary.contains("quarantine"sv, CaseSensitivity::CaseInsensitive);
         outcome = is_security_block ? "blocked"_string : "error"_string;
     }
     record_mcp_audit_event(String::from_utf8_without_validation(tool_name.bytes()), tab_id, move(outcome), is_error ? summary : "ok"sv);
+}
+
+bool Application::is_offline_app_mode_navigation_blocked(URL::URL const& active_doc_url, URL::Origin const& initiator_origin, URL::URL const& target_url) const
+{
+    if (!m_app_mode_server || m_app_mode_server->manifest().permissions.network != AppNetworkPolicy::Offline)
+        return false;
+    auto app_origin = m_app_mode_server->entry_url().origin();
+    if (app_origin.is_opaque())
+        return false;
+    bool from_active_app = !active_doc_url.origin().is_opaque() && active_doc_url.origin().is_same_origin(app_origin);
+    bool from_initiator_app = !initiator_origin.is_opaque() && initiator_origin.is_same_origin(app_origin);
+    if (!from_active_app && !from_initiator_app)
+        return false;
+    if (target_url == URL::about_blank() || target_url.scheme().is_one_of("data"sv, "blob"sv, "javascript"sv))
+        return false;
+    if (!target_url.origin().is_opaque() && target_url.origin().is_same_origin(app_origin))
+        return false;
+    return true;
 }
 
 bool Application::mcp_egress_requires_approval(URL::URL const& destination_url, Optional<URL::URL> const& current_view_url) const
@@ -5969,6 +6025,14 @@ bool Application::mcp_egress_requires_approval(URL::URL const& destination_url, 
     auto dest_origin = destination_url.origin().serialize();
     if (m_mcp_egress_allowed_origins.contains(dest_origin))
         return false;
+    // Airgapped App Mode apps have no outbound network access, so transferring captured
+    // tab artifacts into an offline App Mode tab cannot exfiltrate data.
+    if (m_app_mode_server
+        && m_app_mode_server->manifest().permissions.network == AppNetworkPolicy::Offline
+        && !m_app_mode_server->entry_url().origin().is_opaque()
+        && m_app_mode_server->entry_url().origin().is_same_origin(destination_url.origin())) {
+        return false;
+    }
     if (current_view_url.has_value()
         && current_view_url->scheme().is_one_of("http"sv, "https"sv)
         && !current_view_url->origin().is_opaque()
@@ -6069,14 +6133,59 @@ void Application::request_mcp_approval_on_view(Optional<ViewImplementation&> vie
     });
 }
 
-Optional<String> Application::check_mcp_read_allowed(u64 tab_id, StringView action_description) const
+Optional<MCPAccessMode> Application::effective_container_mcp_policy(StringView container_id) const
+{
+    auto raw_mode = mcp_container_policy_mode(container_id, mcp_security_policy());
+    if (!raw_mode.has_value())
+        return {};
+    if (*raw_mode == "blocked"sv)
+        return MCPAccessMode::Blocked;
+    if (*raw_mode == "read_only"sv)
+        return MCPAccessMode::ReadOnly;
+    if (*raw_mode == "same_origin"sv)
+        return MCPAccessMode::SameOrigin;
+    if (*raw_mode == "webmcp_only"sv)
+        return MCPAccessMode::WebMCPOnly;
+    if (*raw_mode == "full"sv)
+        return MCPAccessMode::Full;
+    return {};
+}
+
+String Application::effective_tab_mcp_access_mode_name(ViewImplementation const& view) const
+{
+    if (m_browser_options.mcp_webmcp_only)
+        return "webmcp-only"_string;
+
+    auto tab_mode = view.mcp_access_mode();
+    auto container_policy = effective_container_mcp_policy(view.container_id());
+
+    if (tab_mode == MCPAccessMode::Blocked || container_policy == MCPAccessMode::Blocked)
+        return "blocked"_string;
+    if (tab_mode == MCPAccessMode::WebMCPOnly || container_policy == MCPAccessMode::WebMCPOnly)
+        return "webmcp_only"_string;
+    if (tab_mode == MCPAccessMode::ReadOnly || container_policy == MCPAccessMode::ReadOnly)
+        return "read_only"_string;
+    if (tab_mode == MCPAccessMode::SameOrigin || container_policy == MCPAccessMode::SameOrigin)
+        return "same_origin"_string;
+    return "full"_string;
+}
+
+Optional<String> Application::check_mcp_read_allowed(u64 tab_id, StringView action_description, bool is_webmcp_operation) const
 {
     if (m_mcp_paused)
         return "MCP automation is currently paused by the user"_string;
     auto view = find_allowed_mcp_view(tab_id);
     if (!view.has_value())
         return String::from_utf8_without_validation(mcp_denied_message.bytes());
-    if (view->mcp_access_mode() == MCPAccessMode::SameOrigin) {
+
+    auto tab_mode = view->mcp_access_mode();
+    auto container_policy = effective_container_mcp_policy(view->container_id());
+    if (tab_mode == MCPAccessMode::Blocked || container_policy == MCPAccessMode::Blocked)
+        return MUST(String::formatted("MCP access mode for tab {} (container '{}') is Blocked (cannot {})", tab_id, view->container_id(), action_description));
+    if ((tab_mode == MCPAccessMode::WebMCPOnly || container_policy == MCPAccessMode::WebMCPOnly) && !is_webmcp_operation)
+        return MUST(String::formatted("Tab {} (container '{}') is in WebMCP-Only mode — only list_page_tools and call_page_tool are permitted", tab_id, view->container_id()));
+
+    if (tab_mode == MCPAccessMode::SameOrigin || container_policy == MCPAccessMode::SameOrigin) {
         auto const& pinned = view->mcp_pinned_origin();
         auto current_origin = view->url().origin();
         if (pinned.has_value() && !pinned->is_opaque() && view->url() != URL::about_blank() && !current_origin.is_same_origin(*pinned))
@@ -6085,16 +6194,23 @@ Optional<String> Application::check_mcp_read_allowed(u64 tab_id, StringView acti
     return {};
 }
 
-Optional<String> Application::check_mcp_mutation_allowed(u64 tab_id, StringView action_description, Optional<URL::URL> const& target_url) const
+Optional<String> Application::check_mcp_mutation_allowed(u64 tab_id, StringView action_description, Optional<URL::URL> const& target_url, bool is_webmcp_operation) const
 {
     if (m_mcp_paused)
         return "MCP automation is currently paused by the user"_string;
     auto view = find_allowed_mcp_view(tab_id);
     if (!view.has_value())
         return String::from_utf8_without_validation(mcp_denied_message.bytes());
-    if (view->mcp_access_mode() == MCPAccessMode::ReadOnly)
-        return MUST(String::formatted("MCP access mode for tab {} is Read-Only (cannot {})", tab_id, action_description));
-    if (view->mcp_access_mode() == MCPAccessMode::SameOrigin) {
+
+    auto tab_mode = view->mcp_access_mode();
+    auto container_policy = effective_container_mcp_policy(view->container_id());
+    if (tab_mode == MCPAccessMode::Blocked || container_policy == MCPAccessMode::Blocked)
+        return MUST(String::formatted("MCP access mode for tab {} (container '{}') is Blocked (cannot {})", tab_id, view->container_id(), action_description));
+    if ((tab_mode == MCPAccessMode::WebMCPOnly || container_policy == MCPAccessMode::WebMCPOnly) && !is_webmcp_operation)
+        return MUST(String::formatted("Tab {} (container '{}') is in WebMCP-Only mode — only list_page_tools and call_page_tool are permitted", tab_id, view->container_id()));
+    if (tab_mode == MCPAccessMode::ReadOnly || container_policy == MCPAccessMode::ReadOnly)
+        return MUST(String::formatted("MCP access mode for tab {} (container '{}') is Read-Only (cannot {})", tab_id, view->container_id(), action_description));
+    if (tab_mode == MCPAccessMode::SameOrigin || container_policy == MCPAccessMode::SameOrigin) {
         auto const& pinned = view->mcp_pinned_origin();
         auto current_origin = view->url().origin();
         if (pinned.has_value() && !pinned->is_opaque() && view->url() != URL::about_blank() && !current_origin.is_same_origin(*pinned))
@@ -6406,11 +6522,17 @@ void Application::wait_for_mcp_navigation(u64 view_id, MCP::OnToolCallComplete o
             result.set("title"sv, allowed_view->title().to_well_formed_utf8());
             result.set("container_id"sv, allowed_view->container_id());
             result.set("ephemeral"sv, is_ephemeral_container_id(allowed_view->container_id()));
+            result.set("mcp_access_mode"sv, effective_tab_mcp_access_mode_name(*allowed_view));
             result.set("is_loading"sv, allowed_view->is_loading());
-            if (auto hints = matching_skills_json_for_url(allowed_view->url()); !hints.is_empty())
-                result.set("matching_skills"sv, move(hints));
-            if (auto cred_hints = matching_credentials_json_for_view(allowed_view->url(), allowed_view->container_id()); !cred_hints.is_empty())
-                result.set("matching_credentials"sv, move(cred_hints));
+            bool hide_hints = m_browser_options.mcp_webmcp_only
+                || allowed_view->mcp_access_mode() == MCPAccessMode::WebMCPOnly
+                || effective_container_mcp_policy(allowed_view->container_id()) == MCPAccessMode::WebMCPOnly;
+            if (!hide_hints) {
+                if (auto hints = matching_skills_json_for_url(allowed_view->url()); !hints.is_empty())
+                    result.set("matching_skills"sv, move(hints));
+                if (auto cred_hints = matching_credentials_json_for_view(allowed_view->url(), allowed_view->container_id()); !cred_hints.is_empty())
+                    result.set("matching_credentials"sv, move(cred_hints));
+            }
             result = shield_mcp_json_object(this, "wait_for_navigation"sv, allowed_view->view_id(), result);
             finish_mcp_navigation_wait(wait_id, mcp_ok_json(JsonValue { move(result) }));
         });
@@ -6555,6 +6677,7 @@ MCPSecurityPolicy Application::mcp_security_policy() const
 {
     return {
         .allowed_containers = m_browser_options.mcp_allowed_containers,
+        .container_policies = m_browser_options.mcp_container_policies,
         .allowed_domains = m_browser_options.mcp_allowed_domains,
         .blocked_domains = m_browser_options.mcp_blocked_domains,
         .allow_private_network = m_browser_options.mcp_allow_private_network,
@@ -6685,7 +6808,15 @@ Optional<ViewImplementation&> Application::open_automation_tab(Web::HTML::Activa
         }
     }
 
-    auto access_mode = require_mcp_permission ? MCPAccessMode::Full : MCPAccessMode::Blocked;
+    auto access_mode = MCPAccessMode::Blocked;
+    if (require_mcp_permission) {
+        auto policy_mode = effective_container_mcp_policy(resolved_container);
+        if (policy_mode == MCPAccessMode::Blocked)
+            return {};
+        access_mode = m_browser_options.mcp_webmcp_only
+            ? MCPAccessMode::WebMCPOnly
+            : policy_mode.value_or(MCPAccessMode::Full);
+    }
     return open_automation_view(activate_tab, access_mode, move(resolved_container));
 }
 
@@ -6790,9 +6921,11 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
         if (is_view_mcp_eligible(view, true, policy)) {
             auto info = view_to_mcp_tab_info(view, active_id);
-            if (webmcp_only) {
-                info.mcp_access_mode = "webmcp-only"_string;
-            } else {
+            info.mcp_access_mode = effective_tab_mcp_access_mode_name(view);
+            bool hide_hints = webmcp_only
+                || view.mcp_access_mode() == MCPAccessMode::WebMCPOnly
+                || effective_container_mcp_policy(view.container_id()) == MCPAccessMode::WebMCPOnly;
+            if (!hide_hints) {
                 info.matching_skills = matching_skill_hints_for_url(view.url());
                 info.matching_credentials = matching_credential_hints_for_view(view.url(), view.container_id());
             }
@@ -6811,9 +6944,11 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     if (!is_view_mcp_eligible(*active_view, true, mcp_security_policy()))
         return {};
     auto info = view_to_mcp_tab_info(*active_view, active_view->view_id());
-    if (m_browser_options.mcp_webmcp_only) {
-        info.mcp_access_mode = "webmcp-only"_string;
-    } else {
+    info.mcp_access_mode = effective_tab_mcp_access_mode_name(*active_view);
+    bool hide_hints = m_browser_options.mcp_webmcp_only
+        || active_view->mcp_access_mode() == MCPAccessMode::WebMCPOnly
+        || effective_container_mcp_policy(active_view->container_id()) == MCPAccessMode::WebMCPOnly;
+    if (!hide_hints) {
         info.matching_skills = matching_skill_hints_for_url(active_view->url());
         info.matching_credentials = matching_credential_hints_for_view(active_view->url(), active_view->container_id());
     }
@@ -6904,6 +7039,7 @@ void Application::on_mcp_session_closed()
 {
     cleanup_unused_ephemeral_containers();
     m_mcp_ephemeral_container_id.clear();
+    m_mcp_tab_artifacts.clear();
 }
 
 Vector<MCP::ContainerInfo> Application::list_containers() const
@@ -6918,14 +7054,16 @@ Vector<MCP::ContainerInfo> Application::list_containers() const
         auto policy_id = is_ephemeral ? "agent"sv : id.bytes_as_string_view();
         if (!policy.allowed_containers.is_empty() && !mcp_container_is_allowed_by_policy(policy_id, policy))
             return;
+        auto container_policy = mcp_container_policy_mode(id, policy);
         auto is_default = id == default_container;
         containers.append({
             .id = move(id),
             .name = move(name),
             .color = move(color),
             .is_default_mcp = is_default,
-            .mcp_allowed = true,
+            .mcp_allowed = container_policy != "blocked"sv,
             .ephemeral = is_ephemeral,
+            .mcp_policy = container_policy.has_value() ? Optional<String> { MUST(String::from_utf8(*container_policy)) } : OptionalNone {},
         });
     };
 
@@ -6956,6 +7094,13 @@ void Application::create_container_tool(String name, Optional<String> color, Opt
     if (!policy.allowed_containers.is_empty()) {
         if (!id.has_value() || !mcp_container_is_allowed_by_policy(*id, policy)) {
             on_complete(mcp_error_result("Creating custom containers rejected by MCP container isolation policy (--mcp-allowed-containers)"sv));
+            return;
+        }
+    }
+    if (mcp_container_policy_mode("agent"sv, policy) == "blocked"sv) {
+        auto explicit_mode = id.has_value() ? mcp_container_policy_mode(*id, policy) : Optional<StringView> {};
+        if (!explicit_mode.has_value() || *explicit_mode == "blocked"sv) {
+            on_complete(mcp_error_result("Creating unconfigured custom containers rejected while default 'agent' container is blocked (--mcp-container-policies)"sv));
             return;
         }
     }
@@ -7037,13 +7182,19 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
             cb(mcp_error_result("MCP automation is currently paused by the user"sv));
             return;
         }
-        auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, MCPAccessMode::Full, move(resolved_container));
+        auto initial_mode = effective_container_mcp_policy(resolved_container).value_or(MCPAccessMode::Full);
+        if (initial_mode == MCPAccessMode::Blocked) {
+            cb(mcp_error_result("Tab container is blocked by MCP container policy (--mcp-container-policies)"sv));
+            return;
+        }
+        auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, initial_mode, move(resolved_container));
         if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
             cb(mcp_error_result("UI unavailable to open non-private tab"sv));
             return;
         }
 
-        view->set_mcp_access_allowed(true);
+        view->set_mcp_access_mode(initial_mode);
+        auto effective_mode_name = effective_tab_mcp_access_mode_name(*view);
 
         if (!parsed_url.has_value() || *parsed_url == URL::about_blank()) {
             JsonObject result;
@@ -7053,7 +7204,7 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
             result.set("container_id"sv, view->container_id());
             result.set("ephemeral"sv, is_ephemeral_container_id(view->container_id()));
             result.set("mcp_access_allowed"sv, true);
-            result.set("mcp_access_mode"sv, "full"sv);
+            result.set("mcp_access_mode"sv, move(effective_mode_name));
             cb(mcp_ok_json(JsonValue { move(result) }));
             return;
         }
@@ -7071,12 +7222,14 @@ void Application::open_tab(Optional<String> url, bool activate, bool wait_for_lo
         result.set("container_id"sv, view->container_id());
         result.set("ephemeral"sv, is_ephemeral_container_id(view->container_id()));
         result.set("mcp_access_allowed"sv, true);
-        result.set("mcp_access_mode"sv, "full"sv);
+        result.set("mcp_access_mode"sv, move(effective_mode_name));
         result.set("is_loading"sv, true);
-        if (auto hints = matching_skills_json_for_url(*parsed_url); !hints.is_empty())
-            result.set("matching_skills"sv, move(hints));
-        if (auto cred_hints = matching_credentials_json_for_view(*parsed_url, view->container_id()); !cred_hints.is_empty())
-            result.set("matching_credentials"sv, move(cred_hints));
+        if (!(m_browser_options.mcp_webmcp_only || initial_mode == MCPAccessMode::WebMCPOnly)) {
+            if (auto hints = matching_skills_json_for_url(*parsed_url); !hints.is_empty())
+                result.set("matching_skills"sv, move(hints));
+            if (auto cred_hints = matching_credentials_json_for_view(*parsed_url, view->container_id()); !cred_hints.is_empty())
+                result.set("matching_credentials"sv, move(cred_hints));
+        }
         cb(mcp_ok_json(JsonValue { move(result) }));
     };
 
@@ -7201,6 +7354,12 @@ void Application::migrate_tab_container(u64 tab_id, String target_container_id, 
     }
 
     auto target_id = resolved_target.release_value();
+    auto target_policy = effective_container_mcp_policy(target_id);
+    if (target_policy == MCPAccessMode::Blocked) {
+        on_complete(mcp_error_result("Target container is blocked by MCP container policy (--mcp-container-policies)"sv));
+        return;
+    }
+
     if (target_id != "agent"sv && !is_ephemeral_container_id(target_id)) {
         bool exists = m_container_store && m_container_store->get_container(target_id).has_value();
         if (!exists) {
@@ -7220,7 +7379,7 @@ void Application::migrate_tab_container(u64 tab_id, String target_container_id, 
         }
     }
 
-    auto perform_migrate = [this, tab_id, source_url, source_container, target_id, activate, wait_for_load, close_source_tab](MCP::OnToolCallComplete cb) mutable {
+    auto perform_migrate = [this, tab_id, source_url, source_container, target_id, target_policy, activate, wait_for_load, close_source_tab](MCP::OnToolCallComplete cb) mutable {
         if (m_mcp_paused) {
             cb(mcp_error_result("MCP automation is currently paused by the user"sv));
             return;
@@ -7231,13 +7390,27 @@ void Application::migrate_tab_container(u64 tab_id, String target_container_id, 
             return;
         }
         auto source_access_mode = cur_source->mcp_access_mode();
-        auto new_view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, source_access_mode, target_id);
+        if (source_access_mode == MCPAccessMode::ReadOnly && target_policy == MCPAccessMode::WebMCPOnly) {
+            cb(mcp_error_result("Cannot migrate Read-Only tab into WebMCP-Only container (incompatible capability modes)"sv));
+            return;
+        }
+        auto effective_target_mode = source_access_mode;
+        if (target_policy.has_value()) {
+            if (*target_policy == MCPAccessMode::WebMCPOnly)
+                effective_target_mode = MCPAccessMode::WebMCPOnly;
+            else if (*target_policy == MCPAccessMode::ReadOnly && source_access_mode != MCPAccessMode::Blocked && source_access_mode != MCPAccessMode::WebMCPOnly)
+                effective_target_mode = MCPAccessMode::ReadOnly;
+            else if (*target_policy == MCPAccessMode::SameOrigin && source_access_mode == MCPAccessMode::Full)
+                effective_target_mode = MCPAccessMode::SameOrigin;
+        }
+
+        auto new_view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, effective_target_mode, target_id);
         if (!new_view.has_value() || new_view->is_private() == IsPrivate::Yes) {
             cb(mcp_error_result("UI unavailable to open migrated tab"sv));
             return;
         }
 
-        new_view->set_mcp_access_mode(source_access_mode);
+        new_view->set_mcp_access_mode(effective_target_mode);
         auto new_tab_id = new_view->view_id();
 
         bool ephemeral_destroyed = false;
@@ -7259,7 +7432,7 @@ void Application::migrate_tab_container(u64 tab_id, String target_container_id, 
             }
         }
 
-        auto merge_migration_fields = [tab_id, new_tab_id, source_container, target_id, source_access_mode, close_source_tab, ephemeral_destroyed](JsonObject& obj) {
+        auto merge_migration_fields = [tab_id, new_tab_id, source_container, target_id, effective_target_mode, close_source_tab, ephemeral_destroyed](JsonObject& obj) {
             obj.set("migrated"sv, true);
             obj.set("old_tab_id"sv, tab_id);
             obj.set("new_tab_id"sv, new_tab_id);
@@ -7267,7 +7440,7 @@ void Application::migrate_tab_container(u64 tab_id, String target_container_id, 
             obj.set("from_container_id"sv, source_container);
             obj.set("container_id"sv, target_id);
             obj.set("ephemeral"sv, is_ephemeral_container_id(target_id));
-            obj.set("mcp_access_mode"sv, mcp_access_mode_name(source_access_mode));
+            obj.set("mcp_access_mode"sv, mcp_access_mode_name(effective_target_mode));
             obj.set("source_tab_closed"sv, close_source_tab);
             obj.set("ephemeral_destroyed"sv, ephemeral_destroyed);
         };
@@ -7370,10 +7543,15 @@ void Application::navigate_tab(u64 tab_id, String url, bool wait_for_load, MCP::
         result.set("container_id"sv, current_view->container_id());
         result.set("ephemeral"sv, is_ephemeral_container_id(current_view->container_id()));
         result.set("same_document"sv, is_same_document_hash_navigation);
-        if (auto hints = matching_skills_json_for_url(parsed_url); !hints.is_empty())
-            result.set("matching_skills"sv, move(hints));
-        if (auto cred_hints = matching_credentials_json_for_view(parsed_url, current_view->container_id()); !cred_hints.is_empty())
-            result.set("matching_credentials"sv, move(cred_hints));
+        bool hide_hints = m_browser_options.mcp_webmcp_only
+            || current_view->mcp_access_mode() == MCPAccessMode::WebMCPOnly
+            || effective_container_mcp_policy(current_view->container_id()) == MCPAccessMode::WebMCPOnly;
+        if (!hide_hints) {
+            if (auto hints = matching_skills_json_for_url(parsed_url); !hints.is_empty())
+                result.set("matching_skills"sv, move(hints));
+            if (auto cred_hints = matching_credentials_json_for_view(parsed_url, current_view->container_id()); !cred_hints.is_empty())
+                result.set("matching_credentials"sv, move(cred_hints));
+        }
         cb(mcp_ok_json(JsonValue { move(result) }));
     };
 
@@ -8196,6 +8374,7 @@ if (!window.__ladybirdWebMCP) {
       return {
         found: true,
         description: tool.description,
+        read_only: tool.annotations.readOnlyHint === true,
         consequential: Boolean(tool.annotations.consequentialHint || tool.annotations.destructiveHint),
         href: location.href,
         origin: location.origin,
@@ -9350,34 +9529,9 @@ return out;
     execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(wrapped_complete));
 }
 
-void Application::get_page_markdown(u64 tab_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, MCP::OnToolCallComplete on_complete)
-{
-    if (auto err = check_mcp_read_allowed(tab_id, "extract page markdown"sv); err.has_value()) {
-        on_complete(mcp_error_result(*err));
-        return;
-    }
-    auto initial_view = find_allowed_mcp_view(tab_id);
-    if (!initial_view.has_value()) {
-        on_complete(mcp_error_result(mcp_denied_message));
-        return;
-    }
-    if (is_view_mcp_secret_tainted(tab_id)) {
-        on_complete(mcp_error_result(mcp_vault_quarantine_message));
-        return;
-    }
-    record_mcp_sensitive_read(*initial_view);
-
-    JsonObject cfg;
-    if (root_selector.has_value() && !root_selector->is_empty())
-        cfg.set("root_selector"sv, *root_selector);
-    cfg.set("main_content_only"sv, main_content_only);
-    cfg.set("include_links"sv, include_links);
-    cfg.set("include_images"sv, include_images);
-    cfg.set("max_chars"sv, static_cast<u64>(clamp(max_chars, static_cast<size_t>(500), static_cast<size_t>(200000))));
-
-    auto script = R"JS(
+static constexpr StringView mcp_page_markdown_js = R"JS(
 const cfg = arguments[0] || {};
-const maxChars = Math.max(500, Math.min(200000, Number(cfg.max_chars || 40000)));
+const maxChars = Math.max(500, Math.min(2000000, Number(cfg.max_chars || 40000)));
 const mainOnly = cfg.main_content_only !== false;
 const includeLinks = cfg.include_links !== false;
 const includeImages = Boolean(cfg.include_images);
@@ -9599,7 +9753,34 @@ return {
   char_count: md.length,
   truncated
 };
-)JS"_string;
+)JS"sv;
+
+void Application::get_page_markdown(u64 tab_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, MCP::OnToolCallComplete on_complete)
+{
+    if (auto err = check_mcp_read_allowed(tab_id, "extract page markdown"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
+        return;
+    }
+    auto initial_view = find_allowed_mcp_view(tab_id);
+    if (!initial_view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
+    record_mcp_sensitive_read(*initial_view);
+
+    JsonObject cfg;
+    if (root_selector.has_value() && !root_selector->is_empty())
+        cfg.set("root_selector"sv, *root_selector);
+    cfg.set("main_content_only"sv, main_content_only);
+    cfg.set("include_links"sv, include_links);
+    cfg.set("include_images"sv, include_images);
+    cfg.set("max_chars"sv, static_cast<u64>(clamp(max_chars, static_cast<size_t>(500), static_cast<size_t>(200000))));
+
+    auto script = MUST(String::from_utf8(mcp_page_markdown_js.bytes()));
 
     auto wrapped_complete = [this, tab_id, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
         if (!res.is_error) {
@@ -10773,7 +10954,7 @@ void Application::handle_browser_notification_event(MCPNotificationEntry entry)
 
     auto policy = mcp_security_policy();
     bool allowed_context = entry.tab_id.has_value()
-        && find_allowed_mcp_view(*entry.tab_id).has_value()
+        && !check_mcp_read_allowed(*entry.tab_id, "read notifications"sv).has_value()
         && !is_view_mcp_secret_tainted(*entry.tab_id)
         && is_mcp_notification_origin_allowed(entry.origin, policy);
 
@@ -10885,7 +11066,7 @@ void Application::list_notifications(Optional<u64> tab_id, Optional<String> orig
     auto policy = mcp_security_policy();
     auto matches = [&](MCPNotificationEntry const& entry) {
         if (!entry.tab_id.has_value()
-            || !find_allowed_mcp_view(*entry.tab_id).has_value()
+            || check_mcp_read_allowed(*entry.tab_id, "list notifications"sv).has_value()
             || is_view_mcp_secret_tainted(*entry.tab_id)
             || !is_mcp_notification_origin_allowed(entry.origin, policy))
             return false;
@@ -11095,6 +11276,23 @@ void Application::sync_network_intercept_rules_to_request_servers()
 
 void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete on_complete)
 {
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
+    auto policy = mcp_security_policy();
+    if (policy.webmcp_only) {
+        on_complete(mcp_error_result("add_network_rule is disabled in WebMCP-Only mode"sv));
+        return;
+    }
+    for (auto const& [container, mode] : policy.container_policies) {
+        (void)container;
+        if (mode != "full"sv) {
+            on_complete(mcp_error_result("add_network_rule is disabled while restrictive MCP container policies (--mcp-container-policies) are active"sv));
+            return;
+        }
+    }
+
     auto url_pattern = rule_args.get_string("url_pattern"sv);
     auto action = rule_args.get_string("action"sv);
     if (!url_pattern.has_value() || url_pattern->is_empty() || !action.has_value()) {
@@ -11514,10 +11712,18 @@ void Application::run_flow(Optional<String> flow_id, Optional<JsonValue> inline_
 
 void Application::list_flow_runs(Optional<String> flow_id, size_t limit, MCP::OnToolCallComplete on_complete)
 {
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
     auto runs = flow_store().list_runs(flow_id.has_value() ? Optional<StringView> { *flow_id } : OptionalNone {}, limit);
     JsonArray array;
-    for (auto const& run : runs)
+    for (auto const& run : runs) {
+        if (run.tab_id.has_value()
+            && (check_mcp_read_allowed(*run.tab_id, "list flow runs"sv).has_value() || is_view_mcp_secret_tainted(*run.tab_id)))
+            continue;
         array.must_append(serialize_flow_run(run));
+    }
 
     JsonObject result;
     result.set("runs"sv, move(array));
@@ -11527,10 +11733,24 @@ void Application::list_flow_runs(Optional<String> flow_id, size_t limit, MCP::On
 
 void Application::get_flow_run(String run_id, MCP::OnToolCallComplete on_complete)
 {
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
     auto run = flow_store().get_run(run_id);
     if (!run.has_value()) {
         on_complete(mcp_error_result("Flow run not found"sv));
         return;
+    }
+    if (run->tab_id.has_value()) {
+        if (auto err = check_mcp_read_allowed(*run->tab_id, "get flow run"sv); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
+        if (is_view_mcp_secret_tainted(*run->tab_id)) {
+            on_complete(mcp_error_result(mcp_vault_quarantine_message));
+            return;
+        }
     }
     auto obj = shield_mcp_json_object(this, "get_flow_run"sv, run->tab_id, serialize_flow_run(*run));
     on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(obj) })));
@@ -11685,7 +11905,7 @@ void Application::inject_webmcp_shim_if_needed(ViewImplementation& view, URL::UR
 
 void Application::list_page_tools(u64 tab_id, bool include_declarative, MCP::OnToolCallComplete on_complete)
 {
-    if (auto err = check_mcp_read_allowed(tab_id, "list WebMCP page tools"sv); err.has_value()) {
+    if (auto err = check_mcp_read_allowed(tab_id, "list WebMCP page tools"sv, true); err.has_value()) {
         on_complete(mcp_error_result(*err));
         return;
     }
@@ -11902,9 +12122,14 @@ Promise.all(paths.map(probeOne)).then(
     });
 }
 
-void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool, MCP::OnToolCallComplete on_complete)
+void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject arguments, bool confirm_consequential, MCP::OnToolCallComplete on_complete)
 {
-    if (auto err = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv); err.has_value()) {
+    call_page_tool_impl(tab_id, move(tool_name), move(arguments), confirm_consequential, false, move(on_complete));
+}
+
+void Application::call_page_tool_impl(u64 tab_id, String tool_name, JsonObject arguments, bool, bool require_read_only, MCP::OnToolCallComplete on_complete)
+{
+    if (auto err = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv, {}, true); err.has_value()) {
         on_complete(mcp_error_result(*err));
         return;
     }
@@ -11922,6 +12147,71 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
         on_complete(mcp_error_result(mcp_denied_message));
         return;
     }
+
+    auto original_arguments = arguments;
+    auto dest_origin = initial_view->url().origin().is_opaque() ? String {} : initial_view->url().origin().serialize();
+    auto dest_container = initial_view->container_id();
+    bool target_is_offline_app = m_app_mode_server
+        && m_app_mode_server->manifest().permissions.network == AppNetworkPolicy::Offline
+        && !m_app_mode_server->entry_url().origin().is_opaque()
+        && !initial_view->url().origin().is_opaque()
+        && m_app_mode_server->entry_url().origin().is_same_origin(initial_view->url().origin());
+
+    Vector<String> resolved_artifact_ids;
+    Vector<String> artifact_source_origins;
+    bool artifact_tainted_error = false;
+    bool artifact_cross_boundary = false;
+    StringBuilder artifact_provenance_summary;
+    auto resolved_or_err = mcp_resolve_artifact_references(
+        JsonValue { move(arguments) },
+        [&](StringView artifact_id) -> Optional<JsonValue> {
+            for (auto const& art : m_mcp_tab_artifacts) {
+                if (art.id != artifact_id)
+                    continue;
+                if (art.tainted || is_view_mcp_secret_tainted(art.source_tab_id)) {
+                    artifact_tainted_error = true;
+                    return {};
+                }
+                if (!art.source_origin.is_empty())
+                    artifact_source_origins.append(art.source_origin);
+                if (!target_is_offline_app && (art.source_origin != dest_origin || art.source_container != dest_container))
+                    artifact_cross_boundary = true;
+                if (!artifact_provenance_summary.is_empty())
+                    artifact_provenance_summary.append('\n');
+                artifact_provenance_summary.appendff("Artifact {} ({}, {} bytes) from container '{}' ({})",
+                    art.id, art.kind, art.byte_length, art.source_container, art.source_origin);
+                if (art.json_payload.has_value()) {
+                    auto scrubbed = scrub_mcp_secrets(art.json_payload->serialized());
+                    if (auto reparsed = JsonValue::from_string(scrubbed); !reparsed.is_error())
+                        return reparsed.release_value();
+                    return JsonValue { move(scrubbed) };
+                }
+                return JsonValue { scrub_mcp_secrets(art.text_payload) };
+            }
+            return {};
+        },
+        resolved_artifact_ids);
+    if (artifact_tainted_error) {
+        on_complete(mcp_error_result("Refusing to inject Vault-tainted tab artifact into page tool arguments"sv));
+        return;
+    }
+    if (resolved_or_err.is_error() || !resolved_or_err.value().is_object()) {
+        on_complete(mcp_error_result(resolved_or_err.is_error()
+                ? MUST(String::formatted("Failed to resolve tab artifact reference: {}", resolved_or_err.error()))
+                : "Resolved call_page_tool arguments must be a JSON object"_string));
+        return;
+    }
+    arguments = resolved_or_err.release_value().as_object();
+    if (!resolved_artifact_ids.is_empty() && !target_is_offline_app) {
+        for (auto const& src_origin : artifact_source_origins) {
+            if (!src_origin.is_empty() && src_origin != dest_origin) {
+                m_mcp_egress_tainted = true;
+                m_mcp_egress_source_origins.set(src_origin);
+            }
+        }
+    }
+    auto provenance_note = MUST(artifact_provenance_summary.to_string());
+
     auto expected_document_id = initial_view->traversable().active_document().id();
     auto inspection_ticket = generate_random_uuid();
 
@@ -11973,7 +12263,7 @@ void Application::call_page_tool(u64 tab_id, String tool_name, JsonObject argume
 return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket);
 )WEBMCP"sv);
 
-    execute_mcp_js_json(*this, tab_id, MUST(inspect_js.to_string()), move(inspect_cfg), [this, tab_id, expected_document_id, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](MCP::ToolCallResult inspect_res) mutable {
+    execute_mcp_js_json(*this, tab_id, MUST(inspect_js.to_string()), move(inspect_cfg), [this, tab_id, expected_document_id, target_is_offline_app, artifact_cross_boundary, provenance_note = move(provenance_note), require_read_only, tool_name = move(tool_name), arguments = move(arguments), original_arguments = move(original_arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](MCP::ToolCallResult inspect_res) mutable {
         if (inspect_res.is_error) {
             on_complete(move(inspect_res));
             return;
@@ -11989,6 +12279,7 @@ return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket)
             return;
         }
         auto is_consequential = obj.get_bool("consequential"sv);
+        bool is_read_only = obj.get_bool("read_only"sv).value_or(false);
         auto expected_href = obj.get_string("href"sv).value_or(String {});
         if (!is_consequential.has_value() || expected_href.is_empty()) {
             on_complete(mcp_error_result("Incomplete WebMCP inspection response"sv));
@@ -12030,7 +12321,7 @@ return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket)
             on_complete(mcp_error_result("WebMCP document changed during tool inspection"sv));
             return;
         }
-        if (auto error = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv); error.has_value()) {
+        if (auto error = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv, {}, true); error.has_value()) {
             on_complete(mcp_error_result(*error));
             return;
         }
@@ -12038,17 +12329,31 @@ return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket)
             on_complete(mcp_error_result(mcp_vault_quarantine_message));
             return;
         }
+        bool needs_egress_approval = mcp_egress_requires_approval(cur_view_before_call->url(), cur_view_before_call->url());
+        if (!needs_egress_approval && artifact_cross_boundary && !target_is_offline_app) {
+            auto cur_origin_check = cur_view_before_call->url().origin().is_opaque() ? String {} : cur_view_before_call->url().origin().serialize();
+            if (!m_mcp_egress_allowed_origins.contains(cur_origin_check))
+                needs_egress_approval = true;
+        }
+        bool needs_consequential_approval = *is_consequential || (require_read_only && !is_read_only);
         record_mcp_sensitive_read(*cur_view_before_call);
 
-        bool needs_egress_approval = mcp_egress_requires_approval(cur_view_before_call->url(), cur_view_before_call->url());
-        if (*is_consequential || needs_egress_approval) {
+        if (needs_consequential_approval || needs_egress_approval) {
             auto expected_origin = cur_view_before_call->url().origin().is_opaque() ? String {} : cur_view_before_call->url().origin().serialize();
             auto origin_display = origin.is_empty() ? expected_origin : origin;
             auto kind = needs_egress_approval ? "egress_call_page_tool"_string : "call_page_tool"_string;
             auto summary = needs_egress_approval
                 ? MUST(String::formatted("Run page tool '{}' on unapproved origin {} (egress guard active)", tool_name, origin_display))
                 : MUST(String::formatted("Run consequential page tool '{}' on {}", tool_name, origin_display));
-            auto details = description.is_empty() ? JsonValue { arguments }.serialized() : MUST(String::formatted("{}\nArguments: {}", description, JsonValue { arguments }.serialized()));
+            auto serialized_original = JsonValue { original_arguments }.serialized();
+            String details;
+            if (!provenance_note.is_empty()) {
+                details = description.is_empty()
+                    ? MUST(String::formatted("{}\nArguments: {}", provenance_note, serialized_original))
+                    : MUST(String::formatted("{}\n{}\nArguments: {}", description, provenance_note, serialized_original));
+            } else {
+                details = description.is_empty() ? move(serialized_original) : MUST(String::formatted("{}\nArguments: {}", description, serialized_original));
+            }
             request_mcp_user_approval(tab_id, move(kind), move(summary), move(details), [this, tab_id, expected_origin = move(expected_origin), expected_href = move(expected_href), expected_document_id, needs_egress_approval, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), handle_response = move(handle_response)](bool approved) mutable {
                 if (m_mcp_paused) {
                     handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, "MCP automation is currently paused by the user"sv));
@@ -12058,7 +12363,7 @@ return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket)
                     handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, needs_egress_approval ? "WebMCP page tool rejected by user (egress guard)"sv : "Consequential WebMCP tool call rejected by user (or no interactive approval UI available)"sv));
                     return;
                 }
-                if (auto err = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv); err.has_value()) {
+                if (auto err = check_mcp_mutation_allowed(tab_id, "call WebMCP page tool"sv, {}, true); err.has_value()) {
                     handle_response(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::UnknownError, *err));
                     return;
                 }
@@ -12096,6 +12401,633 @@ return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket)
 
         execute_tool(move(tool_name), move(arguments), false, move(handle_response));
     });
+}
+
+static JsonValue scrub_app_service_json(Application const& app, JsonValue value)
+{
+    auto scrubbed = app.scrub_mcp_secrets(value.serialized());
+    if (auto parsed = JsonValue::from_string(scrubbed); !parsed.is_error())
+        return parsed.release_value();
+    return JsonValue { move(scrubbed) };
+}
+
+static Optional<ViewImplementation&> resolve_authorized_service_view(
+    Application& app,
+    AppModeServer* server,
+    Function<Optional<ViewImplementation&>(AppServiceConfig const&)>& finder,
+    StringView service_id,
+    bool require_read,
+    bool require_webmcp,
+    Optional<String>& out_error)
+{
+    if (!server) {
+        out_error = "AppMode server is unavailable"_string;
+        return {};
+    }
+    auto svc = server->find_effective_service(service_id);
+    if (!svc.has_value()) {
+        out_error = "Service is undeclared"_string;
+        return {};
+    }
+    if (require_read && !svc->allow_read) {
+        out_error = "Service 'read' permission is disabled"_string;
+        return {};
+    }
+    if (require_webmcp && !svc->allow_webmcp) {
+        out_error = "Service 'webmcp' permission is disabled"_string;
+        return {};
+    }
+    auto view = finder(*svc);
+    if (!view.has_value()) {
+        out_error = "Service tab is not open"_string;
+        return {};
+    }
+    if (!AppManifest::is_service_origin_allowed(*svc, view->url())) {
+        out_error = "Service tab navigated outside allowed origins"_string;
+        return {};
+    }
+    if (app.is_view_mcp_secret_tainted(view->view_id())) {
+        out_error = "Service tab is quarantined after credential autofill"_string;
+        return {};
+    }
+    return view;
+}
+
+void Application::app_service_read_markdown(StringView service_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, Function<void(Optional<JsonValue>, Optional<String>)> on_complete)
+{
+    Optional<String> err;
+    Function<Optional<ViewImplementation&>(AppServiceConfig const&)> finder = [this](AppServiceConfig const& svc) {
+        return find_or_adopt_service_view(svc);
+    };
+    auto view = resolve_authorized_service_view(*this, m_app_mode_server.ptr(), finder, service_id, true, false, err);
+    if (!view.has_value()) {
+        on_complete({}, move(err));
+        return;
+    }
+
+    JsonObject cfg;
+    if (root_selector.has_value() && !root_selector->is_empty())
+        cfg.set("root_selector"sv, *root_selector);
+    cfg.set("main_content_only"sv, main_content_only);
+    cfg.set("include_links"sv, include_links);
+    cfg.set("include_images"sv, include_images);
+    cfg.set("max_chars"sv, static_cast<u64>(clamp(max_chars, static_cast<size_t>(500), static_cast<size_t>(200000))));
+
+    JsonArray args;
+    args.must_append(move(cfg));
+    JsonObject payload;
+    payload.set("script"sv, MUST(String::from_utf8(mcp_page_markdown_js.bytes())));
+    payload.set("args"sv, move(args));
+
+    u64 tab_id = view->view_id();
+    enqueue_automation_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, false, [this, tab_id, on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            auto const& msg = response.error().message;
+            on_complete({}, msg.is_empty() ? "Service markdown extraction failed"_string : scrub_mcp_secrets(msg));
+            return;
+        }
+        auto val = response.release_value();
+        if (val.is_object()) {
+            if (auto err_msg = val.as_object().get_string("error"sv); err_msg.has_value()) {
+                on_complete({}, scrub_mcp_secrets(*err_msg));
+                return;
+            }
+            auto obj = val.as_object();
+            obj.set("tab_id"sv, tab_id);
+            val = JsonValue { move(obj) };
+        }
+        on_complete(scrub_app_service_json(*this, move(val)), {});
+    });
+}
+
+void Application::app_service_list_tools(StringView service_id, bool include_declarative, Function<void(Optional<JsonValue>, Optional<String>)> on_complete)
+{
+    Optional<String> err;
+    Function<Optional<ViewImplementation&>(AppServiceConfig const&)> finder = [this](AppServiceConfig const& svc) {
+        return find_or_adopt_service_view(svc);
+    };
+    auto view = resolve_authorized_service_view(*this, m_app_mode_server.ptr(), finder, service_id, false, true, err);
+    if (!view.has_value()) {
+        on_complete({}, move(err));
+        return;
+    }
+
+    u64 tab_id = view->view_id();
+    JsonObject cfg;
+    cfg.set("tab_id"sv, tab_id);
+    cfg.set("include_declarative"sv, include_declarative);
+
+    StringBuilder js;
+    js.append("const cfg = arguments[0] || {};\n"sv);
+    js.append(mcp_webmcp_shim_js);
+    js.append(R"WEBMCP(
+const res = window.__ladybirdWebMCP.listTools({ includeDeclarative: cfg.include_declarative !== false });
+return Object.assign({ tab_id: cfg.tab_id }, res);
+)WEBMCP"sv);
+
+    JsonArray args;
+    args.must_append(move(cfg));
+    JsonObject payload;
+    payload.set("script"sv, MUST(js.to_string()));
+    payload.set("args"sv, move(args));
+
+    enqueue_automation_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, false, [this, on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+        if (response.is_error()) {
+            auto const& msg = response.error().message;
+            on_complete({}, msg.is_empty() ? "Service WebMCP listing failed"_string : scrub_mcp_secrets(msg));
+            return;
+        }
+        auto val = response.release_value();
+        if (val.is_object()) {
+            if (auto err_msg = val.as_object().get_string("error"sv); err_msg.has_value()) {
+                on_complete({}, scrub_mcp_secrets(*err_msg));
+                return;
+            }
+        }
+        on_complete(scrub_app_service_json(*this, move(val)), {});
+    });
+}
+
+void Application::app_service_call_tool(StringView service_id, String tool_name, JsonObject arguments, Function<void(Optional<JsonValue>, Optional<String>)> on_complete)
+{
+    Optional<String> err;
+    Function<Optional<ViewImplementation&>(AppServiceConfig const&)> finder = [this](AppServiceConfig const& svc) {
+        return find_or_adopt_service_view(svc);
+    };
+    auto view = resolve_authorized_service_view(*this, m_app_mode_server.ptr(), finder, service_id, false, true, err);
+    if (!view.has_value()) {
+        on_complete({}, move(err));
+        return;
+    }
+    if (!view->has_traversable()) {
+        on_complete({}, "Service tab document is unavailable"_string);
+        return;
+    }
+
+    u64 tab_id = view->view_id();
+    auto expected_document_id = view->traversable().active_document().id();
+    auto inspection_ticket = generate_random_uuid();
+    auto service_key = MUST(String::from_utf8(service_id));
+
+    auto execute_tool = [this, tab_id, expected_document_id, inspection_ticket](String t_name, JsonObject t_args, bool approved_consequential, Function<void(Optional<JsonValue>, Optional<String>)> cb) {
+        JsonObject cfg;
+        cfg.set("tab_id"sv, tab_id);
+        cfg.set("tool_name"sv, move(t_name));
+        cfg.set("arguments"sv, move(t_args));
+        cfg.set("confirm_consequential"sv, approved_consequential);
+        cfg.set("inspection_ticket"sv, inspection_ticket);
+
+        StringBuilder js;
+        js.append("const cfg = arguments[0] || {};\n"sv);
+        js.append("const done = arguments[arguments.length - 1];\n"sv);
+        js.append(mcp_webmcp_shim_js);
+        js.append(R"WEBMCP(
+(async () => {
+  return await window.__ladybirdWebMCP.callTool(cfg.tool_name, cfg.arguments || {}, {
+    inspectionTicket: cfg.inspection_ticket,
+    confirmConsequential: Boolean(cfg.confirm_consequential),
+  });
+})().then(
+  (res) => done(res && typeof res === 'object' ? Object.assign({ tab_id: cfg.tab_id }, res) : { tab_id: cfg.tab_id, ok: true, result: res }),
+  (err) => done({ tab_id: cfg.tab_id, error: String(err && err.message ? err.message : err) })
+);
+)WEBMCP"sv);
+
+        JsonArray args;
+        args.must_append(move(cfg));
+        JsonObject document_id;
+        document_id.set("namespace_id"sv, expected_document_id.namespace_id);
+        document_id.set("local_id"sv, expected_document_id.local_id);
+        JsonObject payload;
+        payload.set("script"sv, MUST(js.to_string()));
+        payload.set("args"sv, move(args));
+        payload.set("expected_document_id"sv, move(document_id));
+
+        enqueue_automation_webdriver_command(tab_id, "execute_async_script"_string, move(payload), {}, false, [this, tab_id, cb = move(cb)](Web::WebDriver::Response response) mutable {
+            if (response.is_error()) {
+                auto const& msg = response.error().message;
+                cb({}, msg.is_empty() ? "Service WebMCP call failed"_string : scrub_mcp_secrets(msg));
+                return;
+            }
+            auto val = response.release_value();
+            if (val.is_object()) {
+                if (auto err_msg = val.as_object().get_string("error"sv); err_msg.has_value()) {
+                    cb({}, scrub_mcp_secrets(*err_msg));
+                    return;
+                }
+            } else {
+                JsonObject wrapped;
+                wrapped.set("tab_id"sv, tab_id);
+                wrapped.set("result"sv, move(val));
+                val = JsonValue { move(wrapped) };
+            }
+            cb(scrub_app_service_json(*this, move(val)), {});
+        });
+    };
+
+    JsonObject inspect_cfg;
+    inspect_cfg.set("tool_name"sv, tool_name);
+    inspect_cfg.set("inspection_ticket"sv, move(inspection_ticket));
+    StringBuilder inspect_js;
+    inspect_js.append("const cfg = arguments[0] || {};\n"sv);
+    inspect_js.append(mcp_webmcp_shim_js);
+    inspect_js.append(R"WEBMCP(
+return window.__ladybirdWebMCP.inspectTool(cfg.tool_name, cfg.inspection_ticket);
+)WEBMCP"sv);
+
+    JsonArray inspect_args;
+    inspect_args.must_append(move(inspect_cfg));
+    JsonObject inspect_payload;
+    inspect_payload.set("script"sv, MUST(inspect_js.to_string()));
+    inspect_payload.set("args"sv, move(inspect_args));
+
+    enqueue_automation_webdriver_command(tab_id, "execute_script"_string, move(inspect_payload), {}, false, [this, service_key = move(service_key), tab_id, expected_document_id, tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](Web::WebDriver::Response inspect_resp) mutable {
+        if (inspect_resp.is_error()) {
+            auto const& msg = inspect_resp.error().message;
+            on_complete({}, msg.is_empty() ? "Service WebMCP inspection failed"_string : scrub_mcp_secrets(msg));
+            return;
+        }
+        if (!inspect_resp.value().is_object()) {
+            on_complete({}, "Invalid WebMCP inspection response"_string);
+            return;
+        }
+        auto const& obj = inspect_resp.value().as_object();
+        if (!obj.get_bool("found"sv).value_or(false)) {
+            on_complete({}, "WebMCP tool not found on service tab"_string);
+            return;
+        }
+        auto is_consequential = obj.get_bool("consequential"sv);
+        auto expected_href = obj.get_string("href"sv).value_or(String {});
+        if (!is_consequential.has_value() || expected_href.is_empty()) {
+            on_complete({}, "Incomplete WebMCP inspection response"_string);
+            return;
+        }
+        auto description = obj.get_string("description"sv).value_or(String {});
+
+        Optional<String> err;
+        Function<Optional<ViewImplementation&>(AppServiceConfig const&)> finder = [this](AppServiceConfig const& svc) {
+            return find_or_adopt_service_view(svc);
+        };
+        auto cur_view = resolve_authorized_service_view(*this, m_app_mode_server.ptr(), finder, service_key, false, true, err);
+        if (!cur_view.has_value()) {
+            on_complete({}, move(err));
+            return;
+        }
+        if (cur_view->view_id() != tab_id || !cur_view->has_traversable() || cur_view->traversable().active_document().id() != expected_document_id) {
+            on_complete({}, "Service tab document changed during WebMCP tool inspection"_string);
+            return;
+        }
+
+        if (*is_consequential) {
+            if (m_browser_options.headless_mode.has_value() && m_browser_options.mcp_auto_approve) {
+                execute_tool(move(tool_name), move(arguments), true, move(on_complete));
+                return;
+            }
+            auto summary = MUST(String::formatted("Run consequential tool '{}' on service '{}'", tool_name, service_key));
+            auto details = description.is_empty()
+                ? JsonValue { arguments }.serialized()
+                : MUST(String::formatted("{}\nArguments: {}", description, JsonValue { arguments }.serialized()));
+            request_mcp_approval_on_view(*cur_view, tab_id, "app_service_tool"_string, move(summary), move(details), [this, service_key = move(service_key), tab_id, expected_document_id, expected_href = move(expected_href), tool_name = move(tool_name), arguments = move(arguments), execute_tool = move(execute_tool), on_complete = move(on_complete)](bool approved) mutable {
+                if (!approved) {
+                    on_complete({}, "Consequential service tool call rejected by user"_string);
+                    return;
+                }
+                Optional<String> recheck_err;
+                Function<Optional<ViewImplementation&>(AppServiceConfig const&)> recheck_finder = [this](AppServiceConfig const& svc) {
+                    return find_or_adopt_service_view(svc);
+                };
+                auto verified_view = resolve_authorized_service_view(*this, m_app_mode_server.ptr(), recheck_finder, service_key, false, true, recheck_err);
+                if (!verified_view.has_value()) {
+                    on_complete({}, move(recheck_err));
+                    return;
+                }
+                if (verified_view->view_id() != tab_id || !verified_view->has_traversable()
+                    || verified_view->traversable().active_document().id() != expected_document_id
+                    || verified_view->url().to_string() != expected_href) {
+                    on_complete({}, "Service tab document changed during tool approval prompt"_string);
+                    return;
+                }
+                execute_tool(move(tool_name), move(arguments), true, move(on_complete));
+            });
+            return;
+        }
+
+        execute_tool(move(tool_name), move(arguments), false, move(on_complete));
+    });
+}
+
+static constexpr size_t MAX_MCP_TAB_ARTIFACTS = 64;
+static constexpr size_t MAX_MCP_TAB_ARTIFACT_BYTES = 2 * 1024 * 1024;
+
+static String make_mcp_artifact_preview(StringView raw_text)
+{
+    StringBuilder bounded;
+    for (auto code_point : Utf8View { raw_text }) {
+        if (bounded.length() >= 1024)
+            break;
+        bounded.append_code_point(code_point);
+    }
+    auto sanitized = sanitize_mcp_untrusted_text(bounded.string_view()).text;
+    if (sanitized.bytes().size() <= 512)
+        return sanitized;
+    StringBuilder clipped;
+    for (auto code_point : Utf8View { sanitized }) {
+        if (clipped.length() + 4 > 512)
+            break;
+        clipped.append_code_point(code_point);
+    }
+    return MUST(clipped.to_string());
+}
+
+template<typename Artifact>
+static JsonObject serialize_mcp_artifact_metadata(Artifact const& art)
+{
+    JsonObject obj;
+    obj.set("artifact_id"sv, art.id);
+    if (!art.label.is_empty())
+        obj.set("label"sv, art.label);
+    obj.set("kind"sv, art.kind);
+    obj.set("mime_type"sv, art.mime_type);
+    obj.set("source_tab_id"sv, art.source_tab_id);
+    obj.set("source_url"sv, art.source_url);
+    obj.set("source_origin"sv, art.source_origin);
+    obj.set("source_container"sv, art.source_container);
+    obj.set("byte_length"sv, static_cast<u64>(art.byte_length));
+    obj.set("sha256"sv, art.sha256);
+    obj.set("preview"sv, art.preview);
+    obj.set("created_at_ms"sv, art.created_at_ms);
+    obj.set("tainted"sv, art.tainted);
+    return obj;
+}
+
+static constexpr StringView mcp_page_text_artifact_js = R"JS(
+const cfg = arguments[0] || {};
+let root = document.body;
+if (cfg.root_selector) {
+  root = document.querySelector(cfg.root_selector);
+  if (!root) return { error: 'root_selector did not match any element' };
+}
+if (!root) {
+  return { url: window.location.href, title: document.title || '', text: '', truncated: false };
+}
+const maxChars = Math.max(500, Math.min(2000000, Number(cfg.max_chars || 200000)));
+const isVisible = (el) => {
+  if (!el || el.nodeType !== 1) return false;
+  if (el.hidden) return false;
+  const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+  if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+  return true;
+};
+const chunks = [];
+let total = 0;
+let truncated = false;
+const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+let node;
+while ((node = walker.nextNode())) {
+  const parent = node.parentElement;
+  if (!parent || !isVisible(parent)) continue;
+  const tag = (parent.tagName || '').toLowerCase();
+  if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template') continue;
+  const t = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+  if (!t) continue;
+  if (total + t.length + 1 > maxChars) {
+    const remaining = maxChars - total;
+    if (remaining > 0) chunks.push(t.slice(0, remaining));
+    truncated = true;
+    break;
+  }
+  chunks.push(t);
+  total += t.length + 1;
+}
+return {
+  url: window.location.href,
+  title: document.title || '',
+  text: chunks.join('\n'),
+  truncated
+};
+)JS"sv;
+
+void Application::capture_tab_artifact(u64 tab_id, String kind, Optional<String> label, Optional<String> root_selector, bool main_content_only, bool include_links, size_t max_chars, Optional<String> tool_name, JsonObject arguments, MCP::OnToolCallComplete on_complete)
+{
+    auto normalized_kind = kind.is_empty() ? "markdown"_string : move(kind);
+
+    auto store_and_finish = [this, tab_id](
+                                String kind_val,
+                                String mime_type,
+                                String label_val,
+                                String source_url,
+                                String source_origin,
+                                String source_container,
+                                String text_payload,
+                                Optional<JsonValue> json_payload,
+                                bool truncated,
+                                MCP::OnToolCallComplete cb) mutable {
+        if (is_view_mcp_secret_tainted(tab_id)) {
+            cb(mcp_error_result(mcp_vault_quarantine_message));
+            return;
+        }
+        size_t byte_length = text_payload.bytes().size();
+        if (byte_length > MAX_MCP_TAB_ARTIFACT_BYTES) {
+            cb(mcp_error_result("Captured tab artifact exceeds 2 MiB maximum size limit"sv));
+            return;
+        }
+        auto safe_label = label_val.is_empty() ? String {} : sanitize_mcp_untrusted_text(label_val).text;
+        auto hash_hex = MUST(String::from_byte_string(encode_hex(Crypto::Hash::digest(Crypto::Hash::HashKind::SHA256, text_payload.bytes()).bytes())));
+        auto preview = make_mcp_artifact_preview(text_payload);
+        auto now_ms = UnixDateTime::now().milliseconds_since_epoch();
+
+        while (m_mcp_tab_artifacts.size() >= MAX_MCP_TAB_ARTIFACTS)
+            (void)m_mcp_tab_artifacts.take_first();
+
+        MCPTabArtifact art {
+            .id = MUST(String::formatted("art-{}", m_next_mcp_artifact_id++)),
+            .label = move(safe_label),
+            .source_tab_id = tab_id,
+            .source_url = move(source_url),
+            .source_origin = move(source_origin),
+            .source_container = move(source_container),
+            .kind = move(kind_val),
+            .mime_type = move(mime_type),
+            .text_payload = move(text_payload),
+            .json_payload = move(json_payload),
+            .byte_length = byte_length,
+            .sha256 = move(hash_hex),
+            .preview = move(preview),
+            .created_at_ms = now_ms,
+            .tainted = false,
+        };
+        auto meta = serialize_mcp_artifact_metadata(art);
+        m_mcp_tab_artifacts.append(move(art));
+
+        meta.set("truncated"sv, truncated);
+        meta.set("artifact_count"sv, static_cast<u64>(m_mcp_tab_artifacts.size()));
+        meta = shield_mcp_json_object(this, "capture_tab_artifact"sv, tab_id, meta);
+        cb(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(meta) })));
+    };
+
+    if (normalized_kind == "markdown"sv || normalized_kind == "text"sv) {
+        auto action_desc = normalized_kind == "markdown"sv ? "capture tab artifact (markdown)"sv : "capture tab artifact (text)"sv;
+        if (auto err = check_mcp_read_allowed(tab_id, action_desc); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
+        auto initial_view = find_allowed_mcp_view(tab_id);
+        if (!initial_view.has_value() || !initial_view->has_traversable()) {
+            on_complete(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        if (is_view_mcp_secret_tainted(tab_id)) {
+            on_complete(mcp_error_result(mcp_vault_quarantine_message));
+            return;
+        }
+        record_mcp_sensitive_read(*initial_view);
+
+        auto expected_document_id = initial_view->traversable().active_document().id();
+        auto src_url = initial_view->url().to_string();
+        auto src_origin = initial_view->url().origin().is_opaque() ? String {} : initial_view->url().origin().serialize();
+        auto src_container = initial_view->container_id();
+        auto effective_label = label.value_or(String {});
+
+        JsonObject cfg;
+        if (root_selector.has_value() && !root_selector->is_empty())
+            cfg.set("root_selector"sv, *root_selector);
+        cfg.set("max_chars"sv, static_cast<u64>(clamp(max_chars, static_cast<size_t>(500), MAX_MCP_TAB_ARTIFACT_BYTES)));
+        if (normalized_kind == "markdown"sv) {
+            cfg.set("main_content_only"sv, main_content_only);
+            cfg.set("include_links"sv, include_links);
+            cfg.set("include_images"sv, false);
+        }
+
+        auto script = MUST(String::from_utf8((normalized_kind == "markdown"sv ? mcp_page_markdown_js : mcp_page_text_artifact_js).bytes()));
+        auto mime_type = normalized_kind == "markdown"sv ? "text/markdown"_string : "text/plain"_string;
+
+        execute_mcp_js_json(*this, tab_id, move(script), move(cfg), [this, tab_id, expected_document_id, normalized_kind = move(normalized_kind), mime_type = move(mime_type), effective_label = move(effective_label), src_url = move(src_url), src_origin = move(src_origin), src_container = move(src_container), store_and_finish = move(store_and_finish), on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+            if (res.is_error) {
+                on_complete(scrub_mcp_tool_result(move(res)));
+                return;
+            }
+            auto cur_view = find_allowed_mcp_view(tab_id);
+            if (!cur_view.has_value() || !cur_view->has_traversable() || cur_view->traversable().active_document().id() != expected_document_id) {
+                on_complete(mcp_error_result("Tab document changed during artifact capture"sv));
+                return;
+            }
+            if (is_view_mcp_secret_tainted(tab_id)) {
+                on_complete(mcp_error_result(mcp_vault_quarantine_message));
+                return;
+            }
+            auto parsed = JsonValue::from_string(res.text);
+            if (parsed.is_error() || !parsed.value().is_object()) {
+                on_complete(mcp_error_result("Invalid DOM artifact extraction response"sv));
+                return;
+            }
+            auto const& obj = parsed.value().as_object();
+            if (auto err = obj.get_string("error"sv); err.has_value()) {
+                on_complete(mcp_error_result(*err));
+                return;
+            }
+            auto field_key = normalized_kind == "markdown"sv ? "markdown"sv : "text"sv;
+            auto content = obj.get_string(field_key).value_or(String {});
+            auto scrubbed = scrub_mcp_secrets(content);
+            bool truncated = obj.get_bool("truncated"sv).value_or(false);
+            store_and_finish(move(normalized_kind), move(mime_type), move(effective_label), move(src_url), move(src_origin), move(src_container), move(scrubbed), {}, truncated, move(on_complete));
+        });
+        return;
+    }
+
+    if (normalized_kind == "webmcp_tool"sv) {
+        if (!tool_name.has_value() || tool_name->is_empty()) {
+            on_complete(mcp_error_result("capture_tab_artifact with kind='webmcp_tool' requires tool_name"sv));
+            return;
+        }
+        if (auto err = check_mcp_read_allowed(tab_id, "capture tab artifact (webmcp_tool)"sv, true); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
+        auto initial_view = find_allowed_mcp_view(tab_id);
+        if (!initial_view.has_value()) {
+            on_complete(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        if (is_view_mcp_secret_tainted(tab_id)) {
+            on_complete(mcp_error_result(mcp_vault_quarantine_message));
+            return;
+        }
+        auto src_url = initial_view->url().to_string();
+        auto src_origin = initial_view->url().origin().is_opaque() ? String {} : initial_view->url().origin().serialize();
+        auto src_container = initial_view->container_id();
+        auto effective_label = label.value_or(*tool_name);
+
+        call_page_tool_impl(tab_id, *tool_name, move(arguments), false, true, [this, effective_label = move(effective_label), src_url = move(src_url), src_origin = move(src_origin), src_container = move(src_container), store_and_finish = move(store_and_finish), on_complete = move(on_complete)](MCP::ToolCallResult call_res) mutable {
+            if (call_res.is_error) {
+                on_complete(move(call_res));
+                return;
+            }
+            Optional<JsonValue> json_payload;
+            String text_payload;
+            if (auto parsed = JsonValue::from_string(call_res.text); !parsed.is_error()) {
+                JsonValue extracted = parsed.release_value();
+                if (extracted.is_object() && extracted.as_object().has("result"sv)) {
+                    if (auto result_opt = extracted.as_object().get("result"sv); result_opt.has_value())
+                        extracted = *result_opt;
+                }
+                auto scrubbed_serialized = scrub_mcp_secrets(extracted.serialized());
+                if (auto reparsed = JsonValue::from_string(scrubbed_serialized); !reparsed.is_error())
+                    json_payload = reparsed.release_value();
+                text_payload = move(scrubbed_serialized);
+            } else {
+                text_payload = scrub_mcp_secrets(call_res.text);
+            }
+            store_and_finish("webmcp_tool"_string, "application/json"_string, move(effective_label), move(src_url), move(src_origin), move(src_container), move(text_payload), move(json_payload), false, move(on_complete));
+        });
+        return;
+    }
+
+    on_complete(mcp_error_result("Unsupported artifact kind; expected 'markdown', 'text', or 'webmcp_tool'"sv));
+}
+
+void Application::list_tab_artifacts(Optional<String> source_container, MCP::OnToolCallComplete on_complete)
+{
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
+    JsonArray items;
+    for (auto const& art : m_mcp_tab_artifacts) {
+        if (art.tainted || is_view_mcp_secret_tainted(art.source_tab_id))
+            continue;
+        if (source_container.has_value() && !source_container->is_empty() && art.source_container != *source_container)
+            continue;
+        items.must_append(JsonValue { serialize_mcp_artifact_metadata(art) });
+    }
+    JsonObject out;
+    out.set("count"sv, static_cast<u64>(items.size()));
+    out.set("artifacts"sv, move(items));
+    out = shield_mcp_json_object(this, "list_tab_artifacts"sv, {}, out);
+    on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(out) })));
+}
+
+void Application::clear_tab_artifacts(Optional<String> artifact_id, MCP::OnToolCallComplete on_complete)
+{
+    if (m_mcp_paused) {
+        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+        return;
+    }
+    size_t cleared = 0;
+    if (artifact_id.has_value() && !artifact_id->is_empty()) {
+        for (size_t i = m_mcp_tab_artifacts.size(); i > 0; --i) {
+            if (m_mcp_tab_artifacts[i - 1].id == *artifact_id) {
+                m_mcp_tab_artifacts.remove(i - 1);
+                ++cleared;
+            }
+        }
+    } else {
+        cleared = m_mcp_tab_artifacts.size();
+        m_mcp_tab_artifacts.clear();
+    }
+    JsonObject out;
+    out.set("cleared"sv, static_cast<u64>(cleared));
+    out.set("remaining"sv, static_cast<u64>(m_mcp_tab_artifacts.size()));
+    on_complete(mcp_ok_json(JsonValue { move(out) }));
 }
 
 static MCP::ProtocolCallResult mcp_proto_error(i32 code, StringView msg)
@@ -12202,7 +13134,7 @@ void Application::resources_read(String uri, MCP::OnProtocolCallComplete on_comp
         JsonArray items;
         for (auto const& entry : m_mcp_notifications) {
             if (!entry.tab_id.has_value()
-                || !find_allowed_mcp_view(*entry.tab_id).has_value()
+                || check_mcp_read_allowed(*entry.tab_id, "read notifications"sv).has_value()
                 || is_view_mcp_secret_tainted(*entry.tab_id)
                 || !is_mcp_notification_origin_allowed(entry.origin, policy))
                 continue;
@@ -12314,6 +13246,10 @@ void Application::list_skills_tool(Optional<u64> tab_id, Optional<String> url, b
 {
     Optional<URL::URL> filter_url;
     if (tab_id.has_value()) {
+        if (auto err = check_mcp_read_allowed(*tab_id, "list skills for tab"sv); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
         auto view = find_allowed_mcp_view(*tab_id);
         if (!view.has_value()) {
             on_complete(mcp_error_result(mcp_denied_message));
@@ -12477,6 +13413,10 @@ void Application::list_credentials_tool(Optional<u64> tab_id, MCP::OnToolCallCom
     Vector<VaultCredential> creds;
     Optional<String> filtered_origin;
     if (tab_id.has_value()) {
+        if (auto err = check_mcp_read_allowed(*tab_id, "list credentials for tab"sv); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
         auto view = find_allowed_mcp_view(*tab_id);
         if (!view.has_value()) {
             on_complete(mcp_error_result(mcp_denied_message));
