@@ -3,10 +3,14 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+// This source is instantiated only by the opaque-origin frame in sandbox.js.
+// Keeping it as data prevents callers from accidentally creating a same-origin
+// worker and treating identifier shadowing as a security boundary.
+export const TRANSFORM_WORKER_SOURCE = String.raw`
 'use strict';
 
-self.onmessage = async (ev) => {
-  const { id, code, input, outputs, vars } = ev.data || {};
+self.onmessage = async (event) => {
+  const { code, input, outputs, vars } = event.data || {};
   try {
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const fn = new AsyncFunction(
@@ -23,11 +27,15 @@ self.onmessage = async (ev) => {
       'navigator',
       'indexedDB',
       'caches',
-      `"use strict";\n${String(code || 'return input;')}`
+      'Worker',
+      'SharedWorker',
+      'BroadcastChannel',
+      '"use strict";\n' + String(code || 'return input;')
     );
     const result = await fn(input, outputs, vars);
-    self.postMessage({ id, ok: true, result });
-  } catch (err) {
-    self.postMessage({ id, ok: false, error: err?.message || String(err) });
+    self.postMessage({ ok: true, result });
+  } catch (error) {
+    self.postMessage({ ok: false, error: error?.message || String(error) });
   }
 };
+`;
