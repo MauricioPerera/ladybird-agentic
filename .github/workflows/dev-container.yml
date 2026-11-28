@@ -4,6 +4,7 @@ name: 'Build Dev Container Image'
 on:
   workflow_dispatch:
   push:
+    branches: [master]
     paths:
       - '.devcontainer/**'
       - 'vcpkg.json'
@@ -18,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    if: github.repository == 'LadybirdBrowser/ladybird'
+    if: github.repository == 'LadybirdBrowser/ladybird' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
 
