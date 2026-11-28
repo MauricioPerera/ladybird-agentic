@@ -48,6 +48,8 @@ public:
     struct ResponseDocument {
         // Created for inline content that doesn't have a DOM: the error page for a failed navigation.
         bool is_inline_content { false };
+        // Set only when the UI process supplied the response for an authorized privileged WebUI navigation.
+        Optional<String> web_ui_host;
         Web::HTML::OpenerPolicyEnforcementResult coop_enforcement_result;
         URL::URL response_url;
         Optional<URL::URL> request_current_url;
@@ -66,7 +68,7 @@ public:
     Optional<ResponseDocument> response_document() const;
     void set_document(CanonicalDocument const&, CanonicalNavigable const&);
 
-    void refuse_made_up_local_file_urls(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult&) const;
+    void refuse_made_up_privileged_urls(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult&) const;
     void did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult);
     void acquire_response_body(WebContentClient const& population_worker, Function<void(bool)> completion_steps);
     void obtain_the_response_policies(CanonicalNavigable const&);
@@ -112,12 +114,7 @@ public:
     static void discard(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult&);
 
 private:
-    NavigationLoader(Web::HTML::NavigationPopulationRequest request, LocalFileAccess local_file_access)
-        : m_request(move(request))
-        , m_requested_url(m_request.history_entry.url)
-        , m_local_file_access(move(local_file_access))
-    {
-    }
+    NavigationLoader(Web::HTML::NavigationPopulationRequest request, LocalFileAccess local_file_access);
 
     struct LocalFile {
         ByteBuffer contents;
@@ -127,6 +124,7 @@ private:
     void read_local_file_for_response();
     Optional<LocalFileRoot> root_of_local_file(ByteString const& canonical_path) const;
     void did_read_local_file_for_response(ErrorOr<LocalFile>);
+    void read_web_ui_page_for_response();
 
     void determine_the_origin_of_the_response();
     bool reported_urls_match_the_response_url(URL::URL const&) const;
@@ -139,6 +137,9 @@ private:
     Web::HTML::NavigationPopulationRequest m_request;
     // The URL the request was made for, before the process that fetched the response reported where it ended up.
     URL::URL m_requested_url;
+    // An unforgeable capability derived from the UI process's requested URL, never from a population result.
+    Optional<String> m_authorized_web_ui_host;
+    bool m_web_ui_response_is_trusted { false };
     LocalFileAccess m_local_file_access;
     Optional<LocalFileRoot> m_local_file_root;
     Optional<Web::HTML::NavigationPopulationResult> m_result;

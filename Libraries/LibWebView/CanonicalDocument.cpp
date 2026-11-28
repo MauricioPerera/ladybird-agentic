@@ -12,13 +12,12 @@
 #include <LibWebView/CanonicalWindow.h>
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebContentPage.h>
-#include <LibWebView/WebUI.h>
 
 namespace WebView {
 
-NonnullRefPtr<CanonicalDocument> CanonicalDocument::create(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin origin, NonnullRefPtr<CanonicalBrowsingContext> browsing_context, NonnullRefPtr<CanonicalWindow> relevant_global_object, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, IsInitialAboutBlank is_initial_about_blank)
+NonnullRefPtr<CanonicalDocument> CanonicalDocument::create(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin origin, NonnullRefPtr<CanonicalBrowsingContext> browsing_context, NonnullRefPtr<CanonicalWindow> relevant_global_object, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, Optional<String> web_ui_host, IsInitialAboutBlank is_initial_about_blank)
 {
-    auto document = adopt_ref(*new CanonicalDocument(id, move(creation_url), move(origin), move(browsing_context), move(relevant_global_object), active_sandboxing_flag_set, is_initial_about_blank));
+    auto document = adopt_ref(*new CanonicalDocument(id, move(creation_url), move(origin), move(browsing_context), move(relevant_global_object), active_sandboxing_flag_set, move(web_ui_host), is_initial_about_blank));
 
     // https://html.spec.whatwg.org/multipage/document-lifecycle.html#initialise-the-document-object
     // 10. Set window's associated Document to document.
@@ -34,7 +33,7 @@ NonnullRefPtr<CanonicalDocument> CanonicalDocument::create(Web::HTML::CrossProce
     return document;
 }
 
-CanonicalDocument::CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin origin, NonnullRefPtr<CanonicalBrowsingContext> browsing_context, NonnullRefPtr<CanonicalWindow> relevant_global_object, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, IsInitialAboutBlank is_initial_about_blank)
+CanonicalDocument::CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin origin, NonnullRefPtr<CanonicalBrowsingContext> browsing_context, NonnullRefPtr<CanonicalWindow> relevant_global_object, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, Optional<String> web_ui_host, IsInitialAboutBlank is_initial_about_blank)
     : m_id(id)
     , m_creation_url(move(creation_url))
     , m_origin(move(origin))
@@ -42,11 +41,8 @@ CanonicalDocument::CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL crea
     , m_relevant_global_object(move(relevant_global_object))
     , m_active_sandboxing_flag_set(active_sandboxing_flag_set)
     , m_is_initial_about_blank(is_initial_about_blank)
+    , m_web_ui_host(move(web_ui_host))
 {
-    if (m_creation_url.scheme() == "about"sv && m_creation_url.path_segment_count() == 1) {
-        if (auto page = WebUI::page_for_host(m_creation_url.path_segments().first()); page.has_value() && page->type != WebUI::PageType::Static)
-            m_web_ui_host = MUST(String::from_utf8(page->host));
-    }
 }
 
 CanonicalDocument::~CanonicalDocument() = default;

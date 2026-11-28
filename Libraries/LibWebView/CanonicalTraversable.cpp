@@ -1437,7 +1437,7 @@ void CanonicalTraversable::did_finish_history_navigation_params_creation(WebCont
     }
     auto loader = creating->loader;
     changing_navigable->population = ChangingNavigable::AcquiringResponseBody { loader };
-    loader->refuse_made_up_local_file_urls(source_page.client(), result);
+    loader->refuse_made_up_privileged_urls(source_page.client(), result);
     loader->did_finish_navigation_params_creation(move(result));
     loader->acquire_response_body(source_page.client(), [this, operation_id, navigable_id](bool succeeded) {
         auto* operation = find_history_operation(operation_id);
@@ -2156,6 +2156,7 @@ void CanonicalTraversable::did_attempt_to_populate_the_history_entry_document(We
     auto const& coop = navigable->active_document().opener_policy();
     NavigationLoader::ResponseDocument response_document {
         .is_inline_content = false,
+        .web_ui_host = navigable->active_document().web_ui_host(),
         .coop_enforcement_result = { .url = history_entry->url, .origin = *initiator_origin, .opener_policy = coop },
         .response_url = history_entry->url,
         .request_current_url = {},

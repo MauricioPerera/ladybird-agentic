@@ -33,7 +33,7 @@ public:
         Yes,
     };
 
-    static NonnullRefPtr<CanonicalDocument> create(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin, NonnullRefPtr<CanonicalBrowsingContext>, NonnullRefPtr<CanonicalWindow>, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, IsInitialAboutBlank);
+    static NonnullRefPtr<CanonicalDocument> create(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin, NonnullRefPtr<CanonicalBrowsingContext>, NonnullRefPtr<CanonicalWindow>, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, Optional<String> web_ui_host, IsInitialAboutBlank);
 
     ~CanonicalDocument();
 
@@ -106,14 +106,13 @@ public:
     Optional<LocalFileRoot> const& local_file_root() const { return m_local_file_root; }
     void determine_whether_it_is_local_file_content(BlobURLStore const*, Optional<LocalFileRoot> root_of_read_file);
 
-    // The host of the WebUI the document displays, if it was created from the about: URL of a page with a channel to
-    // the UI process.
+    // The host of the WebUI the document displays, if the UI process authorized and supplied its privileged response.
     Optional<String> const& web_ui_host() const { return m_web_ui_host; }
 
     void make_active();
 
 private:
-    CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin, NonnullRefPtr<CanonicalBrowsingContext>, NonnullRefPtr<CanonicalWindow>, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, IsInitialAboutBlank);
+    CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL creation_url, URL::Origin, NonnullRefPtr<CanonicalBrowsingContext>, NonnullRefPtr<CanonicalWindow>, Web::HTML::SandboxingFlagSet active_sandboxing_flag_set, Optional<String> web_ui_host, IsInitialAboutBlank);
 
     Web::HTML::CrossProcessId m_id;
     URL::URL m_creation_url;

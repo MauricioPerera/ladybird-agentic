@@ -2856,7 +2856,7 @@ void WebContentPage::did_finish_navigation_params_creation(Web::HTML::CrossProce
     auto loader = move(creating->loader);
     ongoing_navigation->state = CanonicalNavigation::AcquiringResponseBody { move(loader) };
     NonnullRefPtr acquiring_loader = *ongoing_navigation->loader();
-    acquiring_loader->refuse_made_up_local_file_urls(client(), *result);
+    acquiring_loader->refuse_made_up_privileged_urls(client(), *result);
     acquiring_loader->did_finish_navigation_params_creation(result.release_value());
     if (ongoing_navigation->history_entry->update_from_descriptor(Web::HTML::create_session_history_entry_descriptor(acquiring_loader->request().history_entry, 0)).is_error()) {
         auto rejected_result = acquiring_loader->take_result();
