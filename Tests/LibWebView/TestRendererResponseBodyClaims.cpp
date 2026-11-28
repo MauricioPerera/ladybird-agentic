@@ -10,6 +10,7 @@
 #include <LibCore/Environment.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
+#include <LibCore/Resource.h>
 #include <LibCore/Socket.h>
 #include <LibCore/TCPServer.h>
 #include <LibFileSystem/FileSystem.h>
@@ -18,6 +19,7 @@
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
 #include <LibTest/TestCase.h>
+#include <LibURL/InternalURLs.h>
 #include <LibURL/Parser.h>
 #include <LibURL/Site.h>
 #include <LibWebCommon/HTML/NavigationParamsDescriptor.h>
@@ -613,6 +615,85 @@ TEST_CASE(made_up_file_url_does_not_reach_a_navigation)
     EXPECT_NE(navigation->url.scheme(), "file"sv);
 }
 
+// A process cannot turn an ordinary navigation into a privileged WebUI navigation by reporting the WebUI's URL.
+TEST_CASE(made_up_web_ui_url_becomes_an_error_document)
+{
+    TestFixture fixture;
+    auto view = fixture.create_view();
+    auto loader = WebView::NavigationLoader::create(population_request_for(*view, URL::about_blank(), Utf16String::from_utf8(generate_random_uuid())));
+    auto result = result_with_response_body_of(view->page().client().request_server_site_bindings().client_id().value(), 0);
+    auto& navigation_params = result.navigation_params.get<Web::HTML::NavigationParamsDescriptor>();
+    navigation_params.response.url_list = { URL::about_vault() };
+    navigation_params.response.body = MUST(ByteBuffer::copy("<script>window.ladybird.sendMessage('loadState')</script>"sv.bytes()));
+
+    loader->refuse_made_up_privileged_urls(view->page().client(), result);
+
+    EXPECT(result.navigation_params.has<Web::HTML::NavigationParamsNullOrError>());
+    EXPECT(!result.redirected_url.has_value());
+}
+
+// The UI process replaces every renderer-provided part of an authorized WebUI response with its bundled page.
+TEST_CASE(ui_process_supplies_authorized_web_ui_response)
+{
+    TestFixture fixture;
+    auto view = fixture.create_view();
+    auto loader = WebView::NavigationLoader::create(population_request_for(*view, URL::about_vault(), Utf16String::from_utf8(generate_random_uuid())));
+    auto result = result_with_response_body_of(view->page().client().request_server_site_bindings().client_id().value(), 0);
+    auto& reported_params = result.navigation_params.get<Web::HTML::NavigationParamsDescriptor>();
+    reported_params.response.url_list = { URL::about_vault() };
+    reported_params.response.headers = {
+        { "Content-Type"sv, "text/plain"sv },
+        { "X-Renderer-Supplied"sv, "true"sv },
+    };
+    reported_params.response.body = MUST(ByteBuffer::copy("<script>window.ladybird.sendMessage('loadState')</script>"sv.bytes()));
+
+    loader->refuse_made_up_privileged_urls(view->page().client(), result);
+    loader->did_finish_navigation_params_creation(move(result));
+    Optional<bool> acquired;
+    loader->acquire_response_body(view->page().client(), [&](bool succeeded) { acquired = succeeded; });
+
+    EXPECT(acquired.value_or(false));
+    auto document = loader->response_document();
+    VERIFY(document.has_value());
+    VERIFY(document->web_ui_host.has_value());
+    EXPECT_EQ(*document->web_ui_host, "vault"sv);
+
+    auto trusted_resource = MUST(Core::Resource::load_from_uri("resource://ladybird/about-pages/vault.html"sv));
+    auto trusted_result = loader->take_result();
+    auto const& trusted_response = trusted_result.navigation_params.get<Web::HTML::NavigationParamsDescriptor>().response;
+    VERIFY(trusted_response.body.has<ByteBuffer>());
+    EXPECT_EQ(trusted_response.body.get<ByteBuffer>().bytes(), trusted_resource->data());
+    auto trusted_headers = HTTP::HeaderList::create(trusted_response.headers);
+    EXPECT(!trusted_headers->get("X-Renderer-Supplied"sv).has_value());
+    EXPECT_EQ(trusted_headers->get("Content-Type"sv).value_or({}), "text/html; charset=UTF-8"sv);
+}
+
+// Static internal pages have no privileged channel, so their existing renderer-loaded response remains intact.
+TEST_CASE(static_about_page_keeps_its_response)
+{
+    TestFixture fixture;
+    auto view = fixture.create_view();
+    auto loader = WebView::NavigationLoader::create(population_request_for(*view, URL::about_newtab(), Utf16String::from_utf8(generate_random_uuid())));
+    auto result = result_with_response_body_of(view->page().client().request_server_site_bindings().client_id().value(), 0);
+    auto& reported_params = result.navigation_params.get<Web::HTML::NavigationParamsDescriptor>();
+    reported_params.response.url_list = { URL::about_newtab() };
+    reported_params.response.body = MUST(ByteBuffer::copy("<p>Static internal page</p>"sv.bytes()));
+
+    loader->refuse_made_up_privileged_urls(view->page().client(), result);
+    loader->did_finish_navigation_params_creation(move(result));
+    Optional<bool> acquired;
+    loader->acquire_response_body(view->page().client(), [&](bool succeeded) { acquired = succeeded; });
+
+    EXPECT(acquired.value_or(false));
+    auto document = loader->response_document();
+    VERIFY(document.has_value());
+    EXPECT(!document->web_ui_host.has_value());
+    auto kept_result = loader->take_result();
+    auto const& kept_body = kept_result.navigation_params.get<Web::HTML::NavigationParamsDescriptor>().response.body;
+    VERIFY(kept_body.has<ByteBuffer>());
+    EXPECT_EQ(StringView { kept_body.get<ByteBuffer>() }, "<p>Static internal page</p>"sv);
+}
+
 // The process running a navigation's population steps can host web content, so it does not read the local file that a
 // file: URL names. The UI process reads the file of a navigation it admitted, the user's choice or one under the roots
 // the navigation came with, for the process creating the document. It reads no other file, and ignores any body the
@@ -638,7 +719,7 @@ TEST_CASE(ui_process_reads_the_local_file_of_a_navigation)
         navigation_params.response.url_list = { local_file_url };
         navigation_params.response.body = MUST(ByteBuffer::copy("Made up by the process."sv.bytes()));
         report(navigation_params);
-        loader->refuse_made_up_local_file_urls(view->page().client(), result);
+        loader->refuse_made_up_privileged_urls(view->page().client(), result);
         loader->did_finish_navigation_params_creation(move(result));
 
         Optional<bool> acquired;

@@ -489,7 +489,7 @@ NonnullRefPtr<CanonicalDocument> CanonicalNavigable::create_and_initialize_a_doc
     //    URL: creationURL
     // NB: The process hosting window's agent creates the document, with its other fields, and runs the remaining steps.
     //     The UI process holds the embedder policy of the document's policy container.
-    auto document = CanonicalDocument::create(navigation_params.document_id, move(creation_url), navigation_params.origin, browsing_context, window.release_nonnull(), navigation_params.final_sandboxing_flag_set, CanonicalDocument::IsInitialAboutBlank::No);
+    auto document = CanonicalDocument::create(navigation_params.document_id, move(creation_url), navigation_params.origin, browsing_context, window.release_nonnull(), navigation_params.final_sandboxing_flag_set, navigation_params.web_ui_host, CanonicalDocument::IsInitialAboutBlank::No);
     document->set_opener_policy(navigation_params.opener_policy);
     document->set_embedder_policy(navigation_params.embedder_policy);
     document->set_permissions_policy(permissions_policy.release_value());

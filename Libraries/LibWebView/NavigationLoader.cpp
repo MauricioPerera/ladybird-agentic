@@ -8,6 +8,7 @@
 #include <LibCore/Directory.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
+#include <LibCore/Resource.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
@@ -36,9 +37,28 @@
 #include <LibWebView/Utilities.h>
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebContentPage.h>
+#include <LibWebView/WebUI.h>
 #include <LibWebView/WorkerAgentManager.h>
 
 namespace WebView {
+
+static Optional<String> privileged_web_ui_host_for_url(URL::URL const& url)
+{
+    if (url.scheme() != "about"sv || url.path_segment_count() != 1)
+        return {};
+    auto page = WebUI::page_for_host(url.path_segments().first());
+    if (!page.has_value() || page->type == WebUI::PageType::Static)
+        return {};
+    return MUST(String::from_utf8(page->host));
+}
+
+NavigationLoader::NavigationLoader(Web::HTML::NavigationPopulationRequest request, LocalFileAccess local_file_access)
+    : m_request(move(request))
+    , m_requested_url(m_request.history_entry.url)
+    , m_authorized_web_ui_host(privileged_web_ui_host_for_url(m_requested_url))
+    , m_local_file_access(move(local_file_access))
+{
+}
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#attempt-to-populate-the-history-entry's-document
 // The document that the task queued by step 5 creates, if it creates one.
@@ -100,6 +120,7 @@ Optional<NavigationLoader::ResponseDocument> NavigationLoader::response_document
 
     return ResponseDocument {
         .is_inline_content = false,
+        .web_ui_host = m_web_ui_response_is_trusted ? m_authorized_web_ui_host : Optional<String> {},
         .coop_enforcement_result = fetched_navigation_params.coop_enforcement_result,
         // The COOP enforcement result still describes the source document until an opener policy is enforced.
         // Placement uses the response's final URL, including any redirects.
@@ -175,27 +196,45 @@ NavigationLoader::~NavigationLoader()
     release_response_body();
 }
 
-// NB: The process that fetched the response reports the URLs it reached. Fetching never redirects a request to a
-//     file: URL, so one among them other than the file: URL of a navigation the UI process admitted is made up: the
-//     document it would create could read local files, and the UI process would read the file it names. Such a
-//     navigation creates an error document instead.
-void NavigationLoader::refuse_made_up_local_file_urls(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult& result) const
+// NB: The process that fetched the response reports the URLs it reached. Fetching never redirects a request to a file:
+//     URL or a privileged WebUI URL. A local file is authorized only by the admitted file: URL. A WebUI is authorized
+//     only by the UI-owned URL captured with this loader, and has no renderer-controlled redirects. A conflicting
+//     report could otherwise make attacker-controlled content local or privileged, so it creates an error document.
+void NavigationLoader::refuse_made_up_privileged_urls(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult& result) const
 {
-    auto is_made_up_file_url = [&](URL::URL const& url) {
-        if (url.scheme() != "file"sv)
-            return false;
-        return m_requested_url.scheme() != "file"sv || !url.equals(m_requested_url, URL::ExcludeFragment::Yes);
+    auto is_unauthorized_url = [&](URL::URL const& url) {
+        if (m_authorized_web_ui_host.has_value())
+            return !url.equals(m_requested_url, URL::ExcludeFragment::Yes);
+        if (url.scheme() == "file"sv)
+            return m_requested_url.scheme() != "file"sv || !url.equals(m_requested_url, URL::ExcludeFragment::Yes);
+        return privileged_web_ui_host_for_url(url).has_value();
     };
-    auto names_a_made_up_local_file = result.redirected_url.has_value() && is_made_up_file_url(*result.redirected_url);
+    auto names_an_unauthorized_url = result.redirected_url.has_value() && is_unauthorized_url(*result.redirected_url);
     if (auto const* navigation_params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>()) {
-        names_a_made_up_local_file |= any_of(navigation_params->response.url_list, is_made_up_file_url);
+        names_an_unauthorized_url |= any_of(navigation_params->response.url_list, is_unauthorized_url);
         if (navigation_params->request.has_value())
-            names_a_made_up_local_file |= any_of(navigation_params->request->url_list, is_made_up_file_url);
+            names_an_unauthorized_url |= any_of(navigation_params->request->url_list, is_unauthorized_url);
     }
-    if (names_a_made_up_local_file) {
+    if (names_an_unauthorized_url) {
         discard(population_worker, result);
         result.navigation_params = Web::HTML::NavigationParamsNullOrError {};
         result.redirected_url.clear();
+        return;
+    }
+
+    // The UI process will replace every renderer-controlled part of an authorized WebUI response below. Stop a
+    // renderer-owned body now, before replacing its handle, and canonicalize every URL representation to the admitted
+    // destination so no renderer-selected fragment or creation URL survives.
+    if (m_authorized_web_ui_host.has_value()) {
+        discard(population_worker, result);
+        result.redirected_url.clear();
+        if (auto* navigation_params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>()) {
+            navigation_params->response.url_list = { m_requested_url };
+            navigation_params->response.headers.clear();
+            navigation_params->response.body = Empty {};
+            if (navigation_params->request.has_value())
+                navigation_params->request->url_list = { m_requested_url };
+        }
     }
 }
 
@@ -397,6 +436,11 @@ void NavigationLoader::acquire_response_body(WebContentClient const& population_
 
     m_completion_steps = move(completion_steps);
 
+    if (m_authorized_web_ui_host.has_value()) {
+        read_web_ui_page_for_response();
+        return;
+    }
+
     auto const* body_handle = response_body_handle(*m_result);
     if (auto const* navigation_params = m_result->navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>()) {
         auto const& response_url = navigation_params->response.url_list.is_empty() ? m_request.history_entry.url : navigation_params->response.url_list.last();
@@ -437,6 +481,42 @@ void NavigationLoader::acquire_response_body(WebContentClient const& population_
     request->set_body_delivery_paused(true);
     set_response_body_callbacks(*request);
     m_response_body_request = request;
+}
+
+// A privileged WebUI response is browser UI, not web content. The UI process reconstructs it from its bundled resource
+// after authenticating the destination with the loader's UI-owned URL, so renderer-provided bytes and headers never
+// enter the process that receives the privileged channel.
+void NavigationLoader::read_web_ui_page_for_response()
+{
+    VERIFY(m_authorized_web_ui_host.has_value());
+
+    auto* navigation_params = m_result->navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>();
+    if (!navigation_params) {
+        did_acquire(true);
+        return;
+    }
+
+    auto resource_uri = MUST(String::formatted("resource://ladybird/about-pages/{}.html", *m_authorized_web_ui_host));
+    auto resource = Core::Resource::load_from_uri(resource_uri);
+    if (resource.is_error()) {
+        m_result->navigation_params = Web::HTML::NavigationParamsNullOrError { Utf16String::formatted("Unable to load WebUI response: {}", resource.error()) };
+        did_acquire(true);
+        return;
+    }
+
+    m_request.history_entry.url = m_requested_url;
+    m_result->redirected_url.clear();
+    if (navigation_params->request.has_value())
+        navigation_params->request->url_list = { m_requested_url };
+    navigation_params->response = Web::HTML::NavigationResponseDescriptor {
+        .url_list = { m_requested_url },
+        .status = 200,
+        .status_message = "OK"sv,
+        .headers = { { "Content-Type"sv, "text/html; charset=UTF-8"sv } },
+        .body = resource.value()->clone_data(),
+    };
+    m_web_ui_response_is_trusted = true;
+    did_acquire(true);
 }
 
 // NB: The process that fetched a navigation's response to a file: URL ran the navigation's population steps for a

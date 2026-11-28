@@ -102,7 +102,7 @@ CanonicalBrowsingContext::BrowsingContextAndDocument CanonicalBrowsingContext::c
     //     permissions policy: permissionsPolicy
     //     active sandboxing flag set: sandboxFlags
     //     is initial about:blank: true
-    auto document = CanonicalDocument::create(document_id, URL::about_blank(), origin, browsing_context, window, sandbox_flags, CanonicalDocument::IsInitialAboutBlank::Yes);
+    auto document = CanonicalDocument::create(document_id, URL::about_blank(), origin, browsing_context, window, sandbox_flags, {}, CanonicalDocument::IsInitialAboutBlank::Yes);
     document->set_permissions_policy(move(permissions_policy));
 
     // 19. If creator is non-null:
