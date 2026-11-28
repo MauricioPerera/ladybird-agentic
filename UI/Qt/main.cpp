@@ -15,6 +15,7 @@
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/HubConnection.h>
+#include <UI/Qt/StringUtils.h>
 #include <UI/Qt/SystemAppearance.h>
 #if defined(LADYBIRD_QT_HAVE_POSITIONING)
 #    include <UI/Qt/GeolocationProviderQt.h>
@@ -120,7 +121,16 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         };
 
         auto configuration = app->configuration_for_new_window();
-        if (auto* restored_window = app->restore_previous_session(configuration)) {
+        if (browser_options.app_mode.has_value()) {
+            auto const& app_mode = *browser_options.app_mode;
+            configuration.x = {};
+            configuration.y = {};
+            configuration.width = Web::DevicePixels { app_mode.width };
+            configuration.height = Web::DevicePixels { app_mode.height };
+            configuration.maximized = false;
+            auto& window = app->new_window(browser_options.urls, configuration);
+            window.setWindowTitle(qstring_from_ak_string(app_mode.title));
+        } else if (auto* restored_window = app->restore_previous_session(configuration)) {
             // A whole restored session replaces the usual startup tab, so only the URLs the user passed open with it.
             // With only pinned tabs restored, the usual startup tabs open after them. A restart passes on the URLs
             // that the browser was started with, which are among the restored tabs already.

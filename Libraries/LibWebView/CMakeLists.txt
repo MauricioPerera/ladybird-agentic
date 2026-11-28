@@ -1,5 +1,9 @@
 set(SOURCES
     AccessibilityTreeManager.cpp
+    AppMode/AppAccountRegistry.cpp
+    AppMode/AppKVStore.cpp
+    AppMode/AppManifest.cpp
+    AppMode/AppModeServer.cpp
     Application.cpp
     ApplyHistoryStep.cpp
     AudioServerActivity.cpp

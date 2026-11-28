@@ -52,6 +52,9 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
 #include <LibWebCommon/WebView/ConsoleOutput.h>
+#include <LibWebView/AppMode/AppAccountRegistry.h>
+#include <LibWebView/AppMode/AppManifest.h>
+#include <LibWebView/AppMode/AppModeServer.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Automation/FlowRunner.h>
 #include <LibWebView/Automation/FlowStore.h>
@@ -143,6 +146,42 @@ static constexpr size_t maximum_combined_content_blocker_list_size = 256 * MiB;
 Application* Application::s_the = nullptr;
 
 static constexpr double default_display_refresh_rate = 60.0;
+
+static JsonObject build_async_eval_payload(String script, u32 timeout_ms = 10000)
+{
+    static constexpr auto wrapper = R"JS(
+const userScript = arguments[0];
+const timeoutMs = Math.max(100, Math.min(30000, Number(arguments[1]) || 10000));
+const done = arguments[arguments.length - 1];
+let settled = false;
+const finish = (res) => {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timer);
+  try { done(res); } catch (e) {}
+};
+const timer = setTimeout(() => {
+  finish({ __lb_eval_err: 'Script execution timed out after ' + timeoutMs + 'ms' });
+}, timeoutMs);
+try {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction(userScript);
+  Promise.resolve(fn.call(globalThis)).then(
+    (val) => finish({ __lb_eval_ok: true, value: val === undefined ? null : val }),
+    (err) => finish({ __lb_eval_err: String(err && err.stack ? err.stack : (err && err.message ? err.message : err)) })
+  );
+} catch (err) {
+  finish({ __lb_eval_err: String(err && err.message ? err.message : err) });
+}
+)JS"sv;
+    JsonArray args;
+    args.must_append(move(script));
+    args.must_append(static_cast<u64>(timeout_ms));
+    JsonObject payload;
+    payload.set("script"sv, MUST(String::from_utf8(wrapper)));
+    payload.set("args"sv, move(args));
+    return payload;
+}
 
 static double sanitized_display_refresh_rate(double refresh_rate)
 {
@@ -252,9 +291,12 @@ OwnPtr<MediaSessionPlatformBackend> Application::create_media_session_platform_b
 Application::~Application()
 {
     m_mcp.clear();
+    remove_app_runtime_descriptor();
     fail_all_mcp_requests("Browser shutting down"sv);
     if (m_flow_runner)
         m_flow_runner->cancel_all_runs("Browser shutting down"sv);
+    if (m_app_flow_runner)
+        m_app_flow_runner->cancel_all_runs("Browser shutting down"sv);
     m_extension_manager.clear();
     m_extension_store.clear();
     m_skill_store.clear();
@@ -265,6 +307,9 @@ Application::~Application()
     m_container_sessions.remove_all_matching([](auto const& key, auto const&) {
         return is_ephemeral_container_id(key);
     });
+    m_app_flow_runner.clear();
+    m_app_flow_store.clear();
+    m_app_service_inflight_requests.clear();
     m_flow_runner.clear();
     m_flow_store.clear();
     m_headless_state.clear();
@@ -392,9 +437,11 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     Optional<StringView> mcp_allowed_containers_arg;
     Optional<StringView> mcp_allowed_domains_arg;
     Optional<StringView> mcp_blocked_domains_arg;
+    bool mcp_allow_private_network = false;
     bool mcp_disable_eval_js = false;
     bool mcp_allow_eval_js = false;
     bool mcp_disable_webmcp = false;
+    bool mcp_webmcp_only = false;
     bool mcp_disable_screenshots = false;
     bool mcp_redact_screenshot_media = false;
     bool mcp_auto_approve = false;
@@ -443,6 +490,10 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool collect_garbage_on_every_allocation = false;
     bool disable_scrollbar_painting = false;
     bool file_scheme_urls_have_tuple_origins = false;
+    Optional<StringView> app_manifest_path;
+    Optional<StringView> app_dir_path;
+    Optional<StringView> app_url;
+    Optional<StringView> app_account;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("The Ladybird web browser :^)");
@@ -617,13 +668,19 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(mcp_allowed_containers_arg, "Comma-separated list of tab container IDs that MCP may open or access", "mcp-allowed-containers", 0, "containers");
     args_parser.add_option(mcp_allowed_domains_arg, "Comma-separated domain allowlist for MCP navigation (supports *.domain.com)", "mcp-allowed-domains", 0, "domains");
     args_parser.add_option(mcp_blocked_domains_arg, "Comma-separated domain denylist for MCP navigation (supports *.domain.com)", "mcp-blocked-domains", 0, "domains");
+    args_parser.add_option(mcp_allow_private_network, "Allow MCP agents to navigate to localhost/private/LAN IP addresses (disables default SSRF protection)", "mcp-allow-private-network", 0);
     args_parser.add_option(mcp_disable_eval_js, "Keep the eval_js MCP tool disabled (default: disabled)", "mcp-disable-eval-js", 0);
     args_parser.add_option(mcp_allow_eval_js, "Explicitly enable the eval_js MCP tool (disabled by default for prompt-injection hardening)", "mcp-allow-eval-js", 0);
     args_parser.add_option(mcp_disable_webmcp, "Disable WebMCP call_page_tool execution", "mcp-disable-webmcp", 0);
+    args_parser.add_option(mcp_webmcp_only, "Restrict MCP server to WebMCP-only privacy mode (blocks DOM reads, screenshots, eval_js, navigation, console/network logs; allows only list_tabs, get_active_tab, list_page_tools, call_page_tool)", "mcp-webmcp-only", 0);
     args_parser.add_option(mcp_disable_screenshots, "Disable MCP take_screenshot tool and flow screenshot steps for visual prompt-injection hardening", "mcp-disable-screenshots", 0);
     args_parser.add_option(mcp_redact_screenshot_media, "Automatically redact untrusted visual media (<img>, <video>, <canvas>, <svg>, CSS backgrounds) during MCP screenshots", "mcp-redact-screenshot-media", 0);
     args_parser.add_option(mcp_auto_approve, "Auto-approve sensitive MCP actions (uploads, blind logins, consequential WebMCP tools, egress decisions, extension installs) without UI prompt in --headless mode only (ignored with GUI)", "mcp-auto-approve", 0);
     args_parser.add_option(mcp_max_tabs, "Maximum concurrent MCP-accessible tabs allowed (default: 16)", "mcp-max-tabs", 0, "count");
+    args_parser.add_option(app_manifest_path, "Launch Ladybird in App Mode using the specified ladybird-app.json manifest", "app-manifest", 0, "path");
+    args_parser.add_option(app_dir_path, "Launch Ladybird in App Mode serving a local web app directory", "app-dir", 0, "directory");
+    args_parser.add_option(app_url, "Launch Ladybird in chromeless App Mode for an http/https URL", "app", 0, "url");
+    args_parser.add_option(app_account, "Select isolated account profile for App Mode (e.g. default, personal, work)", "account", 0, "id");
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -638,6 +695,39 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     create_platform_arguments(args_parser);
     args_parser.parse(m_arguments);
+
+    size_t app_mode_flag_count = (app_manifest_path.has_value() ? 1 : 0)
+        + (app_dir_path.has_value() ? 1 : 0)
+        + (app_url.has_value() ? 1 : 0);
+    if (app_mode_flag_count > 1)
+        return Error::from_string_literal("Only one of --app-manifest, --app-dir, or --app may be specified");
+
+    if (app_account.has_value()) {
+        if (app_mode_flag_count == 0)
+            return Error::from_string_literal("--account requires --app-manifest, --app-dir, or --app");
+        if (!AppManifest::is_valid_app_id(*app_account))
+            return Error::from_string_literal("--account must start with [a-z0-9] and contain only [a-z0-9_-] (1..64 chars)");
+    }
+
+    String effective_account_id = app_account.has_value() ? TRY(String::from_utf8(*app_account)) : "default"_string;
+    String effective_account_label = AppAccountRegistry::default_label_for_account(effective_account_id);
+    ByteString canonical_app_target_flag;
+    ByteString canonical_app_target_value;
+
+    Optional<AppManifest> app_manifest;
+    if (app_manifest_path.has_value()) {
+        canonical_app_target_flag = "--app-manifest"sv;
+        canonical_app_target_value = TRY(FileSystem::real_path(ByteString { *app_manifest_path }));
+        app_manifest = TRY(AppManifest::load_from_file(canonical_app_target_value));
+    } else if (app_dir_path.has_value()) {
+        canonical_app_target_flag = "--app-dir"sv;
+        canonical_app_target_value = TRY(FileSystem::real_path(ByteString { *app_dir_path }));
+        app_manifest = TRY(AppManifest::load_from_directory(canonical_app_target_value));
+    } else if (app_url.has_value()) {
+        canonical_app_target_flag = "--app"sv;
+        canonical_app_target_value = ByteString { *app_url };
+        app_manifest = TRY(AppManifest::from_remote_url(*app_url));
+    }
 
     m_stats_log = TRY(Core::StatsLog::create(stats_log_directory, "Ladybird"sv));
 
@@ -700,8 +790,10 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .mcp_allowed_containers = {},
         .mcp_allowed_domains = {},
         .mcp_blocked_domains = {},
+        .mcp_allow_private_network = mcp_allow_private_network,
         .mcp_disable_eval_js = !mcp_allow_eval_js || mcp_disable_eval_js,
         .mcp_disable_webmcp = mcp_disable_webmcp,
+        .mcp_webmcp_only = mcp_webmcp_only,
         .mcp_disable_screenshots = mcp_disable_screenshots,
         .mcp_redact_screenshot_media = mcp_redact_screenshot_media,
         .mcp_auto_approve = effective_mcp_auto_approve,
@@ -737,6 +829,25 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     parse_csv_list(mcp_allowed_domains_arg, m_browser_options.mcp_allowed_domains);
     parse_csv_list(mcp_blocked_domains_arg, m_browser_options.mcp_blocked_domains);
     m_browser_options.mcp_max_tabs = max<size_t>(1, m_browser_options.mcp_max_tabs);
+
+    if (app_manifest.has_value()) {
+        m_browser_options.app_mode = app_manifest->to_options(effective_account_id, effective_account_label);
+        if (app_manifest->mcp.enabled && !m_browser_options.mcp_port.has_value())
+            m_browser_options.mcp_port = app_manifest->mcp.port.value_or(0);
+        if (!app_manifest->mcp.allow_webmcp)
+            m_browser_options.mcp_disable_webmcp = true;
+        if (app_manifest->mcp.access == AppMCPAccess::WebMCPOnly)
+            m_browser_options.mcp_webmcp_only = true;
+        if (!app_manifest->is_remote() && m_browser_options.mcp_allowed_domains.is_empty()) {
+            m_browser_options.mcp_allowed_domains.append("127.0.0.1"_string);
+            for (auto const& domain : app_manifest->mcp.allowed_domains)
+                m_browser_options.mcp_allowed_domains.append(domain);
+        }
+    }
+    if (m_browser_options.mcp_webmcp_only) {
+        m_browser_options.mcp_disable_screenshots = true;
+        m_browser_options.mcp_disable_eval_js = true;
+    }
     if (window_width.has_value())
         m_browser_options.window_width = *window_width;
     if (window_height.has_value())
@@ -783,11 +894,18 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     };
 
     create_platform_options(m_browser_options, m_request_server_options, m_web_content_options);
+
+    String app_profile_name;
+    if (app_manifest.has_value() && !profile_name.has_value() && !profile_path.has_value() && !temporary_profile) {
+        app_profile_name = AppManifest::profile_name_for_account(app_manifest->id, effective_account_id);
+        profile_name = app_profile_name.bytes_as_string_view();
+    }
+
     TRY(create_profile(profile_name, profile_path, temporary_profile));
 
     // Browsers launched by WebDriver are driven directly and must never join an existing browser process. A browser
     // that logs process statistics must not join one either, since that browser would not sample them.
-    bool coordinate_browser_process = !headless_mode.has_value() && !webdriver_browser_endpoint.has_value() && !m_stats_log && should_coordinate_browser_process();
+    bool coordinate_browser_process = !headless_mode.has_value() && !webdriver_browser_endpoint.has_value() && !m_stats_log && !app_manifest.has_value() && should_coordinate_browser_process();
 
     // Synchronous IPC used to forward URLs to an existing browser process requires an event loop.
     if (coordinate_browser_process)
@@ -838,7 +956,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     rebuild_content_blocker_list_paths();
 
     if (!m_settings->first_run_complete() && !m_browser_options.headless_mode.has_value()
-        && !m_browser_options.webdriver_browser_endpoint.has_value()) {
+        && !m_browser_options.webdriver_browser_endpoint.has_value()
+        && !app_manifest.has_value()) {
         if (m_browser_options.raw_urls.is_empty())
             m_browser_options.urls = { URL::about_welcome() };
         else if (!m_browser_options.urls.contains_slow(URL::about_welcome()))
@@ -879,6 +998,405 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     if (!m_event_loop)
         m_event_loop = &create_platform_event_loop();
+
+    if (app_manifest.has_value()) {
+        Optional<ByteString> accounts_registry_path;
+        if (!profile().is_temporary()) {
+            m_app_runtime_descriptor_path = LexicalPath::join(
+                m_instance_data_directory,
+                "AppRuntime"sv,
+                ByteString::formatted("{}--{}.json", app_manifest->id, effective_account_id))
+                                                .string();
+            m_app_runtime_started_at_ms = UnixDateTime::now().milliseconds_since_epoch();
+
+            accounts_registry_path = LexicalPath::join(m_instance_data_directory, "AppAccounts"sv, ByteString::formatted("{}.json", app_manifest->id)).string();
+            auto active_record = AppAccountRegistry::upsert(*accounts_registry_path, app_manifest->id, effective_account_id, {}, true);
+            if (!active_record.is_error()) {
+                effective_account_label = active_record.value().label;
+            } else {
+                warnln("Failed updating AppAccounts registry '{}': {}", *accounts_registry_path, active_record.error());
+            }
+        }
+        if (m_browser_options.app_mode.has_value()) {
+            m_browser_options.app_mode->account_id = effective_account_id;
+            m_browser_options.app_mode->account_label = effective_account_label;
+        }
+
+        if (app_manifest->is_remote()) {
+            m_browser_options.urls = { *app_manifest->remote_url };
+        } else {
+            auto app_data_dir = LexicalPath::join(profile().paths().data, "AppData"sv, app_manifest->id).string();
+            auto resolved_profile_name = String::from_utf8_with_replacement_character(profile().identifier());
+            auto effective_manifest = *app_manifest;
+            if (m_browser_options.mcp_webmcp_only)
+                effective_manifest.mcp.access = AppMCPAccess::WebMCPOnly;
+            m_app_mode_server = TRY(AppModeServer::create({
+                .manifest = move(effective_manifest),
+                .data_directory = move(app_data_dir),
+                .account_id = effective_account_id,
+                .account_label = effective_account_label,
+                .profile_name = move(resolved_profile_name),
+                .accounts_registry_path = move(accounts_registry_path),
+                .disable_sql_database = m_browser_options.disable_sql_database == DisableSQLDatabase::Yes,
+                .enable_webmcp_shim = app_manifest->mcp.enabled && app_manifest->mcp.allow_webmcp && !m_browser_options.mcp_disable_webmcp,
+                .mcp_port_provider = [this]() -> Optional<u16> { return this->mcp_port(); },
+                .on_quit_requested = [this]() { quit_for_signal(); },
+                .on_launch_account = [target_flag = canonical_app_target_flag, target_value = canonical_app_target_value](StringView target_account_id) -> ErrorOr<void> {
+                    auto executable = TRY(Core::System::current_executable_path());
+                    Vector<ByteString> arguments;
+                    if (!target_flag.is_empty() && !target_value.is_empty()) {
+                        arguments.append(target_flag);
+                        arguments.append(target_value);
+                    }
+                    arguments.append("--account"sv);
+                    arguments.append(ByteString { target_account_id });
+                    TRY(Core::Process::spawn({
+                        .executable = move(executable),
+                        .new_process_group = true,
+                        .arguments = arguments,
+                    }));
+                    return {};
+                },
+                .on_service_open = [this](StringView service_id, Optional<URL::URL> url, bool activate, bool reuse, Optional<String> container_override) -> ErrorOr<AppServiceTabState> {
+                    auto svc = m_app_mode_server->find_effective_service(service_id);
+                    if (!svc.has_value())
+                        return Error::from_string_literal("Service is not declared in manifest");
+
+                    auto target_url = url.value_or(svc->default_url);
+                    auto service_key = TRY(String::from_utf8(service_id));
+                    String effective_container = container_override.has_value() ? *container_override : svc->container;
+
+                    auto build_state = [&](ViewImplementation const& view) -> AppServiceTabState {
+                        return {
+                            .service_id = service_key,
+                            .tab_id = view.view_id(),
+                            .open = true,
+                            .url = view.url().to_string(),
+                            .title = view.title().to_well_formed_utf8(),
+                            .container = view.container_id(),
+                            .origin_allowed = AppManifest::is_service_origin_allowed(*svc, view.url()),
+                        };
+                    };
+
+                    if (reuse) {
+                        if (auto existing = find_or_adopt_service_view(*svc, effective_container.bytes_as_string_view()); existing.has_value()) {
+                            if (!container_override.has_value() || existing->container_id() == *container_override) {
+                                if (url.has_value())
+                                    existing->load_from_browser_ui(target_url);
+                                if (activate && existing->on_activate_tab)
+                                    existing->on_activate_tab();
+                                return build_state(*existing);
+                            }
+                        }
+                    }
+
+                    auto view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, MCPAccessMode::Full, effective_container);
+                    if (!view.has_value() || view->is_private() == IsPrivate::Yes)
+                        return Error::from_string_literal("UI unavailable to open service tab");
+
+                    m_app_service_tabs.set(service_key, view->view_id());
+                    view->load_from_browser_ui(target_url);
+                    return build_state(*view);
+                },
+                .on_service_focus = [this](StringView service_id) -> ErrorOr<AppServiceTabState> {
+                    auto svc = m_app_mode_server->find_effective_service(service_id);
+                    if (!svc.has_value())
+                        return Error::from_string_literal("Service is not declared in manifest");
+                    auto view = find_or_adopt_service_view(*svc);
+                    if (!view.has_value())
+                        return Error::from_string_literal("Service tab is not open");
+                    if (view->on_activate_tab)
+                        view->on_activate_tab();
+                    if (view->has_traversable() && view->traversable().system_visibility_state() != Web::HTML::VisibilityState::Hidden && !view->traversable().has_system_focus())
+                        view->set_has_system_focus(true);
+                    return AppServiceTabState {
+                        .service_id = TRY(String::from_utf8(service_id)),
+                        .tab_id = view->view_id(),
+                        .open = true,
+                        .url = view->url().to_string(),
+                        .title = view->title().to_well_formed_utf8(),
+                        .container = view->container_id(),
+                        .origin_allowed = AppManifest::is_service_origin_allowed(*svc, view->url()),
+                    };
+                },
+                .on_service_navigate = [this](StringView service_id, URL::URL url) -> ErrorOr<AppServiceTabState> {
+                    auto svc = m_app_mode_server->find_effective_service(service_id);
+                    if (!svc.has_value())
+                        return Error::from_string_literal("Service is not declared in manifest");
+                    auto view = find_or_adopt_service_view(*svc);
+                    if (!view.has_value())
+                        return Error::from_string_literal("Service tab is not open");
+                    view->load_from_browser_ui(url);
+                    return AppServiceTabState {
+                        .service_id = TRY(String::from_utf8(service_id)),
+                        .tab_id = view->view_id(),
+                        .open = true,
+                        .url = url.to_string(),
+                        .title = view->title().to_well_formed_utf8(),
+                        .container = view->container_id(),
+                        .origin_allowed = AppManifest::is_service_origin_allowed(*svc, url),
+                    };
+                },
+                .on_service_close = [this](StringView service_id) -> ErrorOr<bool> {
+                    auto existing_id = m_app_service_tabs.take(service_id);
+                    if (!existing_id.has_value())
+                        return false;
+                    if (auto view = ViewImplementation::find_view_by_id(*existing_id); view.has_value())
+                        view->force_close();
+                    return true;
+                },
+                .on_service_list = [this]() -> Vector<AppServiceTabState> {
+                    Vector<String> stale_keys;
+                    for (auto const& [svc_id, view_id] : m_app_service_tabs) {
+                        if (!ViewImplementation::find_view_by_id(view_id).has_value())
+                            stale_keys.append(svc_id);
+                    }
+                    for (auto const& k : stale_keys)
+                        m_app_service_tabs.remove(k);
+
+                    Vector<AppServiceTabState> states;
+                    for (auto const& svc : m_app_mode_server->effective_services()) {
+                        auto view = find_or_adopt_service_view(svc);
+                        if (!view.has_value())
+                            continue;
+                        states.append(AppServiceTabState {
+                            .service_id = svc.id,
+                            .tab_id = view->view_id(),
+                            .open = true,
+                            .url = view->url().to_string(),
+                            .title = view->title().to_well_formed_utf8(),
+                            .container = view->container_id(),
+                            .origin_allowed = AppManifest::is_service_origin_allowed(svc, view->url()),
+                        });
+                    }
+                    return states;
+                },
+                .on_service_eval = [this](StringView service_id, String script, Function<void(Optional<JsonValue>, Optional<String>)> on_complete) {
+                    auto svc = m_app_mode_server->find_effective_service(service_id);
+                    if (!svc.has_value() || !svc->allow_eval) {
+                        on_complete({}, "Service eval is not permitted"_string);
+                        return;
+                    }
+                    auto view = find_or_adopt_service_view(*svc);
+                    if (!view.has_value()) {
+                        on_complete({}, "Service tab is not open"_string);
+                        return;
+                    }
+                    if (!AppManifest::is_service_origin_allowed(*svc, view->url())) {
+                        on_complete({}, "Service tab navigated outside allowed origins"_string);
+                        return;
+                    }
+
+                    auto payload = build_async_eval_payload(move(script), 10000);
+                    enqueue_automation_webdriver_command(view->view_id(), "execute_async_script"_string, move(payload), {}, false, [on_complete = move(on_complete)](Web::WebDriver::Response response) mutable {
+                        if (response.is_error()) {
+                            auto const& message = response.error().message;
+                            on_complete({}, message.is_empty() ? "Service script evaluation failed"_string : message);
+                            return;
+                        }
+                        auto val = response.release_value();
+                        if (val.is_object()) {
+                            auto const& obj = val.as_object();
+                            if (auto err = obj.get_string("__lb_eval_err"sv); err.has_value()) {
+                                on_complete({}, *err);
+                                return;
+                            }
+                            if (obj.get_bool("__lb_eval_ok"sv).value_or(false)) {
+                                on_complete(obj.get("value"sv).value_or(JsonValue {}), {});
+                                return;
+                            }
+                        }
+                        on_complete(move(val), {});
+                    });
+                },
+                .on_service_register_consent = [this, app_name = app_manifest->name](AppServiceConfig const& service, Function<void(bool approved)> on_decision) {
+                    if (m_browser_options.headless_mode.has_value() || m_browser_options.mcp_auto_approve) {
+                        on_decision(true);
+                        return;
+                    }
+
+                    Optional<ViewImplementation&> target_view;
+                    if (auto active = active_web_view(); active.has_value() && !active->owner_view_id().has_value() && active->is_private() == IsPrivate::No && active->on_request_mcp_action_approval)
+                        target_view = *active;
+                    if (!target_view.has_value()) {
+                        ViewImplementation::for_each_view([&](ViewImplementation& candidate) {
+                            if (!candidate.owner_view_id().has_value() && candidate.is_private() == IsPrivate::No && candidate.on_request_mcp_action_approval) {
+                                target_view = candidate;
+                                return IterationDecision::Break;
+                            }
+                            return IterationDecision::Continue;
+                        });
+                    }
+                    if (!target_view.has_value()) {
+                        on_decision(false);
+                        return;
+                    }
+
+                    struct ConsentState : RefCounted<ConsentState> {
+                        Function<void(bool)> callback;
+                        RefPtr<Core::Timer> timer;
+                        bool settled { false };
+                        void finish(bool approved)
+                        {
+                            if (settled)
+                                return;
+                            settled = true;
+                            if (timer) {
+                                timer->stop();
+                                timer.clear();
+                            }
+                            if (callback) {
+                                auto cb = move(callback);
+                                callback = nullptr;
+                                cb(approved);
+                            }
+                        }
+                    };
+                    auto state = adopt_ref(*new ConsentState);
+                    state->callback = move(on_decision);
+                    state->timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(60), [state] {
+                        state->finish(false);
+                    });
+                    state->timer->start();
+
+                    StringBuilder origins_sb;
+                    for (size_t i = 0; i < service.origins.size(); ++i) {
+                        if (i > 0)
+                            origins_sb.append(", "sv);
+                        origins_sb.append(service.origins[i]);
+                    }
+                    Vector<StringView> perms;
+                    perms.append("open"sv);
+                    if (service.allow_navigate)
+                        perms.append("navigate"sv);
+                    if (service.allow_notifications)
+                        perms.append("notifications"sv);
+                    if (service.allow_eval)
+                        perms.append("eval"sv);
+                    if (service.allow_flows)
+                        perms.append("flows"sv);
+                    if (service.allow_network)
+                        perms.append("network"sv);
+                    StringBuilder perms_sb;
+                    for (size_t i = 0; i < perms.size(); ++i) {
+                        if (i > 0)
+                            perms_sb.append(", "sv);
+                        perms_sb.append(perms[i]);
+                    }
+
+                    auto summary = MUST(String::formatted("Allow '{}' to connect service '{}' ({})", app_name, service.label, service.id));
+                    auto container_label = service.container.is_empty() ? "default"sv : service.container.bytes_as_string_view();
+                    auto details = MUST(String::formatted("Default URL: {}\nAllowed Origins: {}\nContainer: {}\nPermissions: {}",
+                        service.default_url,
+                        origins_sb.string_view(),
+                        container_label,
+                        perms_sb.string_view()));
+                    target_view->on_request_mcp_action_approval("app_service"_string, move(summary), move(details), [state](bool approved) {
+                        state->finish(approved);
+                    });
+                },
+                .on_flows_list = [this]() -> Vector<FlowDefinition> {
+                    return app_flow_store().list_flows();
+                },
+                .on_flows_get = [this](StringView flow_id) -> Optional<FlowDefinition> {
+                    return app_flow_store().get_flow(flow_id);
+                },
+                .on_flows_save = [this](FlowDefinition flow) -> ErrorOr<FlowDefinition> {
+                    flow.source = "user"_string;
+                    return app_flow_store().save_flow(move(flow));
+                },
+                .on_flows_delete = [this](StringView flow_id) -> ErrorOr<void> {
+                    return app_flow_store().delete_flow(flow_id);
+                },
+                .on_flows_get_run = [this](StringView run_id) -> Optional<FlowRunRecord> {
+                    return app_flow_store().get_run(run_id);
+                },
+                .on_flows_list_runs = [this](Optional<StringView> flow_id, size_t limit) -> Vector<FlowRunRecord> {
+                    return app_flow_store().list_runs(flow_id, limit);
+                },
+                .on_flows_cancel_run = [this](StringView run_id) -> bool {
+                    return app_flow_runner().cancel_run(run_id);
+                },
+                .on_service_run_flow = [this](StringView service_id, Optional<String> flow_id, Optional<FlowDefinition> inline_flow, HashMap<String, String> variables, HashTable<String> tainted_variables, bool open_if_closed, bool activate, bool close_on_finish, bool wait_for_completion, Function<void(Optional<FlowRunRecord>, Optional<String>)> on_done) {
+                    auto svc = m_app_mode_server->find_effective_service(service_id);
+                    if (!svc.has_value() || !svc->allow_flows) {
+                        on_done({}, "Service 'flows' permission is disabled or service undeclared"_string);
+                        return;
+                    }
+                    auto view = find_or_adopt_service_view(*svc);
+                    if (!view.has_value()) {
+                        if (!open_if_closed) {
+                            on_done({}, "Service tab is not open"_string);
+                            return;
+                        }
+                        view = open_automation_view(activate ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, MCPAccessMode::Full, svc->container);
+                        if (!view.has_value() || view->is_private() == IsPrivate::Yes) {
+                            on_done({}, "UI unavailable to open service tab"_string);
+                            return;
+                        }
+                        m_app_service_tabs.set(svc->id, view->view_id());
+                        bool first_is_open = false;
+                        if (inline_flow.has_value() && !inline_flow->steps.is_empty())
+                            first_is_open = inline_flow->steps[0].action == FlowStep::Action::Open;
+                        else if (flow_id.has_value()) {
+                            if (auto stored = app_flow_store().get_flow(*flow_id); stored.has_value() && !stored->steps.is_empty())
+                                first_is_open = stored->steps[0].action == FlowStep::Action::Open;
+                        }
+                        if (!first_is_open)
+                            view->load_from_browser_ui(svc->default_url);
+                    } else if (activate && view->on_activate_tab) {
+                        view->on_activate_tab();
+                    }
+
+                    struct SharedDone : RefCounted<SharedDone> {
+                        Function<void(Optional<FlowRunRecord>, Optional<String>)> fn;
+                        void invoke(Optional<FlowRunRecord> run, Optional<String> err)
+                        {
+                            if (!fn)
+                                return;
+                            auto cb = move(fn);
+                            fn = nullptr;
+                            cb(move(run), move(err));
+                        }
+                    };
+                    auto shared_done = adopt_ref(*new SharedDone);
+                    shared_done->fn = move(on_done);
+
+                    FlowRunRequest req;
+                    req.flow_id = move(flow_id);
+                    if (inline_flow.has_value()) {
+                        inline_flow->source = "user"_string;
+                        req.inline_flow = move(inline_flow);
+                    }
+                    req.tab_id = view->view_id();
+                    req.variables = move(variables);
+                    req.tainted_variables = move(tainted_variables);
+                    req.allowed_origins = svc->origins;
+                    req.allow_eval = svc->allow_eval;
+                    req.require_mcp_permission = false;
+                    req.open_new_tab = false;
+                    req.close_tab_on_finish = close_on_finish;
+
+                    Function<void(FlowRunRecord const&)> on_complete;
+                    if (wait_for_completion) {
+                        on_complete = [shared_done](FlowRunRecord const& rec) {
+                            shared_done->invoke(rec, {});
+                        };
+                    }
+                    auto started = app_flow_runner().start_run(move(req), move(on_complete));
+                    if (started.is_error()) {
+                        shared_done->invoke({}, MUST(String::formatted("Failed starting service flow: {}", started.error())));
+                        return;
+                    }
+                    if (!wait_for_completion)
+                        shared_done->invoke(app_flow_store().get_run(started.value()), {});
+                },
+            }));
+            ensure_notification_observer();
+            m_browser_options.urls = { m_app_mode_server->entry_url() };
+        }
+    }
+
     if (captures_browser_crashes())
         CrashReportOutbox::the().start_removing_expired_reports();
 
@@ -900,7 +1418,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)
     // Every profile of this installation shares when it last checked for updates. A temporary profile only checks when
     // the user asks it to.
-    if (!m_browser_options.headless_mode.has_value() && !m_browser_options.webdriver_browser_endpoint.has_value()) {
+    if (!m_browser_options.headless_mode.has_value() && !m_browser_options.webdriver_browser_endpoint.has_value() && !m_browser_options.app_mode.has_value()) {
         m_update_checker = make<UpdateChecker>(LexicalPath::join(m_instance_data_directory, "UpdateCheck.json"sv).string());
         m_update_checker->on_result = [this](UpdateCheckResult const& result, UpdateCheckTrigger trigger) {
             display_update_check_result(result, trigger);
@@ -2207,7 +2725,7 @@ ErrorOr<void> Application::launch_services()
         // already running on their profile. Yet startup recovery would still rewrite the saved session, reset the
         // unclean-exit count, and demote the open windows of a browser running on this profile. So none of them keeps
         // its session, leaving the Sessions database as the last run left it.
-        m_persists_sessions = !m_browser_options.headless_mode.has_value() && !m_browser_options.webdriver_browser_endpoint.has_value() && !m_stats_log;
+        m_persists_sessions = !m_browser_options.headless_mode.has_value() && !m_browser_options.webdriver_browser_endpoint.has_value() && !m_stats_log && !m_browser_options.app_mode.has_value();
     } else {
         m_default_session->cookie_jar = CookieJar::create();
         m_default_session->hsts_store = HSTSStore::create();
@@ -2273,12 +2791,19 @@ ErrorOr<void> Application::launch_services()
         && m_settings->mcp_auto_start();
 
     if (m_browser_options.mcp_port.has_value() || should_auto_start_mcp) {
-        // Defer launching MCP until the entire application is initialized.
-        Core::deferred_invoke([this]() {
+        if (m_browser_options.app_mode.has_value() && m_browser_options.mcp_port.has_value()) {
             if (auto result = launch_mcp_server(); result.is_error())
                 warnln("Unable to launch MCP server: {}", result.error());
-        });
+        } else {
+            // Defer launching MCP until the entire application is initialized.
+            Core::deferred_invoke([this]() {
+                if (auto result = launch_mcp_server(); result.is_error())
+                    warnln("Unable to launch MCP server: {}", result.error());
+            });
+        }
     }
+
+    write_app_runtime_descriptor();
 
     return {};
 }
@@ -2734,6 +3259,8 @@ void Application::configure_request_server_control_client(Requests::RequestContr
     };
 
     TabPerformanceMonitor::configure(control_client);
+    if (!m_mcp_network_intercept_rules_json.is_empty())
+        control_client.async_set_network_intercept_rules(m_mcp_network_intercept_rules_json);
 }
 
 ErrorOr<void> Application::launch_devtools_server()
@@ -2923,7 +3450,7 @@ ErrorOr<int> Application::execute()
             && *m_browser_options.headless_mode == HeadlessMode::Manual
             && m_browser_options.mcp_port.has_value();
         String initial_container_id;
-        if (is_headless_mcp) {
+        if (is_headless_mcp && !m_browser_options.app_mode.has_value()) {
             if (auto resolved = mcp_resolve_container_against_policy(OptionalNone {}, mcp_security_policy()); !resolved.is_error())
                 initial_container_id = resolved.release_value();
         }
@@ -2937,9 +3464,9 @@ ErrorOr<int> Application::execute()
 
         if (!m_browser_options.webdriver_browser_endpoint.has_value()) {
             if (is_headless_mcp) {
-                if (!m_browser_options.raw_urls.is_empty() && m_browser_options.urls.size() > 1)
+                if (m_browser_options.urls.size() > 1)
                     return Error::from_string_literal("Headless mode currently only supports at most one URL");
-                auto initial_url = m_browser_options.raw_urls.is_empty() ? URL::about_blank() : m_browser_options.urls.first();
+                auto initial_url = m_browser_options.urls.is_empty() ? URL::about_blank() : m_browser_options.urls.first();
                 auto& headless_view = register_headless_mcp_view(view.release_nonnull(), MCPAccessMode::Full, true, false);
                 if (initial_url != URL::about_blank())
                     headless_view.load_from_browser_ui(initial_url);
@@ -5002,6 +5529,80 @@ Optional<u16> Application::mcp_port() const
     return m_mcp->local_port();
 }
 
+void Application::write_app_runtime_descriptor()
+{
+    if (!m_app_runtime_descriptor_path.has_value() || !m_browser_options.app_mode.has_value())
+        return;
+
+    auto write_impl = [&]() -> ErrorOr<void> {
+        auto parent_dir = LexicalPath { *m_app_runtime_descriptor_path }.parent().string();
+        TRY(Core::Directory::create(parent_dir, Core::Directory::CreateDirectories::Yes));
+
+        auto const& app_mode = *m_browser_options.app_mode;
+        JsonObject doc;
+        doc.set("appId"sv, app_mode.app_id);
+        doc.set("accountId"sv, app_mode.account_id);
+        doc.set("accountLabel"sv, app_mode.account_label);
+        doc.set("profileName"sv, active_profile_name());
+        doc.set("pid"sv, static_cast<i64>(Core::System::getpid()));
+        if (auto ui_pid = ui_process_id(); ui_pid.has_value())
+            doc.set("uiPid"sv, static_cast<i64>(*ui_pid));
+        else
+            doc.set("uiPid"sv, JsonValue {});
+        doc.set("mode"sv, m_browser_options.headless_mode.has_value() ? "headless"_string : "gui"_string);
+
+        String app_url;
+        if (m_app_mode_server)
+            app_url = m_app_mode_server->entry_url().to_string();
+        else if (!m_browser_options.urls.is_empty())
+            app_url = m_browser_options.urls.first().to_string();
+        doc.set("appUrl"sv, move(app_url));
+
+        auto port = mcp_port();
+        doc.set("mcpEnabled"sv, m_mcp != nullptr);
+        if (port.has_value()) {
+            doc.set("mcpPort"sv, static_cast<u64>(*port));
+            doc.set("mcpUrl"sv, MUST(String::formatted("http://127.0.0.1:{}/mcp", *port)));
+        } else {
+            doc.set("mcpPort"sv, JsonValue {});
+            doc.set("mcpUrl"sv, JsonValue {});
+        }
+        if (m_mcp && m_mcp_token.has_value())
+            doc.set("mcpToken"sv, *m_mcp_token);
+        else
+            doc.set("mcpToken"sv, JsonValue {});
+        doc.set("mcpAccess"sv, m_browser_options.mcp_webmcp_only ? "webmcp-only"_string : "full"_string);
+        doc.set("startedAtMs"sv, m_app_runtime_started_at_ms);
+
+        auto file = TRY(Core::File::open(*m_app_runtime_descriptor_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate, 0600));
+        auto serialized = doc.serialized();
+        TRY(file->write_until_depleted(serialized.bytes()));
+        TRY(file->write_until_depleted("\n"sv.bytes()));
+        file->close();
+        return {};
+    };
+
+    if (auto res = write_impl(); res.is_error())
+        warnln("Failed writing AppRuntime descriptor '{}': {}", *m_app_runtime_descriptor_path, res.error());
+}
+
+void Application::remove_app_runtime_descriptor()
+{
+    if (!m_app_runtime_descriptor_path.has_value() || !FileSystem::exists(*m_app_runtime_descriptor_path))
+        return;
+
+    auto current_pid = static_cast<i64>(Core::System::getpid());
+    if (auto file = Core::File::open(*m_app_runtime_descriptor_path, Core::File::OpenMode::Read); !file.is_error()) {
+        if (auto bytes = file.value()->read_until_eof(); !bytes.is_error()) {
+            if (auto json = JsonValue::from_string(bytes.value()); !json.is_error() && json.value().is_object()) {
+                if (auto owner_pid = json.value().as_object().get_i64("pid"sv); owner_pid.has_value() && *owner_pid != current_pid)
+                    return;
+            }
+        }
+    }
+    (void)FileSystem::remove(*m_app_runtime_descriptor_path, FileSystem::RecursionMode::Disallowed);
+}
+
 ErrorOr<void> Application::launch_mcp_server()
 {
     VERIFY(!m_mcp);
@@ -5025,39 +5626,98 @@ ErrorOr<void> Application::launch_mcp_server()
     m_mcp = move(server);
     m_mcp->set_paused(m_mcp_paused);
 
-    NotificationManager::the().on_notification_event = [this](NotificationManager::NotificationEvent const& event) {
-        if (event.is_private)
-            return;
-        MCPNotificationEntry entry;
-        entry.timestamp_ms = UnixDateTime::now().milliseconds_since_epoch();
-        entry.notification_id = event.id;
-        entry.tab_id = event.tab_id;
-        switch (event.kind) {
-        case NotificationManager::NotificationEvent::Kind::Shown:
-            entry.event_type = "shown"_string;
-            break;
-        case NotificationManager::NotificationEvent::Kind::Clicked:
-            entry.event_type = "clicked"_string;
-            break;
-        case NotificationManager::NotificationEvent::Kind::Closed:
-            entry.event_type = "closed"_string;
-            break;
-        }
-        entry.origin = event.origin;
-        entry.title = event.title;
-        entry.body = event.body;
-        entry.tag = event.tag;
-        entry.by_user = event.by_user;
-        entry.os_delivered = event.os_delivered;
-        handle_browser_notification_event(move(entry));
-    };
+    ensure_notification_observer();
 
     outln("MCP server listening on http://127.0.0.1:{}/mcp (token: {})", actual_port, *m_mcp_token);
     (void)fflush(stdout);
 
     on_mcp_enabled(actual_port, *m_mcp_token);
     notify_mcp_audit_observers();
+    write_app_runtime_descriptor();
     return {};
+}
+
+Optional<ViewImplementation&> Application::find_or_adopt_service_view(AppServiceConfig const& svc, Optional<StringView> preferred_container)
+{
+    if (auto existing_id = m_app_service_tabs.get(svc.id); existing_id.has_value()) {
+        if (auto existing = ViewImplementation::find_view_by_id(*existing_id); existing.has_value())
+            return existing;
+        m_app_service_tabs.remove(svc.id);
+    }
+
+    HashTable<u64> claimed_view_ids;
+    for (auto const& [other_svc_id, mapped_view_id] : m_app_service_tabs) {
+        if (other_svc_id != svc.id)
+            claimed_view_ids.set(mapped_view_id);
+    }
+
+    StringView desired_container = preferred_container.value_or(svc.container.bytes_as_string_view());
+    Optional<u64> exact_id;
+    Optional<u64> fallback_id;
+
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (view.owner_view_id().has_value() || view.is_private() == IsPrivate::Yes)
+            return IterationDecision::Continue;
+        if (claimed_view_ids.contains(view.view_id()))
+            return IterationDecision::Continue;
+        if (!AppManifest::is_service_origin_allowed(svc, view.url()))
+            return IterationDecision::Continue;
+        if (view.container_id() == desired_container) {
+            exact_id = view.view_id();
+            return IterationDecision::Break;
+        }
+        if (desired_container.is_empty() && !fallback_id.has_value())
+            fallback_id = view.view_id();
+        return IterationDecision::Continue;
+    });
+
+    if (exact_id.has_value() || fallback_id.has_value()) {
+        auto chosen_id = exact_id.value_or(*fallback_id);
+        m_app_service_tabs.set(svc.id, chosen_id);
+        return ViewImplementation::find_view_by_id(chosen_id);
+    }
+    return {};
+}
+
+void Application::ensure_notification_observer()
+{
+    if (NotificationManager::the().on_notification_event)
+        return;
+
+    NotificationManager::the().on_notification_event = [this](NotificationManager::NotificationEvent const& event) {
+        if (event.is_private)
+            return;
+        auto timestamp_ms = UnixDateTime::now().milliseconds_since_epoch();
+        StringView event_type;
+        switch (event.kind) {
+        case NotificationManager::NotificationEvent::Kind::Shown:
+            event_type = "shown"sv;
+            break;
+        case NotificationManager::NotificationEvent::Kind::Clicked:
+            event_type = "clicked"sv;
+            break;
+        case NotificationManager::NotificationEvent::Kind::Closed:
+            event_type = "closed"sv;
+            break;
+        }
+        if (m_app_mode_server) {
+            m_app_mode_server->push_service_notification(event.origin, event.tab_id, event_type, event.title, event.body, event.tag, timestamp_ms);
+        }
+        if (m_mcp) {
+            MCPNotificationEntry entry;
+            entry.timestamp_ms = timestamp_ms;
+            entry.notification_id = event.id;
+            entry.tab_id = event.tab_id;
+            entry.event_type = MUST(String::from_utf8(event_type));
+            entry.origin = event.origin;
+            entry.title = event.title;
+            entry.body = event.body;
+            entry.tag = event.tag;
+            entry.by_user = event.by_user;
+            entry.os_delivered = event.os_delivered;
+            handle_browser_notification_event(move(entry));
+        }
+    };
 }
 
 ErrorOr<void> Application::toggle_mcp_enabled()
@@ -5081,6 +5741,7 @@ ErrorOr<void> Application::toggle_mcp_enabled()
         }
         on_mcp_disabled();
         notify_mcp_audit_observers();
+        write_app_runtime_descriptor();
     } else {
         TRY(launch_mcp_server());
     }
@@ -5501,6 +6162,9 @@ void Application::did_close_mcp_view(u64 view_id)
 {
     if (m_flow_runner)
         m_flow_runner->did_close_view(view_id);
+    if (m_app_flow_runner)
+        m_app_flow_runner->did_close_view(view_id);
+    m_app_service_inflight_requests.remove(view_id);
     fail_mcp_requests_for_view(view_id, "Tab closed"sv);
     clear_view_mcp_secret_taint(view_id);
     m_mcp_content_queues.remove(view_id);
@@ -5581,7 +6245,8 @@ void Application::fail_mcp_requests_for_view(u64 view_id, StringView message)
 void Application::fail_all_mcp_requests(StringView message)
 {
     cancel_all_mcp_approvals();
-    NotificationManager::the().on_notification_event = {};
+    if (!m_app_mode_server)
+        NotificationManager::the().on_notification_event = {};
     m_mcp_notifications.clear();
     m_mcp_suppressed_notification_ids.clear();
     m_mcp_console_logs.clear();
@@ -5806,6 +6471,23 @@ FlowRunner& Application::flow_runner()
     return *m_flow_runner;
 }
 
+FlowStore& Application::app_flow_store()
+{
+    if (!m_app_flow_store) {
+        auto base_dir = m_app_mode_server ? m_app_mode_server->data_directory() : (m_profile.has_value() ? m_profile->paths().data : m_instance_data_directory);
+        auto flows_dir = LexicalPath::join(base_dir, "flows"sv).string();
+        m_app_flow_store = make<FlowStore>(move(flows_dir));
+    }
+    return *m_app_flow_store;
+}
+
+FlowRunner& Application::app_flow_runner()
+{
+    if (!m_app_flow_runner)
+        m_app_flow_runner = make<FlowRunner>(*this, app_flow_store());
+    return *m_app_flow_runner;
+}
+
 ExtensionStore& Application::extension_store()
 {
     if (!m_extension_store) {
@@ -5875,8 +6557,10 @@ MCPSecurityPolicy Application::mcp_security_policy() const
         .allowed_containers = m_browser_options.mcp_allowed_containers,
         .allowed_domains = m_browser_options.mcp_allowed_domains,
         .blocked_domains = m_browser_options.mcp_blocked_domains,
+        .allow_private_network = m_browser_options.mcp_allow_private_network,
         .disable_eval_js = m_browser_options.mcp_disable_eval_js,
         .disable_webmcp = m_browser_options.mcp_disable_webmcp,
+        .webmcp_only = m_browser_options.mcp_webmcp_only,
         .disable_screenshots = m_browser_options.mcp_disable_screenshots,
         .redact_screenshot_media = m_browser_options.mcp_redact_screenshot_media,
         .max_tabs = m_browser_options.mcp_max_tabs,
@@ -6100,13 +6784,18 @@ Vector<MCP::TabInfo> Application::list_allowed_tabs() const
     auto active_view = active_web_view();
     Optional<u64> active_id = active_view.has_value() ? Optional<u64> { active_view->view_id() } : OptionalNone {};
     auto policy = mcp_security_policy();
+    bool webmcp_only = m_browser_options.mcp_webmcp_only;
 
     Vector<MCP::TabInfo> tabs;
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
         if (is_view_mcp_eligible(view, true, policy)) {
             auto info = view_to_mcp_tab_info(view, active_id);
-            info.matching_skills = matching_skill_hints_for_url(view.url());
-            info.matching_credentials = matching_credential_hints_for_view(view.url(), view.container_id());
+            if (webmcp_only) {
+                info.mcp_access_mode = "webmcp-only"_string;
+            } else {
+                info.matching_skills = matching_skill_hints_for_url(view.url());
+                info.matching_credentials = matching_credential_hints_for_view(view.url(), view.container_id());
+            }
             tabs.append(move(info));
         }
         return IterationDecision::Continue;
@@ -6122,8 +6811,12 @@ Optional<MCP::TabInfo> Application::active_allowed_tab() const
     if (!is_view_mcp_eligible(*active_view, true, mcp_security_policy()))
         return {};
     auto info = view_to_mcp_tab_info(*active_view, active_view->view_id());
-    info.matching_skills = matching_skill_hints_for_url(active_view->url());
-    info.matching_credentials = matching_credential_hints_for_view(active_view->url(), active_view->container_id());
+    if (m_browser_options.mcp_webmcp_only) {
+        info.mcp_access_mode = "webmcp-only"_string;
+    } else {
+        info.matching_skills = matching_skill_hints_for_url(active_view->url());
+        info.matching_credentials = matching_credential_hints_for_view(active_view->url(), active_view->container_id());
+    }
     return info;
 }
 
@@ -6142,6 +6835,11 @@ Optional<String> Application::active_ephemeral_container_id() const
 bool Application::ephemeral_default_enabled() const
 {
     return mcp_security_policy().allowed_containers.is_empty();
+}
+
+bool Application::webmcp_only_mode() const
+{
+    return m_browser_options.mcp_webmcp_only;
 }
 
 String Application::ensure_mcp_ephemeral_container_id() const
@@ -7083,6 +7781,75 @@ void Application::record_mcp_network_request_finished(u64 view_id, u64 request_i
     }
 }
 
+void Application::record_app_service_network_started(u64 view_id, u64 request_id, URL::URL const& url, ByteString const& method, Optional<String> const& initiator_type)
+{
+    if (!m_app_mode_server)
+        return;
+    auto& inflight = m_app_service_inflight_requests.ensure(view_id, [] { return HashMap<u64, ServiceInFlightRequest> {}; });
+    if (inflight.size() >= 256)
+        inflight.clear();
+    inflight.set(request_id, ServiceInFlightRequest {
+        .url = url,
+        .method = MUST(String::from_byte_string(method)),
+        .initiator_type = initiator_type,
+        .status_code = {},
+    });
+}
+
+void Application::record_app_service_network_headers(u64 view_id, u64 request_id, u32 status_code)
+{
+    if (!m_app_mode_server)
+        return;
+    auto inflight = m_app_service_inflight_requests.get(view_id);
+    if (!inflight.has_value())
+        return;
+    if (auto entry = inflight->get(request_id); entry.has_value())
+        entry->status_code = status_code;
+}
+
+void Application::record_app_service_network_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const& network_error)
+{
+    if (!m_app_mode_server)
+        return;
+    auto inflight = m_app_service_inflight_requests.get(view_id);
+    if (!inflight.has_value())
+        return;
+    auto entry = inflight->take(request_id);
+    if (!entry.has_value())
+        return;
+    auto view = ViewImplementation::find_view_by_id(view_id);
+    if (!view.has_value() || view->is_private() == IsPrivate::Yes)
+        return;
+    Optional<StringView> initiator_view;
+    if (entry->initiator_type.has_value())
+        initiator_view = entry->initiator_type->bytes_as_string_view();
+    Optional<StringView> err_view;
+    if (network_error.has_value())
+        err_view = Requests::network_error_to_string(*network_error);
+    m_app_mode_server->push_service_network_event(
+        view_id,
+        view->url(),
+        request_id,
+        entry->url.to_string(),
+        entry->method,
+        initiator_view,
+        entry->status_code,
+        body_size,
+        err_view,
+        UnixDateTime::now().milliseconds_since_epoch());
+}
+
+void Application::record_app_service_navigation(ViewImplementation const& view, URL::URL const& committed_url)
+{
+    if (!m_app_mode_server || view.is_private() == IsPrivate::Yes)
+        return;
+    m_app_mode_server->push_service_navigation_event(
+        view.view_id(),
+        committed_url,
+        view.title().to_well_formed_utf8(),
+        UnixDateTime::now().milliseconds_since_epoch());
+}
+
 static constexpr auto mcp_target_resolver_js = R"JS(
 const getOwnerWindow = (el) => (el && el.ownerDocument && el.ownerDocument.defaultView) || window;
 const findDeep = (root, sel, visited = new Set()) => {
@@ -7599,8 +8366,14 @@ if (!window.__ladybirdWebMCP) {
     enumerable: false,
     writable: false,
   });
+  try { window.dispatchEvent(new CustomEvent('ladybird:webmcp-ready')); } catch (e) {}
 }
 )WEBMCP"sv;
+
+StringView webmcp_shim_javascript()
+{
+    return mcp_webmcp_shim_js;
+}
 
 static void execute_mcp_js_json(Application& app, u64 tab_id, String script, JsonObject cfg, MCP::OnToolCallComplete on_complete)
 {
@@ -8568,6 +9341,275 @@ return out;
                         obj.set("matching_credentials"sv, move(cred_hints));
                 }
                 obj = shield_mcp_json_object(this, "get_page_snapshot"sv, tab_id, obj);
+                res.text = JsonValue { move(obj) }.serialized();
+            }
+        }
+        on_complete(scrub_mcp_tool_result(move(res)));
+    };
+
+    execute_mcp_js_json(*this, tab_id, move(script), move(cfg), move(wrapped_complete));
+}
+
+void Application::get_page_markdown(u64 tab_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, MCP::OnToolCallComplete on_complete)
+{
+    if (auto err = check_mcp_read_allowed(tab_id, "extract page markdown"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
+        return;
+    }
+    auto initial_view = find_allowed_mcp_view(tab_id);
+    if (!initial_view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (is_view_mcp_secret_tainted(tab_id)) {
+        on_complete(mcp_error_result(mcp_vault_quarantine_message));
+        return;
+    }
+    record_mcp_sensitive_read(*initial_view);
+
+    JsonObject cfg;
+    if (root_selector.has_value() && !root_selector->is_empty())
+        cfg.set("root_selector"sv, *root_selector);
+    cfg.set("main_content_only"sv, main_content_only);
+    cfg.set("include_links"sv, include_links);
+    cfg.set("include_images"sv, include_images);
+    cfg.set("max_chars"sv, static_cast<u64>(clamp(max_chars, static_cast<size_t>(500), static_cast<size_t>(200000))));
+
+    auto script = R"JS(
+const cfg = arguments[0] || {};
+const maxChars = Math.max(500, Math.min(200000, Number(cfg.max_chars || 40000)));
+const mainOnly = cfg.main_content_only !== false;
+const includeLinks = cfg.include_links !== false;
+const includeImages = Boolean(cfg.include_images);
+
+const isVisible = (el) => {
+  if (!el || el.nodeType !== 1) return false;
+  const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+  if (el.hasAttribute('hidden')) return false;
+  if (String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return false;
+  try {
+    const cs = win.getComputedStyle(el);
+    if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse'))
+      return false;
+  } catch (e) {}
+  return true;
+};
+
+const findDeep = (root, sel, seen = new Set()) => {
+  if (!root || seen.has(root)) return null;
+  seen.add(root);
+  try {
+    const m = root.querySelector(sel);
+    if (m) return m;
+  } catch (e) {
+    return null;
+  }
+  const all = root.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].shadowRoot) {
+      const hit = findDeep(all[i].shadowRoot, sel, seen);
+      if (hit) return hit;
+    }
+  }
+  return null;
+};
+
+let rootEl = null;
+if (cfg.root_selector) {
+  rootEl = findDeep(document, cfg.root_selector);
+  if (!rootEl) {
+    return { error: 'root_selector did not match any element: ' + cfg.root_selector };
+  }
+} else if (mainOnly) {
+  rootEl = document.querySelector('main, [role="main"], article') || document.body || document.documentElement;
+} else {
+  rootEl = document.body || document.documentElement;
+}
+
+if (!rootEl) {
+  return { url: window.location.href, title: document.title || '', markdown: '', truncated: false };
+}
+
+const SKIP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'svg', 'canvas']);
+const BOILERPLATE_TAGS = new Set(['nav', 'footer', 'aside']);
+
+const renderChildren = (node, ctx) => {
+  let out = '';
+  const children = node.childNodes || [];
+  for (let i = 0; i < children.length; i++) {
+    out += renderNode(children[i], ctx);
+  }
+  return out;
+};
+
+const renderTable = (tableEl, ctx) => {
+  const rows = [];
+  const trs = tableEl.querySelectorAll('tr');
+  for (let i = 0; i < trs.length; i++) {
+    if (!isVisible(trs[i])) continue;
+    const cells = [];
+    const cellEls = trs[i].querySelectorAll('th, td');
+    for (let j = 0; j < cellEls.length; j++) {
+      const text = renderChildren(cellEls[j], Object.assign({}, ctx, { inPre: false }))
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\|/g, '\\|');
+      cells.push(text);
+    }
+    if (cells.length > 0) rows.push(cells);
+  }
+  if (rows.length === 0) return '';
+  const colCount = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const padRow = (r) => {
+    const padded = r.slice();
+    while (padded.length < colCount) padded.push('');
+    return '| ' + padded.join(' | ') + ' |';
+  };
+  const sep = '| ' + new Array(colCount).fill('---').join(' | ') + ' |';
+  const lines = [padRow(rows[0]), sep];
+  for (let i = 1; i < rows.length; i++) lines.push(padRow(rows[i]));
+  return '\n\n' + lines.join('\n') + '\n\n';
+};
+
+const renderNode = (node, ctx) => {
+  if (!node) return '';
+  if (node.nodeType === 3) {
+    const raw = node.nodeValue || '';
+    if (ctx.inPre) return raw;
+    return raw.replace(/[ \t\r\n]+/g, ' ');
+  }
+  if (node.nodeType !== 1) return '';
+  const tag = (node.tagName || '').toLowerCase();
+  if (SKIP_TAGS.has(tag)) return '';
+  if (!cfg.root_selector && mainOnly && node !== rootEl && BOILERPLATE_TAGS.has(tag)) return '';
+  if (!isVisible(node)) return '';
+
+  if (tag === 'br') return '\n';
+  if (tag === 'hr') return '\n\n---\n\n';
+
+  if (tag === 'pre') {
+    const codeEl = node.querySelector('code');
+    let lang = '';
+    if (codeEl && codeEl.className) {
+      const m = /(?:language-|lang-)([a-zA-Z0-9_-]+)/.exec(String(codeEl.className));
+      if (m) lang = m[1];
+    }
+    const text = (codeEl ? codeEl.textContent : node.textContent) || '';
+    return '\n\n```' + lang + '\n' + text.replace(/\n+$/, '') + '\n```\n\n';
+  }
+
+  if (tag === 'code') {
+    if (ctx.inPre) return node.textContent || '';
+    const inner = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    return inner ? '`' + inner + '`' : '';
+  }
+
+  if (tag === 'table') {
+    return renderTable(node, ctx);
+  }
+
+  if (tag === 'img') {
+    if (!includeImages) return '';
+    const alt = (node.getAttribute('alt') || '').replace(/[\r\n\]]+/g, ' ').trim();
+    const src = (node.getAttribute('src') || '').trim();
+    if (!src || src.startsWith('data:')) return '';
+    return '![' + alt + '](' + src + ')';
+  }
+
+  if (tag === 'a') {
+    const text = renderChildren(node, ctx).replace(/\s+/g, ' ').trim();
+    const href = (node.getAttribute('href') || '').trim();
+    if (!text) return '';
+    if (!includeLinks || !href || href.startsWith('javascript:')) return text;
+    let resolved = href;
+    try {
+      resolved = new URL(href, window.location.href).href;
+    } catch (e) {}
+    return '[' + text + '](' + resolved + ')';
+  }
+
+  if (tag === 'strong' || tag === 'b') {
+    const t = renderChildren(node, ctx).trim();
+    return t ? '**' + t + '**' : '';
+  }
+
+  if (tag === 'em' || tag === 'i') {
+    const t = renderChildren(node, ctx).trim();
+    return t ? '*' + t + '*' : '';
+  }
+
+  if (/^h[1-6]$/.test(tag)) {
+    const level = Number(tag[1]);
+    const t = renderChildren(node, ctx).replace(/\s+/g, ' ').trim();
+    return t ? '\n\n' + '#'.repeat(level) + ' ' + t + '\n\n' : '';
+  }
+
+  if (tag === 'blockquote') {
+    const inner = renderChildren(node, ctx).trim();
+    if (!inner) return '';
+    return '\n\n' + inner.split('\n').map((l) => '> ' + l).join('\n') + '\n\n';
+  }
+
+  if (tag === 'ul' || tag === 'ol') {
+    const nextCtx = Object.assign({}, ctx, { listDepth: (ctx.listDepth || 0) + 1, ordered: tag === 'ol' });
+    let itemsOut = '';
+    let idx = 1;
+    const ch = node.children || [];
+    for (let i = 0; i < ch.length; i++) {
+      if ((ch[i].tagName || '').toLowerCase() === 'li' && isVisible(ch[i])) {
+        const prefix = (tag === 'ol') ? (idx++ + '. ') : '- ';
+        const indent = '  '.repeat(ctx.listDepth || 0);
+        const body = renderChildren(ch[i], nextCtx).replace(/\n{2,}/g, '\n').trim();
+        if (body) itemsOut += indent + prefix + body.replace(/\n/g, '\n' + indent + '  ') + '\n';
+      }
+    }
+    return itemsOut ? '\n' + itemsOut + (ctx.listDepth ? '' : '\n') : '';
+  }
+
+  if (tag === 'p' || tag === 'section' || tag === 'article' || tag === 'main' || tag === 'header') {
+    const t = renderChildren(node, ctx).trim();
+    return t ? '\n\n' + t + '\n\n' : '';
+  }
+
+  if (tag === 'div') {
+    const t = renderChildren(node, ctx);
+    if (!t.trim()) return '';
+    return '\n' + t.trim() + '\n';
+  }
+
+  return renderChildren(node, ctx);
+};
+
+let md = renderNode(rootEl, { listDepth: 0, inPre: false });
+md = md
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
+
+let truncated = false;
+if (md.length > maxChars) {
+  md = md.slice(0, maxChars);
+  truncated = true;
+}
+
+return {
+  url: window.location.href,
+  title: document.title || '',
+  markdown: md,
+  char_count: md.length,
+  truncated
+};
+)JS"_string;
+
+    auto wrapped_complete = [this, tab_id, on_complete = move(on_complete)](MCP::ToolCallResult res) mutable {
+        if (!res.is_error) {
+            if (auto parsed = JsonValue::from_string(res.text); !parsed.is_error() && parsed.value().is_object()) {
+                auto obj = parsed.release_value().as_object();
+                if (auto err = obj.get_string("error"sv); err.has_value()) {
+                    on_complete(mcp_error_result(*err));
+                    return;
+                }
+                obj = shield_mcp_json_object(this, "get_page_markdown"sv, tab_id, obj);
                 res.text = JsonValue { move(obj) }.serialized();
             }
         }
@@ -10033,6 +11075,117 @@ void Application::get_network_requests(u64 tab_id, size_t limit, bool clear, boo
     on_complete(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
 }
 
+void Application::sync_network_intercept_rules_to_request_servers()
+{
+    JsonArray rules_array;
+    for (auto const& rule : m_mcp_network_intercept_rules)
+        rules_array.must_append(rule);
+
+    JsonObject payload;
+    payload.set("rules"sv, move(rules_array));
+    m_mcp_network_intercept_rules_json = payload.serialized().to_byte_string();
+
+    if (!m_request_server_manager)
+        return;
+    m_request_server_manager->for_each_instance([&](RequestServerInstance& instance) {
+        instance.control_client().async_set_network_intercept_rules(m_mcp_network_intercept_rules_json);
+        return IterationDecision::Continue;
+    });
+}
+
+void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete on_complete)
+{
+    auto url_pattern = rule_args.get_string("url_pattern"sv);
+    auto action = rule_args.get_string("action"sv);
+    if (!url_pattern.has_value() || url_pattern->is_empty() || !action.has_value()) {
+        on_complete(mcp_error_result("Missing required 'url_pattern' or 'action'"sv));
+        return;
+    }
+    if (!action->is_one_of("block"sv, "fulfill"sv, "modify_headers"sv)) {
+        on_complete(mcp_error_result("Unsupported action (expected 'block', 'fulfill', or 'modify_headers')"sv));
+        return;
+    }
+    if (auto body = rule_args.get_string("body"sv); body.has_value() && body->bytes().size() > 2 * 1024 * 1024) {
+        on_complete(mcp_error_result("Intercept rule 'body' exceeds 2 MiB limit"sv));
+        return;
+    }
+    if (m_mcp_network_intercept_rules.size() >= 128 && !rule_args.get_string("id"sv).has_value()) {
+        on_complete(mcp_error_result("Maximum of 128 active network intercept rules reached"sv));
+        return;
+    }
+
+    String rule_id;
+    if (auto custom_id = rule_args.get_string("id"sv); custom_id.has_value() && !custom_id->is_empty()) {
+        rule_id = *custom_id;
+    } else {
+        rule_id = MUST(String::formatted("rule-{}", m_next_mcp_network_rule_id++));
+    }
+
+    JsonObject stored;
+    stored.set("id"sv, rule_id);
+    stored.set("url_pattern"sv, *url_pattern);
+    stored.set("action"sv, *action);
+    if (auto methods = rule_args.get_array("methods"sv); methods.has_value())
+        stored.set("methods"sv, *methods);
+    if (auto status_code = rule_args.get_u64("status_code"sv); status_code.has_value())
+        stored.set("status_code"sv, clamp(*status_code, static_cast<u64>(100), static_cast<u64>(599)));
+    else if (*action == "fulfill"sv)
+        stored.set("status_code"sv, static_cast<u64>(200));
+    if (auto content_type = rule_args.get_string("content_type"sv); content_type.has_value() && !content_type->is_empty())
+        stored.set("content_type"sv, *content_type);
+    if (auto body = rule_args.get_string("body"sv); body.has_value())
+        stored.set("body"sv, *body);
+    if (auto headers = rule_args.get_object("headers"sv); headers.has_value())
+        stored.set("headers"sv, *headers);
+
+    m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
+        return existing.get_string("id"sv) == rule_id;
+    });
+    m_mcp_network_intercept_rules.append(stored);
+    sync_network_intercept_rules_to_request_servers();
+
+    record_mcp_audit_event("add_network_rule"_string, {}, "ok"_string, MUST(String::formatted("{} {} -> {}", *action, *url_pattern, rule_id)));
+
+    JsonObject result;
+    result.set("added"sv, true);
+    result.set("rule_count"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
+    result.set("rule"sv, move(stored));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::list_network_rules(MCP::OnToolCallComplete on_complete)
+{
+    JsonArray rules;
+    for (auto const& rule : m_mcp_network_intercept_rules)
+        rules.must_append(rule);
+
+    JsonObject result;
+    result.set("count"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
+    result.set("rules"sv, move(rules));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
+void Application::clear_network_rules(Optional<String> rule_id, MCP::OnToolCallComplete on_complete)
+{
+    size_t before = m_mcp_network_intercept_rules.size();
+    if (rule_id.has_value() && !rule_id->is_empty()) {
+        m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
+            return existing.get_string("id"sv) == *rule_id;
+        });
+    } else {
+        m_mcp_network_intercept_rules.clear();
+    }
+    size_t removed = before - m_mcp_network_intercept_rules.size();
+    sync_network_intercept_rules_to_request_servers();
+
+    record_mcp_audit_event("clear_network_rules"_string, {}, "ok"_string, MUST(String::formatted("removed {} rule(s)", removed)));
+
+    JsonObject result;
+    result.set("removed"sv, static_cast<u64>(removed));
+    result.set("remaining"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
+    on_complete(mcp_ok_json(JsonValue { move(result) }));
+}
+
 void Application::evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete on_complete)
 {
     if (m_browser_options.mcp_disable_eval_js) {
@@ -10056,17 +11209,24 @@ void Application::evaluate_javascript(u64 tab_id, String script, MCP::OnToolCall
         if (auto view = find_allowed_mcp_view(tab_id); view.has_value())
             record_mcp_sensitive_read(*view);
 
-        JsonObject payload;
-        payload.set("script"sv, move(script));
-        payload.set("args"sv, JsonArray {});
-
-        enqueue_mcp_webdriver_command(tab_id, "execute_script"_string, move(payload), {}, [this, tab_id, cb = move(cb)](Web::WebDriver::Response response) {
+        auto payload = build_async_eval_payload(move(script), 10000);
+        enqueue_mcp_webdriver_command(tab_id, "execute_async_script"_string, move(payload), {}, [this, tab_id, cb = move(cb)](Web::WebDriver::Response response) {
             if (response.is_error()) {
                 cb(scrub_mcp_tool_result(format_mcp_webdriver_error(response.error())));
                 return;
             }
+            JsonValue eval_val = response.release_value();
+            if (eval_val.is_object()) {
+                auto const& obj = eval_val.as_object();
+                if (auto err = obj.get_string("__lb_eval_err"sv); err.has_value()) {
+                    cb(scrub_mcp_tool_result(mcp_error_result(*err)));
+                    return;
+                }
+                if (obj.get_bool("__lb_eval_ok"sv).value_or(false))
+                    eval_val = obj.get("value"sv).value_or(JsonValue {});
+            }
             JsonObject result;
-            result.set("value"sv, response.value());
+            result.set("value"sv, move(eval_val));
             result = shield_mcp_json_object(this, "eval_js"sv, tab_id, result);
             cb(scrub_mcp_tool_result(mcp_ok_json(JsonValue { move(result) })));
         });

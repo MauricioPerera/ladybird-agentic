@@ -29,6 +29,9 @@ struct WEBVIEW_API FlowRunRequest {
     Optional<FlowDefinition> inline_flow;
     Optional<u64> tab_id;
     HashMap<String, String> variables;
+    HashTable<String> tainted_variables;
+    Optional<Vector<String>> allowed_origins;
+    bool allow_eval { true };
     bool require_mcp_permission { false };
     bool open_new_tab { true };
     bool close_tab_on_finish { false };
@@ -59,6 +62,8 @@ private:
         HashTable<String> tainted_runtime_vars;
         FlowRunRecord record;
         u64 tab_id { 0 };
+        Optional<Vector<String>> allowed_origins;
+        bool allow_eval { true };
         bool require_mcp_permission { false };
         bool opened_tab { false };
         bool close_tab_on_finish { false };

@@ -75,6 +75,7 @@ public:
     virtual String active_profile_name() const { return {}; }
     virtual Optional<String> active_ephemeral_container_id() const { return {}; }
     virtual bool ephemeral_default_enabled() const { return true; }
+    virtual bool webmcp_only_mode() const { return false; }
     virtual void on_mcp_session_closed() { }
     virtual void create_container_tool(String name, Optional<String> color, Optional<String> id, OnToolCallComplete) = 0;
 
@@ -93,6 +94,16 @@ public:
     virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, Optional<i32> x, Optional<i32> y, String button, u32 click_count, Vector<String> modifiers, OnToolCallComplete) = 0;
     virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, bool use_keyboard, OnToolCallComplete) = 0;
     virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, Optional<String> root_selector, OnToolCallComplete) = 0;
+    virtual void get_page_markdown(u64 tab_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, OnToolCallComplete on_complete)
+    {
+        (void)tab_id;
+        (void)root_selector;
+        (void)main_content_only;
+        (void)include_links;
+        (void)include_images;
+        (void)max_chars;
+        on_complete({ .is_error = true, .text = "get_page_markdown not implemented"_string });
+    }
     virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, Vector<String> modifiers, OnToolCallComplete) = 0;
     virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, OnToolCallComplete) = 0;
     virtual void wheel(u64 tab_id, Optional<i32> x, Optional<i32> y, Optional<String> ref, Optional<String> selector, i32 delta_x, i32 delta_y, Vector<String> modifiers, u32 duration_ms, OnToolCallComplete) = 0;
@@ -106,6 +117,20 @@ public:
     virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, OnToolCallComplete) = 0;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, OnToolCallComplete) = 0;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, OnToolCallComplete) = 0;
+    virtual void add_network_rule(JsonObject rule_args, OnToolCallComplete on_complete)
+    {
+        (void)rule_args;
+        on_complete({ .is_error = true, .text = "add_network_rule not implemented"_string });
+    }
+    virtual void list_network_rules(OnToolCallComplete on_complete)
+    {
+        on_complete({ .is_error = true, .text = "list_network_rules not implemented"_string });
+    }
+    virtual void clear_network_rules(Optional<String> rule_id, OnToolCallComplete on_complete)
+    {
+        (void)rule_id;
+        on_complete({ .is_error = true, .text = "clear_network_rules not implemented"_string });
+    }
     virtual void evaluate_javascript(u64 tab_id, String script, OnToolCallComplete) = 0;
     virtual void take_screenshot(u64 tab_id, bool redact_media, OnToolCallComplete) = 0;
 

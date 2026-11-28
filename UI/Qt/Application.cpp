@@ -991,6 +991,21 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
         m_mcp_token = state.mcp_token;
     }
     m_mcp_paused = state.mcp_paused;
+    if (state.app_mode.has_value()) {
+        m_browser_options.app_mode = WebView::AppModeOptions {
+            .app_id = state.app_mode->app_id,
+            .account_id = state.app_mode->account_id,
+            .account_label = state.app_mode->account_label,
+            .title = state.app_mode->title,
+            .icon_path = state.app_mode->icon_path,
+            .width = state.app_mode->width,
+            .height = state.app_mode->height,
+            .min_width = state.app_mode->min_width,
+            .min_height = state.app_mode->min_height,
+            .resizable = state.app_mode->resizable,
+            .show_tab_bar = state.app_mode->show_tab_bar,
+        };
+    }
     m_gpu_painting_enabled = state.gpu_painting_enabled;
     m_profile_is_temporary = state.profile_is_temporary;
 #    if defined(AK_OS_MACOS)

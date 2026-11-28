@@ -637,6 +637,21 @@ Messages::HubServer::InitializeResponse ConnectionFromUI::initialize()
     state.mcp_port = Application::the().mcp_port();
     state.mcp_token = Application::the().mcp_token();
     state.mcp_paused = Application::the().mcp_paused();
+    if (options.app_mode.has_value()) {
+        state.app_mode = Hub::AppModeState {
+            .app_id = options.app_mode->app_id,
+            .account_id = options.app_mode->account_id,
+            .account_label = options.app_mode->account_label,
+            .title = options.app_mode->title,
+            .icon_path = options.app_mode->icon_path,
+            .width = options.app_mode->width,
+            .height = options.app_mode->height,
+            .min_width = options.app_mode->min_width,
+            .min_height = options.app_mode->min_height,
+            .resizable = options.app_mode->resizable,
+            .show_tab_bar = options.app_mode->show_tab_bar,
+        };
+    }
     auto const& profile = Application::profile();
     state.config_directory = profile.paths().config;
     state.data_directory = profile.paths().data;

@@ -67,6 +67,7 @@ add_dependencies(TestLibWebView Compositor ImageDecoder RequestServer SystemProb
 
 set(TEST_SOURCES
     TestAccessibilityTreeManager.cpp
+    TestAppMode.cpp
     TestAudioServerActivity.cpp
     TestAutocompleteMuxer.cpp
     TestAutocompleteRanker.cpp

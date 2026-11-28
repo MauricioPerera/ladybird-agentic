@@ -34,6 +34,13 @@ static ErrorOr<URL::URL> validate_automation_url(StringView raw_url)
     return Error::from_string_literal("Only http:, https:, and about:blank URLs are allowed in automation flows");
 }
 
+static bool is_url_allowed_by_origins(URL::URL const& url, Vector<String> const& allowed_origins)
+{
+    if (!url.scheme().is_one_of("http"sv, "https"sv) || url.origin().is_opaque())
+        return false;
+    return allowed_origins.contains_slow(url.origin().serialize());
+}
+
 static bool uses_tainted_var(StringView tmpl, HashTable<String> const& tainted)
 {
     if (tainted.is_empty() || tmpl.is_empty())
@@ -126,6 +133,8 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
             return Error::from_string_literal("Target tab not found or permission denied");
         if (view->url().scheme() == "about"sv && view->url() != URL::about_blank())
             return Error::from_string_literal("Cannot run automation flow inside an internal about: page; select a web tab or open a new tab");
+        if (request.allowed_origins.has_value() && view->url() != URL::about_blank() && !is_url_allowed_by_origins(view->url(), *request.allowed_origins))
+            return Error::from_string_literal("Target tab is outside allowed service origins");
         resolved_tab_id = view->view_id();
     } else if (request.open_new_tab) {
         auto view = m_application.open_automation_tab(Web::HTML::ActivateTab::Yes, request.require_mcp_permission);
@@ -142,6 +151,8 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
     active->run_id = run_id;
     active->flow = flow.release_value();
     active->tab_id = resolved_tab_id;
+    active->allowed_origins = move(request.allowed_origins);
+    active->allow_eval = request.allow_eval;
     active->require_mcp_permission = request.require_mcp_permission;
     active->opened_tab = opened_tab;
     active->close_tab_on_finish = request.close_tab_on_finish;
@@ -151,6 +162,8 @@ ErrorOr<String> FlowRunner::start_run(FlowRunRequest request, Function<void(Flow
         active->runtime_vars.set(k, v);
     for (auto const& [k, v] : request.variables)
         active->runtime_vars.set(k, v);
+    for (auto const& k : request.tainted_variables)
+        active->tainted_runtime_vars.set(k);
 
     active->record.run_id = run_id;
     active->record.flow_id = active->flow.id;
@@ -251,6 +264,12 @@ void FlowRunner::run_next_step(String const& run_id)
 
     auto const idx = run.step_index;
     auto const& step = run.flow.steps[idx];
+    if (run.allowed_origins.has_value() && step.action != FlowStep::Action::Open && step.action != FlowStep::Action::Sleep) {
+        if (!is_url_allowed_by_origins(view->url(), *run.allowed_origins)) {
+            fail_run(run_id, "Service flow blocked: tab navigated outside allowed service origins"_string);
+            return;
+        }
+    }
     auto const timeout_ms = step.timeout_ms.value_or(run.flow.default_timeout_ms);
     run.step_started_at = MonotonicTime::now();
     run.record.current_step_index = idx;
@@ -277,6 +296,10 @@ void FlowRunner::run_next_step(String const& run_id)
                 return;
             }
         }
+        if (run.allowed_origins.has_value() && !is_url_allowed_by_origins(url, *run.allowed_origins)) {
+            fail_run(run_id, "Service flow blocked: target URL origin is not allowed for this service"_string);
+            return;
+        }
         if (run.require_mcp_permission) {
             if (auto policy_check = mcp_validate_url_against_policy(url, m_application.mcp_security_policy()); policy_check.is_error()) {
                 fail_run(run_id, MUST(String::formatted("{}", policy_check.error())));
@@ -302,6 +325,12 @@ void FlowRunner::run_next_step(String const& run_id)
                         if (landed_view->url().scheme() == "about"sv && landed_view->url() != URL::about_blank()) {
                             weak_self->fail_run(run_id, MUST(String::formatted("Navigation landed on browser error page '{}' (check SSL certificate or network)", landed_view->url().to_string())));
                             return;
+                        }
+                        if (auto active = weak_self->m_active_runs.get(run_id); active.has_value() && active.value()->allowed_origins.has_value()) {
+                            if (!is_url_allowed_by_origins(landed_view->url(), *active.value()->allowed_origins)) {
+                                weak_self->fail_run(run_id, "Service flow blocked: navigation redirected outside allowed service origins"_string);
+                                return;
+                            }
                         }
                     }
                     weak_self->complete_current_step(run_id, idx);
@@ -548,6 +577,10 @@ void FlowRunner::run_next_step(String const& run_id)
     }
 
     case FlowStep::Action::Eval: {
+        if (!run.allow_eval) {
+            fail_run(run_id, "Service flow blocked: 'eval' permission is disabled for this service"_string);
+            return;
+        }
         if (run.require_mcp_permission) {
             if (auto err = m_application.check_mcp_mutation_allowed(run.tab_id, "execute flow script"sv); err.has_value()) {
                 fail_run(run_id, *err);

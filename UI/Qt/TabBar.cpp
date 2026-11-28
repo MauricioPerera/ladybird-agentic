@@ -5296,7 +5296,7 @@ void TabWidget::add_page_to_page_column()
 
 void TabWidget::update_bookmarks_bar_visibility()
 {
-    m_bookmarks_bar->set_suppressed(bookmarks_are_in_sidebar());
+    m_bookmarks_bar->set_suppressed(bookmarks_are_in_sidebar() || !m_tab_bar_visible || Application::browser_options().app_mode.has_value());
 
     auto index = m_page_column_layout->indexOf(m_bookmarks_bar);
     if (m_bookmarks_bar->shows_over_page() && index != -1)

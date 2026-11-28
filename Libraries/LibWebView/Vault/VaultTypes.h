@@ -55,8 +55,10 @@ struct WEBVIEW_API MCPSecurityPolicy {
     Vector<String> allowed_containers {};
     Vector<String> allowed_domains {};
     Vector<String> blocked_domains {};
+    bool allow_private_network { false };
     bool disable_eval_js { false };
     bool disable_webmcp { false };
+    bool webmcp_only { false };
     bool disable_screenshots { false };
     bool redact_screenshot_media { false };
     size_t max_tabs { 16 };
@@ -74,6 +76,7 @@ WEBVIEW_API ErrorOr<ByteBuffer> vault_derive_key_pbkdf2(StringView passphrase, R
 WEBVIEW_API String scrub_secrets_from_string(StringView input, ReadonlySpan<String> secrets);
 
 WEBVIEW_API bool mcp_domain_matches_pattern(StringView host, StringView pattern);
+WEBVIEW_API bool mcp_host_is_private_or_internal(StringView host);
 WEBVIEW_API ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPolicy const& policy);
 WEBVIEW_API ErrorOr<String> mcp_resolve_container_against_policy(Optional<String> requested_container, MCPSecurityPolicy const& policy);
 WEBVIEW_API bool mcp_container_is_allowed_by_policy(StringView container_id, MCPSecurityPolicy const& policy);

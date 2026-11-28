@@ -1374,6 +1374,8 @@ void WebContentPage::did_start_network_request(u64 request_id, URL::URL url, Byt
     if (displays_tab()) {
         if (Application::is_initialized() && view().is_mcp_access_allowed())
             Application::the().record_mcp_network_request_started(view().view_id(), request_id, url, method, initiator_type);
+        if (Application::is_initialized() && view().is_private() == IsPrivate::No && Application::the().has_app_mode_server())
+            Application::the().record_app_service_network_started(view().view_id(), request_id, url, method, initiator_type);
         if (view().on_network_request_started)
             view().on_network_request_started(request_id, url, method, request_headers, move(request_body), move(initiator_type), move(referrer_policy), is_navigation_request, priority);
     }
@@ -1392,6 +1394,8 @@ void WebContentPage::did_finish_network_request(u64 request_id, u64 body_size, R
     if (displays_tab()) {
         if (Application::is_initialized() && view().is_mcp_access_allowed())
             Application::the().record_mcp_network_request_finished(view().view_id(), request_id, body_size, network_error);
+        if (Application::is_initialized() && view().is_private() == IsPrivate::No && Application::the().has_app_mode_server())
+            Application::the().record_app_service_network_finished(view().view_id(), request_id, body_size, network_error);
         if (view().on_network_request_finished)
             view().on_network_request_finished(request_id, body_size, timing_info, network_error);
     }
@@ -2594,6 +2598,8 @@ void WebContentPage::did_receive_network_response_headers(u64 request_id, u32 st
     if (displays_tab()) {
         if (Application::is_initialized() && view().is_mcp_access_allowed())
             Application::the().record_mcp_network_response_headers(view().view_id(), request_id, status_code, reason_phrase);
+        if (Application::is_initialized() && view().is_private() == IsPrivate::No && Application::the().has_app_mode_server())
+            Application::the().record_app_service_network_headers(view().view_id(), request_id, status_code);
         if (view().on_network_response_headers_received)
             view().on_network_response_headers_received(request_id, status_code, reason_phrase, response_headers, cache_state);
     }
@@ -3174,6 +3180,8 @@ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, 
 
         if (Application::is_initialized() && !shows_error_page(view()) && committed_url.scheme().is_one_of("http"sv, "https"sv))
             Application::the().did_finish_load_for_extensions(view(), committed_url);
+        if (Application::is_initialized() && view().is_private() == IsPrivate::No && !shows_error_page(view()) && committed_url.scheme().is_one_of("http"sv, "https"sv) && Application::the().has_app_mode_server())
+            Application::the().record_app_service_navigation(view(), committed_url);
     }
 }
 

@@ -88,6 +88,12 @@ View& Application::create_view(View::InitialState initial_state, Optional<WebVie
     auto& view_reference = *view;
     m_views.set(view->view_id(), move(view));
     view_reference.initialize(traversable);
+    if (browser_options().app_mode.has_value()
+        && (mcp_enabled() || browser_options().mcp_port.has_value())
+        && view_reference.is_private() == WebView::IsPrivate::No
+        && !view_reference.owner_view_id().has_value()) {
+        view_reference.set_mcp_access_mode(WebView::MCPAccessMode::Full);
+    }
     return view_reference;
 }
 

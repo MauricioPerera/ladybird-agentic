@@ -89,11 +89,26 @@ enum class ProfileTool {
     CPU,
 };
 
+struct AppModeOptions {
+    String app_id;
+    String account_id { "default"_string };
+    String account_label { "Default"_string };
+    String title;
+    Optional<ByteString> icon_path {};
+    int width { 1080 };
+    int height { 720 };
+    int min_width { 360 };
+    int min_height { 240 };
+    bool resizable { true };
+    bool show_tab_bar { false };
+};
+
 struct BrowserOptions {
     Vector<String> additional_font_directories {};
     Vector<URL::URL> urls;
     Vector<ByteString> raw_urls;
     Optional<HeadlessMode> headless_mode;
+    Optional<AppModeOptions> app_mode {};
     Optional<ByteString> screenshot_path {};
     u32 screenshot_delay { 1 };
     int window_width { 800 };
@@ -119,8 +134,10 @@ struct BrowserOptions {
     Vector<String> mcp_allowed_containers {};
     Vector<String> mcp_allowed_domains {};
     Vector<String> mcp_blocked_domains {};
+    bool mcp_allow_private_network { false };
     bool mcp_disable_eval_js { true };
     bool mcp_disable_webmcp { false };
+    bool mcp_webmcp_only { false };
     bool mcp_disable_screenshots { false };
     bool mcp_redact_screenshot_media { false };
     bool mcp_auto_approve { false };

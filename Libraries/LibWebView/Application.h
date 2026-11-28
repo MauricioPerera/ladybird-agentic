@@ -48,6 +48,8 @@
 #include <LibWebCommon/Loader/UserAgent.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/Page/PageId.h>
+#include <LibWebView/AppMode/AppManifest.h>
+#include <LibWebView/AppMode/AppModeServer.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BrowserProcess.h>
 #include <LibWebView/BrowsingSession.h>
@@ -473,6 +475,11 @@ public:
     void record_mcp_network_request_started(u64 view_id, u64 request_id, URL::URL const&, ByteString const& method, Optional<String> const& initiator_type);
     void record_mcp_network_response_headers(u64 view_id, u64 request_id, u32 status_code, Optional<String> const& reason_phrase);
     void record_mcp_network_request_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const&);
+    bool has_app_mode_server() const { return m_app_mode_server != nullptr; }
+    void record_app_service_network_started(u64 view_id, u64 request_id, URL::URL const&, ByteString const& method, Optional<String> const& initiator_type);
+    void record_app_service_network_headers(u64 view_id, u64 request_id, u32 status_code);
+    void record_app_service_network_finished(u64 view_id, u64 request_id, u64 body_size, Optional<Requests::NetworkError> const&);
+    void record_app_service_navigation(ViewImplementation const&, URL::URL const& committed_url);
 
     FlowStore& flow_store();
     FlowRunner& flow_runner();
@@ -615,6 +622,10 @@ private:
     ErrorOr<void> launch_request_server();
     ErrorOr<void> launch_devtools_server();
     ErrorOr<void> launch_mcp_server();
+    void ensure_notification_observer();
+    Optional<ViewImplementation&> find_or_adopt_service_view(AppServiceConfig const&, Optional<StringView> preferred_container = {});
+    void write_app_runtime_descriptor();
+    void remove_app_runtime_descriptor();
     void fail_mcp_requests_for_view(u64 view_id, StringView message);
     void fail_all_mcp_requests(StringView message);
     bool did_complete_mcp_content_command(u64 command_id, Web::WebDriver::Response&);
@@ -745,6 +756,7 @@ private:
     virtual String active_profile_name() const override;
     virtual Optional<String> active_ephemeral_container_id() const override;
     virtual bool ephemeral_default_enabled() const override;
+    virtual bool webmcp_only_mode() const override;
     virtual void on_mcp_session_closed() override;
     virtual void create_container_tool(String name, Optional<String> color, Optional<String> id, MCP::OnToolCallComplete) override;
     virtual void open_tab(Optional<String> url, bool activate, bool wait_for_load, Optional<String> container_id, MCP::OnToolCallComplete) override;
@@ -762,6 +774,7 @@ private:
     virtual void click_element(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String strategy, Optional<i32> x, Optional<i32> y, String button, u32 click_count, Vector<String> modifiers, MCP::OnToolCallComplete) override;
     virtual void type_text(u64 tab_id, Optional<String> ref, Optional<String> selector, Optional<String> element_id, String text, bool clear_first, String strategy, bool use_keyboard, MCP::OnToolCallComplete) override;
     virtual void get_page_snapshot(u64 tab_id, size_t max_elements, bool include_text, Optional<String> root_selector, MCP::OnToolCallComplete) override;
+    virtual void get_page_markdown(u64 tab_id, Optional<String> root_selector, bool main_content_only, bool include_links, bool include_images, size_t max_chars, MCP::OnToolCallComplete) override;
     virtual void press_key(u64 tab_id, String key, Optional<String> ref, Optional<String> selector, Vector<String> modifiers, MCP::OnToolCallComplete) override;
     virtual void scroll_page(u64 tab_id, String direction, i32 amount, Optional<String> ref, Optional<String> selector, MCP::OnToolCallComplete) override;
     virtual void wheel(u64 tab_id, Optional<i32> x, Optional<i32> y, Optional<String> ref, Optional<String> selector, i32 delta_x, i32 delta_y, Vector<String> modifiers, u32 duration_ms, MCP::OnToolCallComplete) override;
@@ -775,6 +788,9 @@ private:
     virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, MCP::OnToolCallComplete) override;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
+    virtual void add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete) override;
+    virtual void list_network_rules(MCP::OnToolCallComplete) override;
+    virtual void clear_network_rules(Optional<String> rule_id, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
     virtual void take_screenshot(u64 tab_id, bool redact_media, MCP::OnToolCallComplete) override;
     virtual void list_flows(MCP::OnToolCallComplete) override;
@@ -972,6 +988,8 @@ private:
     Vector<MCPAuditObserver*> m_mcp_audit_observers;
     OwnPtr<FlowStore> m_flow_store;
     OwnPtr<FlowRunner> m_flow_runner;
+    OwnPtr<FlowStore> m_app_flow_store;
+    OwnPtr<FlowRunner> m_app_flow_runner;
     OwnPtr<ExtensionStore> m_extension_store;
     OwnPtr<ExtensionManager> m_extension_manager;
     OwnPtr<SkillStore> m_skill_store;
@@ -1089,10 +1107,32 @@ private:
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
 
+    void sync_network_intercept_rules_to_request_servers();
+    Vector<JsonObject> m_mcp_network_intercept_rules;
+    ByteString m_mcp_network_intercept_rules_json;
+    u64 m_next_mcp_network_rule_id { 1 };
+
     struct HeadlessSessionState;
     HeadlessWebView& register_headless_mcp_view(NonnullOwnPtr<HeadlessWebView>, MCPAccessMode, bool activate, bool exit_on_last_close);
     OwnPtr<HeadlessSessionState> m_headless_state;
+    struct ServiceInFlightRequest {
+        URL::URL url;
+        String method;
+        Optional<String> initiator_type {};
+        Optional<u32> status_code {};
+    };
+
+    FlowStore& app_flow_store();
+    FlowRunner& app_flow_runner();
+
+    OwnPtr<AppModeServer> m_app_mode_server;
+    HashMap<String, u64> m_app_service_tabs;
+    HashMap<u64, HashMap<u64, ServiceInFlightRequest>> m_app_service_inflight_requests;
+    Optional<ByteString> m_app_runtime_descriptor_path;
+    i64 m_app_runtime_started_at_ms { 0 };
 };
+
+WEBVIEW_API StringView webmcp_shim_javascript();
 
 }
 

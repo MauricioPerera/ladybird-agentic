@@ -6,6 +6,8 @@
 
 #include <AK/Base64.h>
 #include <AK/CharacterTypes.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <AK/JsonArray.h>
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
@@ -316,6 +318,71 @@ bool mcp_domain_matches_pattern(StringView host, StringView pattern)
     return host.equals_ignoring_ascii_case(pat);
 }
 
+static bool is_private_ipv4_octets(u8 a, u8 b)
+{
+    if (a == 0 || a == 10 || a == 127)
+        return true;
+    if (a == 100 && b >= 64 && b <= 127) // CGNAT 100.64.0.0/10
+        return true;
+    if (a == 169 && b == 254) // Link-local & cloud metadata 169.254.0.0/16
+        return true;
+    if (a == 172 && b >= 16 && b <= 31) // RFC1918 172.16.0.0/12
+        return true;
+    if (a == 192 && b == 168) // RFC1918 192.168.0.0/16
+        return true;
+    if (a >= 224) // Multicast & reserved 224.0.0.0/4+
+        return true;
+    return false;
+}
+
+bool mcp_host_is_private_or_internal(StringView host)
+{
+    auto clean = host.trim_whitespace();
+    while (clean.ends_with('.'))
+        clean = clean.substring_view(0, clean.length() - 1);
+    if (clean.starts_with('[') && clean.ends_with(']') && clean.length() >= 2)
+        clean = clean.substring_view(1, clean.length() - 2);
+    if (clean.is_empty())
+        return true;
+
+    if (clean.equals_ignoring_ascii_case("localhost"sv)
+        || clean.ends_with(".localhost"sv, CaseSensitivity::CaseInsensitive)
+        || clean.ends_with(".local"sv, CaseSensitivity::CaseInsensitive)
+        || clean.ends_with(".internal"sv, CaseSensitivity::CaseInsensitive)
+        || clean.ends_with(".home.arpa"sv, CaseSensitivity::CaseInsensitive))
+        return true;
+
+    if (auto ipv4 = IPv4Address::from_string(clean); ipv4.has_value())
+        return is_private_ipv4_octets((*ipv4)[0], (*ipv4)[1]);
+
+    if (auto ipv6 = IPv6Address::from_string(clean); ipv6.has_value()) {
+        if (ipv6->is_zero())
+            return true;
+        if (ipv6->is_ipv4_mapped()) {
+            auto p6 = (*ipv6)[6];
+            return is_private_ipv4_octets(static_cast<u8>(p6 >> 8), static_cast<u8>(p6 & 0xff));
+        }
+        bool is_loopback = true;
+        for (size_t i = 0; i < 7; ++i) {
+            if ((*ipv6)[i] != 0) {
+                is_loopback = false;
+                break;
+            }
+        }
+        if (is_loopback && (*ipv6)[7] == 1)
+            return true;
+        auto p0 = (*ipv6)[0];
+        if ((p0 & 0xfe00) == 0xfc00) // Unique local fc00::/7
+            return true;
+        if ((p0 & 0xffc0) == 0xfe80) // Link-local fe80::/10
+            return true;
+        if ((p0 & 0xff00) == 0xff00) // Multicast ff00::/8
+            return true;
+    }
+
+    return false;
+}
+
 ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPolicy const& policy)
 {
     if (url == URL::about_blank())
@@ -334,17 +401,23 @@ ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPo
             return Error::from_string_literal("Navigation blocked by MCP domain denylist policy (--mcp-blocked-domains)");
     }
 
+    bool explicitly_allowlisted = false;
     if (!policy.allowed_domains.is_empty()) {
         bool allowed = false;
         for (auto const& pat : policy.allowed_domains) {
             if (mcp_domain_matches_pattern(host, pat)) {
                 allowed = true;
+                if (pat.bytes_as_string_view().trim_whitespace() != "*"sv)
+                    explicitly_allowlisted = true;
                 break;
             }
         }
         if (!allowed)
             return Error::from_string_literal("Navigation blocked by MCP domain allowlist policy (--mcp-allowed-domains)");
     }
+
+    if (!policy.allow_private_network && !explicitly_allowlisted && mcp_host_is_private_or_internal(host))
+        return Error::from_string_literal("Navigation to private/local network address blocked by MCP SSRF protection (--mcp-allow-private-network or --mcp-allowed-domains required)");
 
     return {};
 }

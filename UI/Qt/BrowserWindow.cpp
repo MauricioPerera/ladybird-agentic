@@ -529,6 +529,21 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
         on_devtools_enabled();
     if (Application::the().mcp_port().has_value())
         on_mcp_enabled();
+
+    if (auto const& app_mode = Application::browser_options().app_mode; app_mode.has_value()) {
+        m_tabs_container->set_tab_bar_visible(app_mode->show_tab_bar);
+        menuBar()->setVisible(false);
+        m_tabs_container->update_bookmarks_bar_visibility();
+        if (app_mode->icon_path.has_value()) {
+            QIcon custom_icon(QString::fromUtf8(app_mode->icon_path->characters(), static_cast<qsizetype>(app_mode->icon_path->length())));
+            if (!custom_icon.isNull())
+                setWindowIcon(custom_icon);
+        }
+        setMinimumSize(app_mode->min_width, app_mode->min_height);
+        if (!app_mode->resizable)
+            setFixedSize(app_mode->width, app_mode->height);
+        update_window_title(qstring_from_ak_string(app_mode->title));
+    }
 }
 
 BrowserWindow::~BrowserWindow()
@@ -802,7 +817,7 @@ void BrowserWindow::update_mcp_banner()
         return;
 
     auto port = Application::the().mcp_port();
-    if (!port.has_value() || is_private() == WebView::IsPrivate::Yes || (m_current_tab && m_current_tab->view().is_private() == WebView::IsPrivate::Yes)) {
+    if (is_app_mode() || !port.has_value() || is_private() == WebView::IsPrivate::Yes || (m_current_tab && m_current_tab->view().is_private() == WebView::IsPrivate::Yes)) {
         m_mcp_banner->hide();
         return;
     }
@@ -961,8 +976,15 @@ FullscreenMode& BrowserWindow::fullscreen_mode()
     return *m_fullscreen_mode;
 }
 
+bool BrowserWindow::is_app_mode()
+{
+    return Application::browser_options().app_mode.has_value();
+}
+
 bool BrowserWindow::uses_client_side_decorations()
 {
+    if (is_app_mode())
+        return false;
     return !use_native_macos_window_controls() && Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseClientSideWindowDecorations);
 }
 
@@ -1514,6 +1536,16 @@ int BrowserWindow::tab_index(Tab* tab)
 
 void BrowserWindow::update_window_title(QString const& title)
 {
+    if (auto const& app_mode = Application::browser_options().app_mode; app_mode.has_value()) {
+        auto window_title = title.isEmpty() ? qstring_from_ak_string(app_mode->title) : title;
+        if (app_mode->account_id != "default"sv && !app_mode->account_label.is_empty()) {
+            auto suffix = QStringLiteral(" — ") + qstring_from_ak_string(app_mode->account_label);
+            if (!window_title.endsWith(suffix))
+                window_title += suffix;
+        }
+        setWindowTitle(window_title);
+        return;
+    }
     char const* format = is_private() == WebView::IsPrivate::Yes
         ? "%1 - " BROWSER_PRODUCT_NAME " (Private)"
         : "%1 - " BROWSER_PRODUCT_NAME;
@@ -1626,6 +1658,14 @@ void BrowserWindow::create_menu_bar_window_controls()
 
 void BrowserWindow::update_menu_bar_visibility()
 {
+    if (is_app_mode()) {
+        if (m_menu_bar_window_controls)
+            m_menu_bar_window_controls->setVisible(false);
+        menuBar()->setVisible(false);
+        m_tabs_container->set_window_controls_visible(false);
+        return;
+    }
+
     auto show_menu_bar = show_menu_bar_option_available() && Application::settings().appearance().show_menu_bar;
 
     // Update the controls first so the menu bar measures its corner widgets with the controls visible when shown.
@@ -1899,7 +1939,8 @@ void BrowserWindow::exit_fullscreen()
     if (!current_tab())
         return;
 
-    m_tabs_container->set_tab_bar_visible(true);
+    if (!is_app_mode() || Application::browser_options().app_mode->show_tab_bar)
+        m_tabs_container->set_tab_bar_visible(true);
 
     // A full-screen window is no longer maximized, so it has to ask to be maximized again. On macOS, the window is
     // zoomed again as it leaves full screen, and asking for the normal state would then unzoom it.
@@ -2336,7 +2377,7 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
 
     auto active_tab_index = m_window_close_active_tab_index.value_or(static_cast<i64>(max(m_tabs_container->current_index(), 0)));
 
-    if (m_is_private == WebView::IsPrivate::No) {
+    if (m_is_private == WebView::IsPrivate::No && !is_app_mode()) {
         if (m_is_popup_window == IsPopupWindow::No) {
             Application::settings().set_window_settings({
                 .position = Gfx::IntPoint { pos().x(), pos().y() },

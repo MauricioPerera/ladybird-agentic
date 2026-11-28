@@ -217,6 +217,7 @@ public:
     FullscreenMode& fullscreen_mode();
 
     LadybirdButton& ladybird_button() const { return m_tabs_container->ladybird_button(); }
+    static bool is_app_mode();
     static bool has_chrome_in_titlebar();
     void window_control_buttons_changed();
 

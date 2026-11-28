@@ -77,6 +77,7 @@ public:
     HashTable<u64>& tainted_tabs() { return m_tainted_tabs; }
     bool allow_skill_write { false };
     bool allow_mock_open_tab { false };
+    bool mock_webmcp_only { false };
     Vector<MCP::TabInfo> mock_tabs;
     Vector<MCP::ContainerInfo> mock_containers;
     String mock_profile_name { "developer"_string };
@@ -181,6 +182,10 @@ public:
     virtual bool ephemeral_default_enabled() const override
     {
         return mock_ephemeral_default;
+    }
+    virtual bool webmcp_only_mode() const override
+    {
+        return mock_webmcp_only;
     }
     virtual void on_mcp_session_closed() override
     {
@@ -1344,7 +1349,7 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     auto tools_rpc = call_mcp_rpc(port, token, 2, "tools/list"sv, JsonObject {});
     auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
     EXPECT(tools.has_value());
-    EXPECT_EQ(tools->size(), 58u);
+    EXPECT_EQ(tools->size(), 62u);
 
     Optional<JsonObject> save_flow_tool;
     Optional<JsonObject> run_flow_tool;
@@ -1356,6 +1361,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     Optional<JsonObject> drag_tool;
     Optional<JsonObject> wheel_tool;
     Optional<JsonObject> snapshot_tool;
+    Optional<JsonObject> get_page_markdown_tool;
+    Optional<JsonObject> add_network_rule_tool;
     Optional<JsonObject> list_page_tools_tool;
     Optional<JsonObject> call_page_tool_tool;
     bool found_cancel_flow_run = false;
@@ -1368,6 +1375,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     bool found_console = false;
     bool found_network = false;
     bool found_wait_for = false;
+    bool found_list_network_rules = false;
+    bool found_clear_network_rules = false;
     for (size_t i = 0; i < tools->size(); ++i) {
         auto tool = tools->at(i).as_object();
         auto name = tool.get_string("name"sv).value_or(String {});
@@ -1409,6 +1418,14 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
             found_snapshot = true;
             snapshot_tool = tool;
         }
+        else if (name == "get_page_markdown"sv)
+            get_page_markdown_tool = tool;
+        else if (name == "add_network_rule"sv)
+            add_network_rule_tool = tool;
+        else if (name == "list_network_rules"sv)
+            found_list_network_rules = true;
+        else if (name == "clear_network_rules"sv)
+            found_clear_network_rules = true;
         else if (name == "get_console_logs"sv)
             found_console = true;
         else if (name == "get_network_requests"sv)
@@ -1429,6 +1446,13 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(wheel_tool.has_value());
     EXPECT(snapshot_tool.has_value());
     EXPECT(snapshot_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("root_selector"sv));
+    EXPECT(get_page_markdown_tool.has_value());
+    EXPECT(get_page_markdown_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("main_content_only"sv));
+    EXPECT(add_network_rule_tool.has_value());
+    EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("url_pattern"sv));
+    EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("action"sv));
+    EXPECT(found_list_network_rules);
+    EXPECT(found_clear_network_rules);
     EXPECT(list_page_tools_tool.has_value());
     EXPECT(call_page_tool_tool.has_value());
     EXPECT(call_page_tool_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("arguments"sv));
@@ -2715,6 +2739,49 @@ TEST_CASE(mcp_security_policy_guards)
     EXPECT_EQ(MUST(WebView::mcp_resolve_container_against_policy(OptionalNone {}, empty_policy)), "agent"sv);
 }
 
+TEST_CASE(mcp_ssrf_private_network_policy)
+{
+    EXPECT(WebView::mcp_host_is_private_or_internal("127.0.0.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("localhost"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("api.localhost"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("10.0.0.5"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("172.16.0.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("172.31.255.254"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("192.168.1.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("169.254.169.254"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("100.64.0.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("0.0.0.0"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[::1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[fe80::1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[fc00::1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[::ffff:127.0.0.1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("metadata.google.internal"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("nas.local"sv));
+
+    EXPECT(!WebView::mcp_host_is_private_or_internal("example.com"sv));
+    EXPECT(!WebView::mcp_host_is_private_or_internal("8.8.8.8"sv));
+    EXPECT(!WebView::mcp_host_is_private_or_internal("172.32.0.1"sv));
+    EXPECT(!WebView::mcp_host_is_private_or_internal("192.169.1.1"sv));
+    EXPECT(!WebView::mcp_host_is_private_or_internal("[2606:4700:4700::1111]"sv));
+
+    WebView::MCPSecurityPolicy default_policy;
+    EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://169.254.169.254/latest/meta-data/"sv).value(), default_policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://192.168.1.1/"sv).value(), default_policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://127.0.0.1:8080/"sv).value(), default_policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://[::1]:8080/"sv).value(), default_policy).is_error());
+    EXPECT(!WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("https://example.com/"sv).value(), default_policy).is_error());
+
+    WebView::MCPSecurityPolicy allow_private = default_policy;
+    allow_private.allow_private_network = true;
+    EXPECT(!WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://127.0.0.1:8080/"sv).value(), allow_private).is_error());
+    EXPECT(!WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://169.254.169.254/"sv).value(), allow_private).is_error());
+
+    WebView::MCPSecurityPolicy app_mode_policy;
+    app_mode_policy.allowed_domains.append("127.0.0.1"_string);
+    EXPECT(!WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://127.0.0.1:45000/"sv).value(), app_mode_policy).is_error());
+    EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://169.254.169.254/"sv).value(), app_mode_policy).is_error());
+}
+
 TEST_CASE(settings_user_agent_preset_roundtrip)
 {
     auto temp_dir = make_temp_mcp_dir();
@@ -3522,5 +3589,100 @@ TEST_CASE(settings_mcp_auto_start_roundtrip)
     {
         auto reloaded_again = WebView::Settings::create(settings_path);
         EXPECT(!reloaded_again.mcp_auto_start());
+    }
+}
+
+TEST_CASE(mcp_webmcp_only_privacy_gate)
+{
+    Core::EventLoop loop;
+    auto temp_dir = make_temp_mcp_dir();
+    ScopeGuard cleanup([&] { (void)FileSystem::remove(temp_dir, FileSystem::RecursionMode::Allowed); });
+
+    FakeMCPDelegate delegate(temp_dir);
+    delegate.mock_webmcp_only = true;
+    delegate.mock_tabs.append({
+        .id = 1,
+        .title = "Vault App"_string,
+        .url = "http://127.0.0.1:49000/"_string,
+        .mcp_access_mode = "webmcp-only"_string,
+        .is_active = true,
+    });
+
+    auto token = "privacy-token"_string;
+    auto server = TRY_OR_FAIL(MCP::MCPServer::create(delegate, 0, token));
+    auto port = server->local_port();
+    EXPECT(port.has_value() && *port > 0);
+
+    // 1. initialize advertises only 'tools' capability and webmcp-only instructions.
+    {
+        auto init_json = call_mcp_rpc(*port, token, 1, "initialize"sv, JsonObject {});
+        auto result = init_json.get_object("result"sv);
+        EXPECT(result.has_value());
+        auto caps = result->get_object("capabilities"sv);
+        EXPECT(caps.has_value());
+        EXPECT(caps->has("tools"sv));
+        EXPECT(!caps->has("resources"sv));
+        EXPECT(!caps->has("logging"sv));
+        EXPECT(!caps->has("extensions"sv));
+        EXPECT(result->get_string("instructions"sv)->contains("webmcp-only"sv));
+    }
+
+    // 2. tools/list exposes only the 4 permitted WebMCP discovery/call tools.
+    {
+        auto tools_rpc = call_mcp_rpc(*port, token, 2, "tools/list"sv, JsonObject {});
+        auto tools = tools_rpc.get_object("result"sv)->get_array("tools"sv);
+        EXPECT(tools.has_value());
+        EXPECT_EQ(tools->size(), 4u);
+        for (auto const& item : tools->values()) {
+            auto name = item.as_object().get_string("name"sv).value_or(String {});
+            EXPECT(name.is_one_of("list_tabs"sv, "get_active_tab"sv, "list_page_tools"sv, "call_page_tool"sv));
+        }
+    }
+
+    // 3. resources/list is empty; resources/read and skills/list return -32003.
+    {
+        auto res_list = call_mcp_rpc(*port, token, 3, "resources/list"sv, JsonObject {});
+        auto resources = res_list.get_object("result"sv)->get_array("resources"sv);
+        EXPECT(resources.has_value() && resources->is_empty());
+
+        JsonObject read_params;
+        read_params.set("uri"sv, "ladybird://notifications"_string);
+        auto res_read = call_mcp_rpc(*port, token, 4, "resources/read"sv, move(read_params));
+        EXPECT_EQ(res_read.get_object("error"sv)->get_i64("code"sv), -32003LL);
+
+        auto skills_res = call_mcp_rpc(*port, token, 5, "skills/list"sv, JsonObject {});
+        EXPECT_EQ(skills_res.get_object("error"sv)->get_i64("code"sv), -32003LL);
+    }
+
+    // 4. DOM/screenshot/JS/navigation tools are blocked and audited.
+    delegate.audit_log.clear();
+    for (auto tool_name : Array { "get_page_snapshot"sv, "get_dom_tree"sv, "take_screenshot"sv, "get_page_markdown"sv, "eval_js"sv, "open_tab"sv }) {
+        JsonObject args;
+        args.set("tab_id"sv, 1);
+        if (tool_name == "eval_js"sv)
+            args.set("script"sv, "1+1"_string);
+        auto res = call_mcp_tool(*port, token, 10, tool_name, move(args));
+        EXPECT(res.get_bool("isError"sv).value_or(false));
+    }
+    EXPECT_EQ(delegate.audit_log.size(), 6uz);
+    for (auto const& entry : delegate.audit_log)
+        EXPECT(entry.is_error);
+
+    // 5. list_tabs, list_page_tools, and call_page_tool still succeed.
+    {
+        auto tabs_res = call_mcp_tool(*port, token, 11, "list_tabs"sv, JsonObject {});
+        EXPECT(!tabs_res.get_bool("isError"sv).value_or(true));
+
+        JsonObject lp_args;
+        lp_args.set("tab_id"sv, 1);
+        auto lp_res = call_mcp_tool(*port, token, 12, "list_page_tools"sv, move(lp_args));
+        EXPECT(!lp_res.get_bool("isError"sv).value_or(true));
+
+        JsonObject call_args;
+        call_args.set("tab_id"sv, 1);
+        call_args.set("name"sv, "search_items"_string);
+        call_args.set("arguments"sv, JsonObject {});
+        auto call_res = call_mcp_tool(*port, token, 13, "call_page_tool"sv, move(call_args));
+        EXPECT(!call_res.get_bool("isError"sv).value_or(true));
     }
 }

@@ -147,6 +147,20 @@ struct Hub::TabContainerInfo {
     String color;
 }
 
+struct Hub::AppModeState {
+    String app_id;
+    String account_id;
+    String account_label;
+    String title;
+    Optional<ByteString> icon_path;
+    i32 width;
+    i32 height;
+    i32 min_width;
+    i32 min_height;
+    bool resizable;
+    bool show_tab_bar;
+}
+
 // What the UI needs from the Hub before it can show anything.
 struct Hub::InitialState {
     ByteString settings_json;
@@ -171,6 +185,7 @@ struct Hub::InitialState {
     Optional<u16> mcp_port;
     Optional<String> mcp_token;
     bool mcp_paused;
+    Optional<Hub::AppModeState> app_mode;
     ByteString profile_identifier;
     ByteString profile_identity;
     bool profile_is_temporary;
