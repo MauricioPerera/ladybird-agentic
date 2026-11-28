@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Studio — Ladybird App Mode</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/__ladybird_bridge.js"></script>
+  </head>
+  <body>
+    <div class="studio-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <img src="/icon.svg" alt="Audio Studio" width="30" height="30" />
+          <div>
+            <h1>Audio Studio</h1>
+            <p class="subtitle">BSD-2-Clause · WebMCP-First</p>
+          </div>
+        </header>
+
+        <section class="panel" aria-label="Account isolation">
+          <div class="panel-row">
+            <span class="label">Account</span>
+            <span class="pill" id="account-pill">default</span>
+          </div>
+          <div class="inline-row">
+            <select id="account-select" aria-label="Select account"></select>
+            <button id="open-account-btn" type="button" class="btn btn-sm">Open</button>
+          </div>
+          <div class="inline-row">
+            <input id="new-account-input" type="text" placeholder="new-account" aria-label="New account id" />
+            <button id="create-account-btn" type="button" class="btn btn-sm">+ Add</button>
+          </div>
+        </section>
+
+        <section class="panel" aria-label="Synthesizer">
+          <div class="panel-row">
+            <span class="label">Quick Synthesize</span>
+          </div>
+          <div class="synth-grid">
+            <select id="synth-waveform" aria-label="Waveform">
+              <option value="chord">Chord</option>
+              <option value="sine">Sine</option>
+              <option value="square">Square</option>
+              <option value="sawtooth">Sawtooth</option>
+              <option value="triangle">Triangle</option>
+              <option value="noise">Noise</option>
+            </select>
+            <input id="synth-freq" type="number" value="440" min="20" max="20000" step="1" aria-label="Frequency Hz" title="Frequency (Hz)" />
+            <input id="synth-dur" type="number" value="2.0" min="0.1" max="60" step="0.1" aria-label="Duration seconds" title="Duration (sec)" />
+            <button id="synth-btn" type="button" class="btn btn-primary btn-sm">Generate</button>
+          </div>
+        </section>
+
+        <section class="panel library-panel" aria-label="Jailed audio storage">
+          <div class="panel-row">
+            <span class="label">Library</span>
+            <div class="btn-group">
+              <label class="btn btn-sm file-label" for="import-file-input">Import</label>
+              <input id="import-file-input" type="file" accept="audio/*,.wav,.mp3,.ogg,.m4a,.flac" multiple hidden />
+              <button id="refresh-files-btn" type="button" class="btn btn-sm">Refresh</button>
+            </div>
+          </div>
+          <div class="folder-heading">audio/</div>
+          <ul id="audio-file-list" class="file-list" aria-label="Audio files"></ul>
+          <div class="folder-heading">exports/</div>
+          <ul id="export-file-list" class="file-list" aria-label="Exported files"></ul>
+        </section>
+
+        <footer class="panel runtime-panel">
+          <div class="panel-row">
+            <span class="badge" id="boot-badge" data-state="booting">booting</span>
+            <span class="mono-sm" id="mcp-access-pill">mcp: ...</span>
+          </div>
+          <div class="muted-line" id="runtime-meta">Connecting to Ladybird bridge...</div>
+        </footer>
+      </aside>
+
+      <main class="workspace">
+        <div class="doc-tabs-bar" id="doc-tabs" role="tablist" aria-label="Open documents"></div>
+
+        <section class="transport-bar" aria-label="Transport controls">
+          <div class="btn-group">
+            <button id="play-btn" type="button" class="btn btn-primary">Play</button>
+            <button id="pause-btn" type="button" class="btn">Pause</button>
+            <button id="stop-btn" type="button" class="btn">Stop</button>
+            <button id="loop-btn" type="button" class="btn" aria-pressed="false">Loop</button>
+          </div>
+
+          <div class="timecode" id="timecode">0.000s / 0.000s</div>
+
+          <label class="inline-control">
+            <span>Vol</span>
+            <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="0.85" />
+          </label>
+
+          <div class="btn-group">
+            <button id="zoom-out-btn" type="button" class="btn btn-sm" title="Zoom out">-</button>
+            <button id="zoom-reset-btn" type="button" class="btn btn-sm" title="Reset zoom">1x</button>
+            <button id="zoom-in-btn" type="button" class="btn btn-sm" title="Zoom in">+</button>
+          </div>
+
+          <div class="btn-group">
+            <button id="undo-btn" type="button" class="btn btn-sm">Undo</button>
+            <button id="redo-btn" type="button" class="btn btn-sm">Redo</button>
+            <button id="export-btn" type="button" class="btn btn-accent btn-sm">Export WAV</button>
+          </div>
+        </section>
+
+        <section class="waveform-stage">
+          <canvas id="waveform-canvas"></canvas>
+          <div class="selection-bar">
+            <span id="selection-readout">No selection (drag on waveform or call select_region)</span>
+            <button id="clear-selection-btn" type="button" class="btn btn-sm">Clear Selection</button>
+          </div>
+        </section>
+
+        <section class="bottom-dock">
+          <div class="dock-tabs" role="tablist">
+            <button type="button" class="dock-tab active" data-tab="dsp">DSP &amp; Edit</button>
+            <button type="button" class="dock-tab" data-tab="analysis">Analysis &amp; Spectrum</button>
+            <button type="button" class="dock-tab" data-tab="markers">Markers &amp; Activity</button>
+          </div>
+
+          <div class="dock-body">
+            <div class="dock-pane active" data-pane="dsp">
+              <div class="dsp-row">
+                <div class="control-group">
+                  <span class="label">Gain</span>
+                  <input id="dsp-gain-db" type="range" min="-24" max="18" step="0.5" value="0" />
+                  <span id="dsp-gain-val" class="mono-sm">0.0 dB</span>
+                  <button id="apply-gain-btn" type="button" class="btn btn-sm">Apply</button>
+                </div>
+
+                <div class="control-group">
+                  <button id="dsp-norm-btn" type="button" class="btn btn-sm">Normalize -1 dB</button>
+                  <button id="dsp-fadein-btn" type="button" class="btn btn-sm">Fade In</button>
+                  <button id="dsp-fadeout-btn" type="button" class="btn btn-sm">Fade Out</button>
+                  <button id="dsp-reverse-btn" type="button" class="btn btn-sm">Reverse</button>
+                  <button id="dsp-invert-btn" type="button" class="btn btn-sm">Invert</button>
+                </div>
+              </div>
+
+              <div class="dsp-row">
+                <div class="control-group">
+                  <span class="label">Biquad Filter</span>
+                  <select id="filter-type">
+                    <option value="lowpass">Lowpass</option>
+                    <option value="highpass">Highpass</option>
+                    <option value="bandpass">Bandpass</option>
+                    <option value="notch">Notch</option>
+                  </select>
+                  <input id="filter-freq" type="number" value="1200" min="20" max="20000" step="10" title="Cutoff Hz" />
+                  <span class="mono-sm">Hz</span>
+                  <input id="filter-q" type="number" value="0.707" min="0.1" max="20" step="0.1" title="Q factor" />
+                  <span class="mono-sm">Q</span>
+                  <button id="apply-filter-btn" type="button" class="btn btn-sm">Apply Filter</button>
+                </div>
+
+                <div class="control-group">
+                  <span class="label">Region</span>
+                  <button id="edit-trim-btn" type="button" class="btn btn-sm">Trim Selection</button>
+                  <button id="edit-cut-btn" type="button" class="btn btn-sm">Cut</button>
+                  <button id="edit-silence-btn" type="button" class="btn btn-sm">Silence</button>
+                  <button id="dsp-trimsilence-btn" type="button" class="btn btn-sm">Trim Silence</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="dock-pane" data-pane="analysis">
+              <div class="analysis-layout">
+                <div class="metrics-grid" id="metrics-grid">
+                  <div class="metric-card"><span>Peak</span><strong id="m-peak">—</strong></div>
+                  <div class="metric-card"><span>RMS</span><strong id="m-rms">—</strong></div>
+                  <div class="metric-card"><span>Crest</span><strong id="m-crest">—</strong></div>
+                  <div class="metric-card"><span>Dominant</span><strong id="m-dom">—</strong></div>
+                  <div class="metric-card"><span>Centroid</span><strong id="m-cent">—</strong></div>
+                  <div class="metric-card"><span>Clipping</span><strong id="m-clip">—</strong></div>
+                </div>
+                <div class="spectrum-box">
+                  <canvas id="spectrum-canvas"></canvas>
+                  <div class="silence-bar">
+                    <span class="label">Silence Scan</span>
+                    <input id="sil-thresh" type="number" value="-40" min="-90" max="-5" step="1" title="Threshold dBFS" />
+                    <span class="mono-sm">dB</span>
+                    <input id="sil-min-dur" type="number" value="0.25" min="0.05" max="10" step="0.05" title="Min sec" />
+                    <span class="mono-sm">s</span>
+                    <button id="detect-silence-btn" type="button" class="btn btn-sm">Detect &amp; Mark</button>
+                    <span id="silence-result" class="mono-sm"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="dock-pane" data-pane="markers">
+              <div class="markers-layout">
+                <div class="markers-col">
+                  <div class="inline-row">
+                    <input id="marker-label-input" type="text" placeholder="Marker label" />
+                    <button id="add-marker-btn" type="button" class="btn btn-sm">+ Mark Playhead</button>
+                    <button id="clear-markers-btn" type="button" class="btn btn-sm">Clear</button>
+                  </div>
+                  <ul id="markers-list" class="markers-list"></ul>
+                </div>
+                <div class="activity-col">
+                  <div class="folder-heading">Live Activity (GUI &amp; WebMCP)</div>
+                  <ul id="activity-log" class="activity-list" role="log"></ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "id": "agentic-notes",
+  "name": "Agentic Notes",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "window": {
+    "width": 1040,
+    "height": 700,
+    "minWidth": 640,
+    "minHeight": 420,
+    "resizable": true
+  },
+  "mcp": {
+    "enabled": true,
+    "allowWebMCP": true
+  },
+  "permissions": {
+    "fsRead": ["notes"],
+    "fsWrite": ["notes"],
+    "storage": true,
+    "systemInfo": true
+  }
+}

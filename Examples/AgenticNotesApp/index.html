@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic Notes</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/__ladybird_bridge.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <img src="/icon.svg" alt="Agentic Notes" width="28" height="28" />
+          <div>
+            <h1>Agentic Notes</h1>
+            <p class="subtitle">Ladybird App Mode · WebMCP</p>
+          </div>
+        </header>
+
+        <section class="account-card" aria-label="Account profile">
+          <div class="account-header">
+            <span class="account-title">Account</span>
+            <span class="account-pill" id="account-pill">default</span>
+          </div>
+          <div class="account-controls">
+            <select id="account-select" aria-label="Registered accounts"></select>
+            <button id="open-account-btn" type="button" class="btn btn-ghost btn-sm">Open</button>
+            <button id="new-account-btn" type="button" class="btn btn-ghost btn-sm">+ Add</button>
+          </div>
+          <div class="storage-meta" id="storage-meta">SQLite KV: loading...</div>
+        </section>
+
+        <div class="sidebar-actions">
+          <button id="new-note-btn" type="button" class="btn btn-primary">+ New Note</button>
+          <button id="refresh-btn" type="button" class="btn btn-ghost">Refresh</button>
+        </div>
+
+        <ul id="notes-list" class="notes-list" aria-label="Notes"></ul>
+
+        <footer class="runtime-card" id="runtime-card">
+          <div class="runtime-badge" id="runtime-status">Connecting to bridge...</div>
+          <div class="runtime-meta" id="runtime-meta"></div>
+        </footer>
+      </aside>
+
+      <main class="editor-pane">
+        <div class="editor-toolbar">
+          <input id="note-filename" type="text" placeholder="note-name.md" aria-label="Note filename" />
+          <div class="toolbar-actions">
+            <button id="save-note-btn" type="button" class="btn btn-primary">Save</button>
+            <button id="delete-note-btn" type="button" class="btn btn-danger">Delete</button>
+          </div>
+        </div>
+        <textarea id="note-content" placeholder="Write Markdown notes here. MCP agents can also call list_notes, read_note, create_note, delete_note, get_account_info, kv_get, kv_set, and kv_list via WebMCP."></textarea>
+        <div class="status-bar">
+          <span id="editor-status">Ready</span>
+          <span id="webmcp-status">WebMCP: checking...</span>
+        </div>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

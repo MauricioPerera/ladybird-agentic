@@ -1,0 +1,56 @@
+{
+  "id": "flow-studio",
+  "name": "Flow Studio",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "window": {
+    "width": 1360,
+    "height": 860,
+    "minWidth": 900,
+    "minHeight": 580,
+    "resizable": true,
+    "showTabBar": true
+  },
+  "services": {
+    "mail": {
+      "label": "Gmail",
+      "defaultUrl": "https://mail.google.com/mail/u/0/#inbox",
+      "origins": ["https://mail.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval", "flows", "network"]
+    },
+    "calendar": {
+      "label": "Google Calendar",
+      "defaultUrl": "https://calendar.google.com/calendar/u/0/r",
+      "origins": ["https://calendar.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval", "flows", "network"]
+    },
+    "docs": {
+      "label": "Drive / Docs",
+      "defaultUrl": "https://drive.google.com/drive/my-drive",
+      "origins": ["https://drive.google.com", "https://docs.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval", "flows", "network"]
+    },
+    "github": {
+      "label": "GitHub",
+      "defaultUrl": "https://github.com/notifications",
+      "origins": ["https://github.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval", "flows", "network"]
+    }
+  },
+  "mcp": {
+    "enabled": true,
+    "allowWebMCP": true
+  },
+  "permissions": {
+    "fsRead": ["exports", "packs"],
+    "fsWrite": ["exports", "packs"],
+    "storage": true,
+    "systemInfo": true,
+    "dynamicServices": true
+  }
+}

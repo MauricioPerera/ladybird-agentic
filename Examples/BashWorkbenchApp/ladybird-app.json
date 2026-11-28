@@ -1,0 +1,24 @@
+{
+  "id": "bash-workbench",
+  "name": "Bash Workbench",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "window": {
+    "width": 1120,
+    "height": 740,
+    "minWidth": 720,
+    "minHeight": 460,
+    "resizable": true
+  },
+  "mcp": {
+    "enabled": true,
+    "allowWebMCP": true
+  },
+  "permissions": {
+    "fsRead": ["workspace"],
+    "fsWrite": ["workspace"],
+    "storage": true,
+    "systemInfo": true
+  }
+}

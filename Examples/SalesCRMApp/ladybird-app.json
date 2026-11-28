@@ -1,0 +1,48 @@
+{
+  "id": "sales-crm",
+  "name": "Sales CRM",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "window": {
+    "width": 1280,
+    "height": 820,
+    "minWidth": 820,
+    "minHeight": 540,
+    "resizable": true,
+    "showTabBar": true
+  },
+  "services": {
+    "calendar": {
+      "label": "Google Calendar",
+      "defaultUrl": "https://calendar.google.com/calendar/u/0/r",
+      "origins": ["https://calendar.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval"]
+    },
+    "mail": {
+      "label": "Gmail",
+      "defaultUrl": "https://mail.google.com/mail/u/0/#inbox",
+      "origins": ["https://mail.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval"]
+    },
+    "docs": {
+      "label": "Drive / Docs",
+      "defaultUrl": "https://drive.google.com/drive/my-drive",
+      "origins": ["https://drive.google.com", "https://docs.google.com"],
+      "container": "personal",
+      "permissions": ["open", "navigate", "notifications", "eval"]
+    }
+  },
+  "mcp": {
+    "enabled": true,
+    "allowWebMCP": true
+  },
+  "permissions": {
+    "fsRead": ["attachments", "backups", "exports"],
+    "fsWrite": ["attachments", "backups", "exports"],
+    "storage": true,
+    "systemInfo": true
+  }
+}

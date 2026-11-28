@@ -1,0 +1,24 @@
+{
+  "id": "audio-studio",
+  "name": "Audio Studio",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "window": {
+    "width": 1240,
+    "height": 780,
+    "minWidth": 820,
+    "minHeight": 520,
+    "resizable": true
+  },
+  "mcp": {
+    "enabled": true,
+    "allowWebMCP": true
+  },
+  "permissions": {
+    "fsRead": ["audio", "exports"],
+    "fsWrite": ["audio", "exports"],
+    "storage": true,
+    "systemInfo": true
+  }
+}
