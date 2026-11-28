@@ -5,11 +5,13 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/Hex.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
 #include <LibCore/File.h>
+#include <LibCrypto/Hash/Hash.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibURL/Parser.h>
 #include <LibWebView/AppMode/AppManifest.h>
@@ -24,6 +26,14 @@ constexpr int MIN_WINDOW_HEIGHT = 200;
 constexpr int MAX_WINDOW_HEIGHT = 4320;
 constexpr int MIN_BOUND_WIDTH = 160;
 constexpr int MIN_BOUND_HEIGHT = 160;
+
+String source_bound_storage_id(StringView app_id, StringView source_kind, StringView canonical_source)
+{
+    auto source = ByteString::formatted("ladybird-app-storage:v1:{}:{}", source_kind, canonical_source);
+    auto digest = Crypto::Hash::digest(Crypto::Hash::HashKind::SHA256, source.bytes());
+    auto app_id_prefix = app_id.substring_view(0, min(app_id.length(), 31uz));
+    return MUST(String::formatted("{}-{}", app_id_prefix, encode_hex(digest.bytes().slice(0, 16))));
+}
 
 bool is_path_separator(char ch)
 {
@@ -291,8 +301,11 @@ ErrorOr<AppManifest> parse_local_manifest_object(JsonObject const& obj, ByteStri
         TRY(svc_err);
     }
 
+    auto storage_id = source_bound_storage_id(id, "local"sv, root_directory.view());
+
     return AppManifest {
         .id = move(id),
+        .storage_id = move(storage_id),
         .name = *name,
         .version = move(version),
         .entry = move(entry),
@@ -630,9 +643,11 @@ ErrorOr<AppManifest> AppManifest::load_from_directory(ByteString const& director
     auto basename = LexicalPath::basename(real_dir);
     auto id = sanitize_app_id(basename).value_or("local-app"_string);
     auto name = TRY(String::from_utf8(basename.is_empty() ? "Ladybird App"sv : basename.view()));
+    auto storage_id = source_bound_storage_id(id, "local"sv, real_dir.view());
 
     return AppManifest {
         .id = move(id),
+        .storage_id = move(storage_id),
         .name = move(name),
         .version = "0.1.0"_string,
         .entry = "index.html"_string,
@@ -653,9 +668,11 @@ ErrorOr<AppManifest> AppManifest::from_remote_url(StringView raw_url)
 
     auto host = parsed->serialized_host();
     auto id = sanitize_app_id(host).value_or("remote-app"_string);
+    auto storage_id = source_bound_storage_id(id, "remote"sv, parsed->origin().serialize());
 
     return AppManifest {
         .id = move(id),
+        .storage_id = move(storage_id),
         .name = TRY(String::from_utf8(host)),
         .version = "0.1.0"_string,
         .entry = ""_string,

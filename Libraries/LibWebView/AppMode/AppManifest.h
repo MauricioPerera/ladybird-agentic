@@ -73,6 +73,8 @@ struct WEBVIEW_API AppPermissions {
 
 struct WEBVIEW_API AppManifest {
     String id;
+    // Persistent authority is keyed by this source-bound identifier, never by the manifest-controlled display id.
+    String storage_id;
     String name;
     String version { "0.1.0"_string };
     String entry { "index.html"_string };

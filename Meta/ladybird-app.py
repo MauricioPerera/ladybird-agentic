@@ -32,6 +32,29 @@ def sanitize_app_id(raw: str) -> str:
     return slug
 
 
+def source_bound_storage_id(app_id: str, source_kind: str, canonical_source: str) -> str:
+    prefix = f"ladybird-app-storage:v1:{source_kind}:".encode("ascii")
+    encoded_source = os.fsencode(canonical_source) if source_kind == "local" else canonical_source.encode("utf-8")
+    source = prefix + encoded_source
+    source_digest = hashlib.sha256(source).hexdigest()[:32]
+    return f"{app_id[:31]}-{source_digest}"
+
+
+def canonical_remote_origin(parsed_url) -> str:
+    host = parsed_url.hostname
+    if not host:
+        raise ValueError("Remote app URL must include a host")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise ValueError("Remote app URL contains an invalid host") from error
+    serialized_host = f"[{host}]" if ":" in host else host
+    port = parsed_url.port
+    if port is not None and not ((parsed_url.scheme == "http" and port == 80) or (parsed_url.scheme == "https" and port == 443)):
+        serialized_host += f":{port}"
+    return f"{parsed_url.scheme.lower()}://{serialized_host.lower()}"
+
+
 def resolve_confined_file(root: Path, rel_path: str) -> Path:
     if not rel_path or ":" in rel_path or "\x00" in rel_path:
         raise ValueError(f"Invalid relative path: {rel_path!r}")
@@ -225,22 +248,41 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def resolve_app_id(target_str: str) -> tuple[str, str]:
+def resolve_app_identity(target_str: str) -> tuple[str, str, str]:
     parsed_url = urlparse(target_str)
     if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
-        host = parsed_url.hostname or "remote-app"
-        return sanitize_app_id(host), host
+        canonical_origin = canonical_remote_origin(parsed_url)
+        host = urlparse(canonical_origin).hostname or "remote-app"
+        try:
+            app_id = sanitize_app_id(host)
+        except ValueError:
+            app_id = "remote-app"
+        storage_id = source_bound_storage_id(app_id, "remote", canonical_origin)
+        return app_id, host, storage_id
 
-    target = Path(target_str).resolve()
+    target = Path(target_str).resolve(strict=True)
     if target.is_dir():
         manifest_file = target / "ladybird-app.json"
         if manifest_file.is_file():
             _, data = validate_manifest_path(manifest_file)
-            return data["id"], data["name"]
-        return sanitize_app_id(target.name), target.name
+            app_id = data["id"]
+            canonical_root = manifest_file.resolve(strict=True).parent
+            return app_id, data["name"], source_bound_storage_id(app_id, "local", str(canonical_root))
+        try:
+            app_id = sanitize_app_id(target.name)
+        except ValueError:
+            app_id = "local-app"
+        return app_id, target.name, source_bound_storage_id(app_id, "local", str(target))
 
     _, data = validate_manifest_path(target)
-    return data["id"], data["name"]
+    app_id = data["id"]
+    canonical_root = target.parent.resolve(strict=True)
+    return app_id, data["name"], source_bound_storage_id(app_id, "local", str(canonical_root))
+
+
+def resolve_app_id(target_str: str) -> tuple[str, str]:
+    app_id, app_name, _ = resolve_app_identity(target_str)
+    return app_id, app_name
 
 
 def ladybird_instance_data_dir() -> Path:
@@ -258,8 +300,8 @@ def app_runtime_dir() -> Path:
     return ladybird_instance_data_dir() / "AppRuntime"
 
 
-def runtime_descriptor_path(app_id: str, account_id: str) -> Path:
-    return app_runtime_dir() / f"{app_id}--{account_id}.json"
+def runtime_descriptor_path(storage_id: str, account_id: str) -> Path:
+    return app_runtime_dir() / f"{storage_id}--{account_id}.json"
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -445,19 +487,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    app_id, app_name = resolve_app_id(args.target)
+    app_id, app_name, storage_id = resolve_app_identity(args.target)
     records: list[dict] = []
     if args.account:
         if not APP_ID_RE.match(args.account):
             raise ValueError("--account must match ^[a-z0-9][a-z0-9_-]{0,63}$")
-        path = runtime_descriptor_path(app_id, args.account)
+        path = runtime_descriptor_path(storage_id, args.account)
         rec = inspect_runtime_record(path)
         if rec:
             records.append(rec)
     else:
         rdir = app_runtime_dir()
         if rdir.is_dir():
-            for path in sorted(rdir.glob(f"{app_id}--*.json")):
+            for path in sorted(rdir.glob(f"{storage_id}--*.json")):
                 rec = inspect_runtime_record(path)
                 if rec:
                     records.append(rec)
@@ -468,7 +510,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "appId": app_id,
                 "accountId": args.account,
                 "running": False,
-                "descriptorPath": str(runtime_descriptor_path(app_id, args.account)),
+                "descriptorPath": str(runtime_descriptor_path(storage_id, args.account)),
             }
             print(json.dumps(payload, indent=2))
         else:
@@ -490,11 +532,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    app_id, _ = resolve_app_id(args.target)
+    app_id, _, storage_id = resolve_app_identity(args.target)
     account = args.account or "default"
     if not APP_ID_RE.match(account):
         raise ValueError("--account must match ^[a-z0-9][a-z0-9_-]{0,63}$")
-    path = runtime_descriptor_path(app_id, account)
+    path = runtime_descriptor_path(storage_id, account)
     rec = inspect_runtime_record(path)
     if not rec:
         payload = {"appId": app_id, "accountId": account, "stopped": True, "wasRunning": False}
@@ -527,13 +569,13 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if args.headless and args.gui:
         raise ValueError("Pass either --headless or --gui, not both")
 
-    app_id, _ = resolve_app_id(args.target)
+    app_id, _, storage_id = resolve_app_identity(args.target)
     account = args.account or "default"
     if not APP_ID_RE.match(account):
         raise ValueError("--account must match ^[a-z0-9][a-z0-9_-]{0,63}$")
 
     desired_mode = "headless" if args.headless else ("gui" if args.gui else None)
-    path = runtime_descriptor_path(app_id, account)
+    path = runtime_descriptor_path(storage_id, account)
     existing = inspect_runtime_record(path)
 
     if existing and existing["running"]:
@@ -609,12 +651,12 @@ def cmd_connect(args: argparse.Namespace) -> int:
 
 
 def cmd_accounts(args: argparse.Namespace) -> int:
-    app_id, app_name = resolve_app_id(args.target)
-    registry_path = ladybird_instance_data_dir() / "AppAccounts" / f"{app_id}.json"
+    app_id, app_name, storage_id = resolve_app_identity(args.target)
+    registry_path = ladybird_instance_data_dir() / "AppAccounts" / f"{storage_id}.json"
     print(f"Accounts for '{app_name}' ({app_id})")
     print(f"Registry: {registry_path}")
     if not registry_path.is_file():
-        print("  (no accounts registered yet; default profile: app-" + app_id + ")")
+        print("  (no accounts registered yet; default profile: app-" + storage_id + ")")
         return 0
     data = json.loads(registry_path.read_text(encoding="utf-8"))
     accounts = data.get("accounts", [])

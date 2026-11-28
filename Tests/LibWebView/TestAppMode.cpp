@@ -166,6 +166,49 @@ TEST_CASE(app_manifest_validation_and_confinement)
     EXPECT(WebView::AppManifest::load_from_file(bad_manifest_path).is_error());
 }
 
+TEST_CASE(app_manifest_storage_identity_is_bound_to_canonical_source)
+{
+    Test::TemporaryDirectory temp { "TestAppManifestIdentity"sv };
+    auto root = MUST(FileSystem::real_path(temp.path().string()));
+
+    auto create_app = [&](StringView directory_name) {
+        auto app_directory = LexicalPath::join(root, directory_name).string();
+        MUST(Core::Directory::create(app_directory, Core::Directory::CreateDirectories::Yes));
+
+        auto index_file = MUST(Core::File::open(LexicalPath::join(app_directory, "index.html"sv).string(), Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+        MUST(index_file->write_until_depleted("<!doctype html><title>Identity</title>"sv.bytes()));
+        index_file->close();
+
+        auto manifest_path = LexicalPath::join(app_directory, "ladybird-app.json"sv).string();
+        auto manifest_file = MUST(Core::File::open(manifest_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+        MUST(manifest_file->write_until_depleted(R"JSON({
+            "id": "shared-display-id",
+            "name": "Shared Display ID",
+            "entry": "index.html"
+        })JSON"sv.bytes()));
+        manifest_file->close();
+        return manifest_path;
+    };
+
+    auto first_path = create_app("first"sv);
+    auto second_path = create_app("second"sv);
+    auto first = TRY_OR_FAIL(WebView::AppManifest::load_from_file(first_path));
+    auto first_reloaded = TRY_OR_FAIL(WebView::AppManifest::load_from_file(first_path));
+    auto colliding = TRY_OR_FAIL(WebView::AppManifest::load_from_file(second_path));
+
+    EXPECT_EQ(first.id, colliding.id);
+    EXPECT_EQ(first.to_options().app_id, "shared-display-id"_string);
+    EXPECT_EQ(first.storage_id, first_reloaded.storage_id);
+    EXPECT_NE(first.storage_id, colliding.storage_id);
+    EXPECT(WebView::AppManifest::is_valid_app_id(first.storage_id));
+    EXPECT_EQ(
+        WebView::AppManifest::profile_name_for_account(first.storage_id, "work"sv),
+        WebView::AppManifest::profile_name_for_account(first_reloaded.storage_id, "work"sv));
+    EXPECT_NE(
+        WebView::AppManifest::profile_name_for_account(first.storage_id, "work"sv),
+        WebView::AppManifest::profile_name_for_account(colliding.storage_id, "work"sv));
+}
+
 TEST_CASE(app_mode_server_assets_auth_and_fs_jail)
 {
     Core::EventLoop loop;
@@ -390,6 +433,7 @@ TEST_CASE(app_mode_accounts_registry_and_ipc)
 
     Optional<String> launched_account;
     auto manifest = TRY_OR_FAIL(WebView::AppManifest::load_from_file(manifest_path));
+    auto work_profile_name = WebView::AppManifest::profile_name_for_account(manifest.storage_id, "trabajo"sv);
     auto server = TRY_OR_FAIL(WebView::AppModeServer::create({
         .manifest = move(manifest),
         .data_directory = data_dir,
@@ -416,7 +460,7 @@ TEST_CASE(app_mode_accounts_registry_and_ipc)
 
     auto create_resp = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"accounts.create","args":{"id":"trabajo","label":"Trabajo"}})"sv, origin, token);
     EXPECT_EQ(create_resp.status_code, 200);
-    EXPECT(create_resp.body.contains("app-acct-test--trabajo"sv));
+    EXPECT(create_resp.body.contains(work_profile_name));
 
     auto list_resp = send_app_http(port, "POST"sv, "/__ladybird_ipc"sv, R"({"command":"accounts.list","args":{}})"sv, origin, token);
     EXPECT_EQ(list_resp.status_code, 200);

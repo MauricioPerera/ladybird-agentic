@@ -6,11 +6,11 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
 
 | Component | Location | Responsibility |
 | :--- | :--- | :--- |
-| Manifest parser & validator | `Libraries/LibWebView/AppMode/AppManifest.{h,cpp}` | Parses `ladybird-app.json`, confines relative asset paths, validates `mcp.access` & permissions, computes account profile names |
+| Manifest parser & validator | `Libraries/LibWebView/AppMode/AppManifest.{h,cpp}` | Parses `ladybird-app.json`, confines relative asset paths, validates `mcp.access` & permissions, and derives a source-bound storage ID from the canonical app root or remote origin |
 | Loopback app server & IPC bridge | `Libraries/LibWebView/AppMode/AppModeServer.{h,cpp}` | Serves local assets over deterministic loopback ports, injects `/__ladybird_bridge.js` (`window.ladybirdApp` + synchronous WebMCP shim), enforces Origin + `X-Ladybird-App-Token` on `/__ladybird_ipc` |
 | Persistent KV store | `Libraries/LibWebView/AppMode/AppKVStore.{h,cpp}` | SQLite-backed JSON key-value store (`AppStore.db`) scoped per app and account profile |
-| Multi-account registry | `Libraries/LibWebView/AppMode/AppAccountRegistry.{h,cpp}` | Tracks registered account slugs, labels, timestamps, and profile mappings in `<data>/AppAccounts/<app-id>.json` |
-| Application & runtime discovery | `Libraries/LibWebView/Application.{h,cpp}` | Synchronous App Mode MCP launch, `--account`, `--mcp-webmcp-only`, and live `<data>/AppRuntime/<app-id>--<account-id>.json` tracking |
+| Multi-account registry | `Libraries/LibWebView/AppMode/AppAccountRegistry.{h,cpp}` | Tracks registered account slugs, labels, timestamps, and profile mappings in `<data>/AppAccounts/<storage-id>.json` |
+| Application & runtime discovery | `Libraries/LibWebView/Application.{h,cpp}` | Synchronous App Mode MCP launch, `--account`, `--mcp-webmcp-only`, and live `<data>/AppRuntime/<storage-id>--<account-id>.json` tracking |
 | GUI tab integration | `Services/Hub/Application.cpp`, `UI/Qt/BrowserWindow.cpp` | Chromeless window sizing/icon/title and automatic `MCPAccessMode` policy grant (`Full`, `WebMCPOnly` when `--mcp-webmcp-only` / `mcp.access: "webmcp-only"`, or container policy ceiling) on non-private App Mode views |
 | MCP server privacy boundary | `Libraries/LibMCP/{MCPDelegate.h,MCPServer.cpp}` | Enforces `webmcp-only` boundary across `initialize`, `tools/list`, `tools/call`, `resources/*`, and `skills/*` |
 | Developer & lifecycle CLI | `Meta/ladybird-app.py` | `init`, `validate`, `run`, `connect`, `status`, `stop`, `accounts`, `package` |
@@ -79,11 +79,14 @@ Ladybird App Mode turns local web directories or remote origins into isolated, m
 ## Multi-Account Isolation & Storage
 
 Passing `--account <slug>` isolates every storage layer for the same app:
-- **Browser profile directory**: `app-<app-id>` (for `default`) or `app-<app-id>--<account-id>` (`Profiles/`).
+- **Source-bound identity**: `<storage-id>` combines the display ID with a SHA-256 digest of the canonical local app root or remote origin, so another source cannot claim the same persistent authority by copying a manifest ID.
+- **Browser profile directory**: `app-<storage-id>` (for `default`) or `app-<storage-id>--<account-id>` (`Profiles/`).
 - **Web storage**: Independent cookies and `localStorage` bound to the deterministic origin (`http://127.0.0.1:<port>`).
-- **SQLite KV (`AppStore.db`)**: Per-profile persistent JSON storage under `AppData/<app-id>/AppStore.db`.
-- **Jailed filesystem**: Relative paths confined to `fsRead` / `fsWrite` top-level subdirectories under `AppData/<app-id>/` with traversal and symlink checks.
-- **Account registry**: `<instance-data>/AppAccounts/<app-id>.json`.
+- **SQLite KV (`AppStore.db`)**: Per-profile persistent JSON storage under `AppData/<storage-id>/AppStore.db`.
+- **Jailed filesystem**: Relative paths confined to `fsRead` / `fsWrite` top-level subdirectories under `AppData/<storage-id>/` with traversal and symlink checks.
+- **Account registry**: `<instance-data>/AppAccounts/<storage-id>.json`.
+
+The storage ID is stable across restarts and updates at the same canonical source. Moving a local app to a different root intentionally creates a separate storage namespace.
 
 ---
 
@@ -130,7 +133,7 @@ Designed for sensitive local apps (e.g. banking/accounting, medical notes, HR da
 
 ## On-Demand Lifecycle & CLI (`Meta/ladybird-app.py`)
 
-Live non-temporary instances publish `<instance-data>/AppRuntime/<app-id>--<account-id>.json` with `pid`, `uiPid`, `mode` (`"headless" | "gui"`), `appUrl`, `mcpPort`, `mcpUrl`, `mcpToken`, `mcpAccess`, and `startedAtMs`, removing it on shutdown if owned by the exiting PID.
+Live non-temporary instances publish `<instance-data>/AppRuntime/<storage-id>--<account-id>.json` with `pid`, `uiPid`, `mode` (`"headless" | "gui"`), `appUrl`, `mcpPort`, `mcpUrl`, `mcpToken`, `mcpAccess`, and `startedAtMs`, removing it on shutdown if owned by the exiting PID. The lifecycle CLI derives the same storage ID from the app target while continuing to display the manifest ID.
 
 ```bash
 # Scaffold & validate
