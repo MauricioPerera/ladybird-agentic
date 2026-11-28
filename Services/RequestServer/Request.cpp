@@ -9,6 +9,8 @@
 #include <AK/Checked.h>
 #include <AK/GenericShorthands.h>
 #include <AK/HashMap.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <LibCore/File.h>
 #include <LibCore/MimeData.h>
 #include <LibCore/Notifier.h>
@@ -443,11 +445,14 @@ NonnullOwnPtr<Request> Request::fetch(
     HTTP::Cookie::SameSiteContext same_site_context,
     Optional<Requests::RequestTransferLeaseKey> transfer_lease,
     Optional<u32> address_selection_hint,
-    bool notify_on_cache_miss)
+    bool notify_on_cache_miss,
+    u64 originating_page_id)
 {
     auto request = adopt_own(*new Request { request_id, RequestType::Fetch, disk_cache, move(network_isolation_key), cache_mode, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, move(transfer_lease) });
     request->m_address_selection_hint = address_selection_hint;
     request->m_notify_on_cache_miss = notify_on_cache_miss;
+    request->m_originating_page_id = originating_page_id;
+    request->set_performance_origin(client.client_id(), originating_page_id);
     request->process();
 
     return request;
@@ -479,12 +484,15 @@ NonnullOwnPtr<Request> Request::revalidate(
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
-    HTTP::Cookie::SameSiteContext same_site_context)
+    HTTP::Cookie::SameSiteContext same_site_context,
+    u64 originating_page_id)
 {
     // Revalidation headers must not leak into the initiating request.
     request_headers = HTTP::HeaderList::create(request_headers->headers());
 
     auto request = adopt_own(*new Request { request_id, RequestType::BackgroundRevalidation, disk_cache, move(network_isolation_key), HTTP::CacheMode::Default, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context });
+    request->m_originating_page_id = originating_page_id;
+    request->set_performance_origin(client.client_id(), originating_page_id);
     request->process();
 
     return request;
@@ -1061,7 +1069,7 @@ void Request::handle_initial_state()
 
                     if (m_cache_entry_reader.has_value()) {
                         if (m_cache_entry_reader->revalidation_type() == HTTP::CacheEntryReader::RevalidationType::StaleWhileRevalidate)
-                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials, m_same_site_context);
+                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials, m_same_site_context, m_originating_page_id);
 
                         if (is_revalidation_request())
                             transition_to_state(State::DNSLookup);
@@ -1376,8 +1384,7 @@ void Request::handle_dns_lookup_state()
 
     // Avoid leaking hostnames resolved by the proxy.
     if (m_proxy.has_value() && m_proxy->resolves_hostnames()) {
-        m_dns_result = nullptr;
-        continue_after_dns_lookup();
+        authorize_network_access(nullptr, true);
         return;
     }
 
@@ -1412,8 +1419,7 @@ void Request::handle_dns_lookup_state()
                 self.transition_to_state(State::Error);
                 return;
             }
-            self.m_dns_result = move(dns_result);
-            self.continue_after_dns_lookup();
+            self.authorize_network_access(move(dns_result), false);
         }));
 }
 
@@ -1446,6 +1452,46 @@ u16 Request::connect_port() const
     if (m_alternative_service.has_value())
         return m_alternative_service->port;
     return m_url.port_or_default();
+}
+
+void Request::authorize_network_access(RefPtr<DNS::LookupResult const> dns_result, bool proxy_resolves_hostnames)
+{
+    if (!m_client->requires_network_authorization()) {
+        m_dns_result = move(dns_result);
+        continue_after_dns_lookup();
+        return;
+    }
+
+    auto control_connection = ControlConnectionFromClient::the();
+    if (!control_connection.has_value()) {
+        m_network_error = Requests::NetworkError::RequestServerDied;
+        transition_to_state(State::Error);
+        return;
+    }
+
+    Vector<ByteString> resolved_addresses;
+    if (dns_result) {
+        resolved_addresses.ensure_capacity(dns_result->cached_addresses().size());
+        for (auto const& address : dns_result->cached_addresses()) {
+            resolved_addresses.unchecked_append(address.visit(
+                [](IPv4Address const& ipv4) { return ipv4.to_byte_string(); },
+                [](IPv6Address const& ipv6) { return MUST(ipv6.to_string()).to_byte_string(); }));
+        }
+    }
+
+    control_connection->authorize_network_access(m_client->client_id(), m_originating_page_id, m_url, move(resolved_addresses), proxy_resolves_hostnames,
+        weak_callback(*this, [dns_result = move(dns_result)](auto& self, bool is_restricted, bool is_allowed) mutable {
+            if (self.m_state != State::DNSLookup)
+                return;
+            if (!is_allowed) {
+                self.m_network_error = Requests::NetworkError::BlockedByNetworkPolicy;
+                self.transition_to_state(State::Error);
+                return;
+            }
+            self.m_private_network_access_restricted |= is_restricted;
+            self.m_dns_result = move(dns_result);
+            self.continue_after_dns_lookup();
+        }));
 }
 
 void Request::continue_after_dns_lookup()
@@ -1527,6 +1573,8 @@ void Request::handle_connect_state()
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
     set_option(CURLOPT_CONNECT_ONLY, 1L);
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
+    if (m_private_network_access_restricted)
+        set_option(CURLOPT_FRESH_CONNECT, 1L);
 
     // Pre-populate the multi's hostcache so libcurl skips its threaded resolver entirely.
     set_curl_resolve_list(m_dns_result ? build_curl_resolve_list(*m_dns_result, m_url.serialized_host(), m_url.port_or_default()) : Optional<ByteString> {});
@@ -1698,6 +1746,8 @@ void Request::handle_fetch_state()
     }
 
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
+    if (m_private_network_access_restricted)
+        set_option(CURLOPT_FRESH_CONNECT, 1L);
 
     set_curl_resolve_list(m_dns_result ? build_curl_resolve_list(*m_dns_result, connect_host(), connect_port()) : Optional<ByteString> {});
 

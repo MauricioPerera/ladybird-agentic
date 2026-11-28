@@ -2764,10 +2764,18 @@ TEST_CASE(mcp_ssrf_private_network_policy)
     EXPECT(WebView::mcp_host_is_private_or_internal("169.254.169.254"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("100.64.0.1"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("0.0.0.0"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("192.0.0.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("192.0.2.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("198.18.0.1"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("203.0.113.1"sv));
+    EXPECT(!WebView::mcp_host_is_private_or_internal("192.0.0.9"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("[::1]"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("[fe80::1]"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("[fc00::1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[2001:db8::1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[3fff::1]"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("[::ffff:127.0.0.1]"sv));
+    EXPECT(WebView::mcp_host_is_private_or_internal("[64:ff9b::7f00:1]"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("metadata.google.internal"sv));
     EXPECT(WebView::mcp_host_is_private_or_internal("nas.local"sv));
 
@@ -2793,6 +2801,30 @@ TEST_CASE(mcp_ssrf_private_network_policy)
     app_mode_policy.allowed_domains.append("127.0.0.1"_string);
     EXPECT(!WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://127.0.0.1:45000/"sv).value(), app_mode_policy).is_error());
     EXPECT(WebView::mcp_validate_url_against_policy(URL::Parser::basic_parse("http://169.254.169.254/"sv).value(), app_mode_policy).is_error());
+
+    auto public_url = URL::Parser::basic_parse("https://public.example/"sv).value();
+    Vector<ByteString> public_addresses { "93.184.216.34"sv };
+    Vector<ByteString> mixed_addresses { "93.184.216.34"sv, "169.254.169.254"sv };
+    Vector<ByteString> malformed_addresses { "not-an-address"sv };
+    Vector<ByteString> no_addresses;
+    EXPECT(WebView::mcp_resolved_network_access_is_allowed(public_addresses, false));
+    EXPECT(!WebView::mcp_resolved_network_access_is_allowed(mixed_addresses, false));
+    EXPECT(!WebView::mcp_resolved_network_access_is_allowed(malformed_addresses, false));
+    EXPECT(!WebView::mcp_resolved_network_access_is_allowed(no_addresses, true));
+    EXPECT(!WebView::mcp_url_may_access_private_network(public_url, default_policy));
+    EXPECT(WebView::mcp_url_may_access_private_network(public_url, allow_private));
+
+    auto blocked_private = allow_private;
+    blocked_private.blocked_domains.append("public.example"_string);
+    EXPECT(!WebView::mcp_url_may_access_private_network(public_url, blocked_private));
+
+    WebView::MCPSecurityPolicy wildcard_policy;
+    wildcard_policy.allowed_domains.append("*"_string);
+    EXPECT(!WebView::mcp_url_may_access_private_network(public_url, wildcard_policy));
+
+    WebView::MCPSecurityPolicy explicit_policy;
+    explicit_policy.allowed_domains.append("*.example"_string);
+    EXPECT(WebView::mcp_url_may_access_private_network(public_url, explicit_policy));
 }
 
 TEST_CASE(settings_user_agent_preset_roundtrip)

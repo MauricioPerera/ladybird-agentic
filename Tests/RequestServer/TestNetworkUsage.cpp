@@ -37,7 +37,7 @@ struct TestServer {
         remote_transport = MUST(pair.remote_handle.create_transport());
         connection = RequestServer::ConnectionFromClient::construct(
             move(pair.local), RequestServer::IsPrivate::No, RequestServer::SiteBinding::Unrestricted,
-            connections, request_transfer_leases, Optional<HTTP::DiskCache&> {});
+            connections, request_transfer_leases, Optional<HTTP::DiskCache&> {}, true);
 
         auto message = make<Messages::RequestServerControl::SetPerformanceMonitorEnabled>(true);
         VERIFY(!MUST(static_cast<RequestServerControlEndpoint::Stub&>(*control_connection).handle(move(message))));
@@ -94,6 +94,27 @@ struct TestServer {
         });
     }
 
+    Requests::NetworkError wait_for_request_error(u64 request_id)
+    {
+        auto wake_timer = Core::Timer::create_repeating(AK::Duration::from_milliseconds(10), [] { });
+        wake_timer->start();
+
+        Optional<Requests::NetworkError> network_error;
+        event_loop.spin_until([&] {
+            read_control_messages();
+            (void)remote_transport->read_as_many_messages_as_possible_without_blocking([&](auto&& raw_message) {
+                auto message = MUST(RequestClientEndpoint::decode_message(raw_message.bytes.bytes(), raw_message.attachments));
+                if (message->message_id() != Messages::RequestClient::RequestFinished::static_message_id())
+                    return;
+                auto& finished = static_cast<Messages::RequestClient::RequestFinished&>(*message);
+                if (finished.request_id() == request_id)
+                    network_error = finished.network_error().value_or(Requests::NetworkError::Unknown);
+            });
+            return network_error.has_value();
+        });
+        return *network_error;
+    }
+
     // Runs the event loop until RequestServer has reported at least this much traffic, and returns its reports.
     Vector<Requests::NetworkUsage> wait_for_network_usage(u64 download_bytes, u64 upload_bytes)
     {
@@ -117,10 +138,15 @@ struct TestServer {
     void read_control_messages()
     {
         Vector<NonnullOwnPtr<Messages::RequestServerControlClient::RetrieveHttpCookie>> cookie_requests;
+        Vector<NonnullOwnPtr<Messages::RequestServerControlClient::AuthorizeNetworkAccess>> network_authorization_requests;
         (void)control_remote_transport->read_as_many_messages_as_possible_without_blocking([&](auto&& raw_message) {
             auto message = MUST(RequestServerControlClientEndpoint::decode_message(raw_message.bytes.bytes(), raw_message.attachments));
             if (message->message_id() == Messages::RequestServerControlClient::RetrieveHttpCookie::static_message_id()) {
                 cookie_requests.append(message.template release_nonnull<Messages::RequestServerControlClient::RetrieveHttpCookie>());
+                return;
+            }
+            if (message->message_id() == Messages::RequestServerControlClient::AuthorizeNetworkAccess::static_message_id()) {
+                network_authorization_requests.append(message.template release_nonnull<Messages::RequestServerControlClient::AuthorizeNetworkAccess>());
                 return;
             }
             if (message->message_id() == Messages::RequestServerControlClient::NetworkUsage::static_message_id())
@@ -130,6 +156,11 @@ struct TestServer {
         for (auto const& cookie_request : cookie_requests) {
             auto message = make<Messages::RequestServerControl::RetrievedHttpCookie>(
                 cookie_request->client_id(), cookie_request->request_id(), cookie_request->request_type(), cookie_request->cookie_request_id(), String {});
+            VERIFY(!MUST(static_cast<RequestServerControlEndpoint::Stub&>(*control_connection).handle(move(message))));
+        }
+        for (auto const& authorization_request : network_authorization_requests) {
+            authorized_addresses = authorization_request->resolved_addresses();
+            auto message = make<Messages::RequestServerControl::NetworkAccessAuthorized>(authorization_request->authorization_id(), authorization_is_restricted, authorization_is_allowed);
             VERIFY(!MUST(static_cast<RequestServerControlEndpoint::Stub&>(*control_connection).handle(move(message))));
         }
     }
@@ -142,6 +173,9 @@ struct TestServer {
     OwnPtr<IPC::Transport> remote_transport;
     RefPtr<RequestServer::ConnectionFromClient> connection;
     Vector<Requests::NetworkUsage> network_usage;
+    Vector<ByteString> authorized_addresses;
+    bool authorization_is_restricted { false };
+    bool authorization_is_allowed { true };
 };
 
 // A local HTTP server that answers every request with a body of the given size.
@@ -222,6 +256,20 @@ TEST_CASE(request_traffic_is_reported_under_the_client_that_made_it)
         downloaded += entry.download_bytes;
     }
     EXPECT_EQ(downloaded, 1000u);
+}
+
+TEST_CASE(network_policy_denial_stops_request_before_connect)
+{
+    TestServer server;
+    HTTPServer http_server(1000);
+    server.authorization_is_restricted = true;
+    server.authorization_is_allowed = false;
+
+    server.start_request(1, http_server.url(), 42);
+
+    EXPECT_EQ(server.wait_for_request_error(1), Requests::NetworkError::BlockedByNetworkPolicy);
+    EXPECT_EQ(server.authorized_addresses.size(), 1u);
+    EXPECT_EQ(server.authorized_addresses.first(), "127.0.0.1"sv);
 }
 
 TEST_CASE(websocket_traffic_is_reported_as_it_crosses_the_socket)

@@ -72,17 +72,18 @@ public:
     bool websocket_retrieved_http_cookie(Badge<ControlConnectionFromClient>, u64 websocket_id, u64 cookie_request_id, String cookie);
 
     IsPrivate is_private() const { return m_is_private; }
+    bool requires_network_authorization() const { return m_requires_network_authorization; }
 
     // Lets a bound client make requests for documents of frame_site under a top-level document of top_level_site. A
     // frame site of nothing stands for documents with opaque origins.
     void bind_to_site(Badge<ControlConnectionFromClient>, Utf16String const& top_level_site, Optional<Utf16String> const& frame_site);
 
-    void start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey, ByteString method, URL::URL, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials, HTTP::Cookie::SameSiteContext);
+    void start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey, ByteString method, URL::URL, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials, HTTP::Cookie::SameSiteContext, u64 originating_page_id);
     void request_complete(Badge<Request>, Request const&);
     void fetch_aia_intermediate(Badge<Request>, ByteString const& url, u64 for_request_id);
 
 private:
-    ConnectionFromClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, SiteBinding, ConnectionMap&, RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
+    ConnectionFromClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, SiteBinding, ConnectionMap&, RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>, bool requires_network_authorization = false);
 
     bool may_use_network_isolation_key(HTTP::NetworkIsolationKey const&, URL::URL const* request_url = nullptr) const;
 
@@ -113,9 +114,11 @@ private:
     size_t total_websocket_count() const;
     void connect_websocket(u64 websocket_id, u64 originating_page_id, URL::URL, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> request_headers);
     void look_up_websocket_host(u64 websocket_id, u64 originating_page_id, URL::URL, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy>);
-    void open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy>, RefPtr<DNS::LookupResult const>);
+    void authorize_and_open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy>, RefPtr<DNS::LookupResult const>, bool proxy_resolves_hostnames);
+    void open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy>, RefPtr<DNS::LookupResult const>, bool fresh_connect);
 
     IsPrivate m_is_private { IsPrivate::No };
+    bool m_requires_network_authorization { false };
 
     SiteBinding m_site_binding { SiteBinding::Bound };
     struct BoundSite {

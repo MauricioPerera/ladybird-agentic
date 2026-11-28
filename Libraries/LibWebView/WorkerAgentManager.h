@@ -81,6 +81,7 @@ public:
     // over its own connection, wherever it runs.
     void post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage, CanonicalEnvironmentSettingsObject const& source_settings, IPC::ConnectionBase const& source_connection, u64 session_id);
     void for_each_request_server_site_bindings(Function<IterationDecision(RequestServerSiteBindings&)> const&);
+    void for_each_page_owner_of_request_server_client(int client_id, Function<IterationDecision(WebContentClient&, Web::PageId)> const&) const;
     WebContentClient* host_of_request_server_client(int client_id) const;
     ErrorOr<void> simulate_request_server_connection_loss_for_testing(WebContentClient&, Web::PageId page_id);
 
@@ -108,12 +109,18 @@ private:
         Web::HTML::WorkerAgentOwnerToken token { 0 };
     };
 
+    struct DedicatedWorkerAncestry {
+        Optional<Owner> page_owner;
+        WeakPtr<WebWorkerClient> worker_owner;
+    };
+
     struct DedicatedWorkerOwner {
         IsPrivate is_private { IsPrivate::No };
         WebContentClient& process;
         RequestServerSiteBindings const& request_server_site_bindings;
         Vector<LocalFileRoot> local_file_roots;
         bool has_cross_site_ancestor { false };
+        DedicatedWorkerAncestry ancestry;
     };
     void register_dedicated_worker(DedicatedWorkerOwner const&, CanonicalEnvironmentSettingsObject const& outside_settings, Web::HTML::WorkerAgentStartRequest, IPC::TransportHandle worker_transport);
 
@@ -168,6 +175,7 @@ private:
     // A worker counts toward the workers of its top-level site until its thread closes its connection as it ends, also
     // once its agent is gone.
     Vector<NonnullRefPtr<WebWorkerClient>> m_clients;
+    HashMap<WebWorkerClient*, DedicatedWorkerAncestry> m_dedicated_worker_ancestries;
 
     Web::HTML::WorkerAgentId m_next_agent_id { 0 };
     HashMap<Web::HTML::WorkerAgentId, WorkerAgent> m_agents;
