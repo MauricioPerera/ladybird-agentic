@@ -24,6 +24,7 @@
 #include <RequestServer/CertificateExceptions.h>
 #include <RequestServer/ConnectionFromClient.h>
 #include <RequestServer/ControlConnectionFromClient.h>
+#include <RequestServer/NetworkIntercept.h>
 #include <RequestServer/Request.h>
 #include <RequestServer/Resolver.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
@@ -996,6 +997,9 @@ void Request::process()
     case State::ServeSubstitution:
         handle_serve_substitution_state();
         break;
+    case State::ServeIntercept:
+        handle_serve_intercept_state();
+        break;
     case State::DNSLookup:
         handle_dns_lookup_state();
         break;
@@ -1026,6 +1030,22 @@ void Request::handle_initial_state()
             return;
         }
     }
+
+    // Check runtime in-flight network interception rules (MCP block / fulfill / modify_headers).
+    if (auto matched = NetworkInterceptStore::the().match(m_url, m_method); matched.has_value()) {
+        if (matched->action == NetworkInterceptRule::Action::Block) {
+            m_network_error = Requests::NetworkError::UnableToConnect;
+            transition_to_state(State::Error);
+            return;
+        }
+        if (matched->action == NetworkInterceptRule::Action::Fulfill) {
+            m_matched_intercept_rule = move(matched);
+            transition_to_state(State::ServeIntercept);
+            return;
+        }
+    }
+
+    NetworkInterceptStore::the().apply_header_modifications(m_url, m_method, *m_request_headers);
 
     if (m_cache_mode == HTTP::CacheMode::NoStore) {
         m_cache_status = HTTP::CacheRequest::CacheStatus::NotCached;
@@ -1276,6 +1296,51 @@ void Request::handle_serve_substitution_state()
         m_network_error = Requests::NetworkError::Unknown;
         transition_to_state(State::Error);
         return;
+    }
+
+    m_curl_result_code = CURLE_OK;
+
+    if (write_queued_bytes_without_blocking().is_error())
+        transition_to_state(State::Error);
+}
+
+void Request::handle_serve_intercept_state()
+{
+    VERIFY(m_matched_intercept_rule.has_value());
+    auto const& rule = *m_matched_intercept_rule;
+
+    m_status_code = rule.status_code;
+    m_reason_phrase = MUST(String::from_utf8(HTTP::reason_phrase_for_code(*m_status_code)));
+
+    bool has_content_type = false;
+    bool has_cors = false;
+    for (auto const& h : rule.headers) {
+        if (h.name.equals_ignoring_ascii_case("Content-Length"sv))
+            continue;
+        if (h.name.equals_ignoring_ascii_case("Content-Type"sv))
+            has_content_type = true;
+        if (h.name.equals_ignoring_ascii_case("Access-Control-Allow-Origin"sv))
+            has_cors = true;
+        m_response_headers->append(h);
+    }
+
+    if (!has_content_type)
+        m_response_headers->append({ "Content-Type"sv, rule.content_type.to_byte_string() });
+    m_response_headers->append({ "Content-Length"sv, ByteString::number(rule.body.size()) });
+    if (!has_cors)
+        m_response_headers->append({ "Access-Control-Allow-Origin"sv, "*"sv });
+
+    if (inform_client_request_started().is_error())
+        return;
+    transfer_headers_to_client_if_needed();
+
+    if (!rule.body.is_empty()) {
+        auto write_result = m_response_buffer.write_some(rule.body);
+        if (write_result.is_error()) {
+            m_network_error = Requests::NetworkError::Unknown;
+            transition_to_state(State::Error);
+            return;
+        }
     }
 
     m_curl_result_code = CURLE_OK;

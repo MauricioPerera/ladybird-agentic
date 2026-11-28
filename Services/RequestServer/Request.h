@@ -36,6 +36,7 @@
 #include <RequestServer/AlternativeServices.h>
 #include <RequestServer/CacheLevel.h>
 #include <RequestServer/Forward.h>
+#include <RequestServer/NetworkIntercept.h>
 #include <RequestServer/RequestPipe.h>
 #include <RequestServer/RequestType.h>
 
@@ -155,6 +156,7 @@ private:
         WaitForCache,      // Wait for an existing cache entry to complete before proceeding.
         FailedCacheOnly,   // An only-if-cached request failed to find a cache entry.
         ServeSubstitution, // Serve content from a local file substitution.
+        ServeIntercept,    // Serve synthetic response from an in-flight network intercept rule.
         DNSLookup,         // Resolve the URL's host.
         RetrieveCookie,    // Retrieve cookies from the UI process.
         Connect,           // Issue a network request to connect to the URL.
@@ -182,6 +184,8 @@ private:
             return "FailedCacheOnly"sv;
         case State::ServeSubstitution:
             return "ServeSubstitution"sv;
+        case State::ServeIntercept:
+            return "ServeIntercept"sv;
         case State::DNSLookup:
             return "DNSLookup"sv;
         case State::RetrieveCookie:
@@ -231,6 +235,7 @@ private:
     void wait_for_cache_timed_out();
     void handle_failed_cache_only_state();
     void handle_serve_substitution_state();
+    void handle_serve_intercept_state();
     void handle_dns_lookup_state();
     void continue_after_dns_lookup();
     void set_curl_resolve_list(Optional<ByteString> host_entry);
@@ -389,6 +394,7 @@ private:
     size_t m_bytes_transferred_to_client { 0 };
 
     Optional<Requests::NetworkError> m_network_error;
+    Optional<NetworkInterceptRule> m_matched_intercept_rule;
     bool m_content_decoding_disabled { false };
 
     Optional<u32> m_address_selection_hint;

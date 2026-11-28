@@ -53,6 +53,8 @@ private:
 
     virtual void set_proxy_configuration(HTTP::ProxyConfiguration) override;
 
+    virtual void set_network_intercept_rules(ByteString rules_json) override;
+
     virtual void trust_certificate(ByteString host, u16 port, ByteString fingerprint) override;
 
     virtual void set_performance_monitor_enabled(bool) override;

@@ -10,6 +10,7 @@
 #include <RequestServer/AlternativeServices.h>
 #include <RequestServer/CertificateExceptions.h>
 #include <RequestServer/ControlConnectionFromClient.h>
+#include <RequestServer/NetworkIntercept.h>
 #include <RequestServer/Request.h>
 #include <RequestServer/Resolver.h>
 
@@ -348,6 +349,12 @@ void ControlConnectionFromClient::stored_response_cookies_and_hsts_policy(int cl
             }
         }
     }
+}
+
+void ControlConnectionFromClient::set_network_intercept_rules(ByteString rules_json)
+{
+    if (auto result = NetworkInterceptStore::the().set_rules_from_json(rules_json); result.is_error())
+        warnln("RequestServer: Failed applying network intercept rules: {}", result.error());
 }
 
 }
