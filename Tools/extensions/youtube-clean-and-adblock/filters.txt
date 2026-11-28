@@ -1,4 +1,22 @@
-! Native Ladybird ContentBlocker cosmetic + network rules (loaded into Web::ContentBlocker)
+! Native Ladybird ContentBlocker exception + cosmetic rules (loaded into Web::ContentBlocker)
+! Allow YouTube ad-detection bait/telemetry endpoints on youtube.com so EasyList/EasyPrivacy do not trip anti-adblock
+@@||youtube.com/pagead/$domain=youtube.com
+@@||youtube.com/api/stats/ads$domain=youtube.com
+@@||youtube.com/api/stats/atr$domain=youtube.com
+@@||youtube.com/api/stats/qoe$domain=youtube.com
+@@||youtube.com/api/stats/playback$domain=youtube.com
+@@||youtube.com/api/stats/watchtime$domain=youtube.com
+@@||youtube.com/ptracking$domain=youtube.com
+@@||youtube.com/get_midroll_info$domain=youtube.com
+@@||youtube.com/generate_204$domain=youtube.com
+@@||googleads.g.doubleclick.net/pagead/id$domain=youtube.com
+@@||static.doubleclick.net/instream/ad_status.js$domain=youtube.com
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=youtube.com
+@@||googlesyndication.com/pagead/$domain=youtube.com
+@@||jnn-pa.googleapis.com/$domain=youtube.com
+@@||youtube.com/youtubei/v1/player/ad_break$domain=youtube.com
+
+! Cosmetic hiding for YouTube Shorts, ad slots, and enforcement overlays
 youtube.com##ytd-reel-shelf-renderer
 youtube.com##ytd-rich-shelf-renderer[is-shorts]
 youtube.com##ytd-shorts
@@ -10,10 +28,9 @@ youtube.com##ytd-player-legacy-desktop-watch-ads-renderer
 youtube.com##ytd-banner-promo-renderer
 youtube.com##ytd-display-ad-renderer
 youtube.com##ytd-promoted-sparkles-web-renderer
-youtube.com###player-ads
-youtube.com###masthead-ad
+youtube.com##ytd-enforcement-message-view-model
+youtube.com##tp-yt-paper-dialog:has(ytd-enforcement-message-view-model)
 youtube.com##.ytp-ad-overlay-container
 youtube.com##.ytp-ad-overlay-slot
 youtube.com##a[title="Shorts"]
 youtube.com##a[href^="/shorts"]
-||youtube.com/youtubei/v1/player/ad_break^$xmlhttprequest

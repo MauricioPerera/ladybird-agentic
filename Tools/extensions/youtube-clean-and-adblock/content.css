@@ -10,6 +10,9 @@ ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"],
 ytd-banner-promo-renderer,
 ytd-display-ad-renderer,
 ytd-promoted-sparkles-web-renderer,
+ytd-enforcement-message-view-model,
+tp-yt-paper-dialog.lb-yt-hidden-enforcement,
+tp-yt-paper-dialog:has(ytd-enforcement-message-view-model),
 ytd-guide-entry-renderer a[title="Shorts"],
 ytd-mini-guide-entry-renderer[aria-label="Shorts"],
 #player-ads,
@@ -19,4 +22,10 @@ ytd-mini-guide-entry-renderer[aria-label="Shorts"],
 .ytp-ad-text-overlay,
 .ytp-ad-image-overlay {
   display: none !important;
+}
+
+tp-yt-iron-overlay-backdrop.lb-yt-hidden-backdrop {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
