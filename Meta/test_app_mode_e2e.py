@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -58,18 +59,22 @@ def instance_data_dir() -> Path:
     return base / "Ladybird"
 
 
-def clean_test_account(app_id: str, account_id: str) -> None:
+def clean_test_account(app_root: Path, account_id: str) -> None:
+    manifest = json.loads((app_root / "ladybird-app.json").read_text(encoding="utf-8"))
+    app_id = manifest["id"]
+    source = b"ladybird-app-storage:v1:local:" + os.fsencode(app_root.resolve(strict=True))
+    storage_id = f"{app_id[:31]}-{hashlib.sha256(source).hexdigest()[:32]}"
     bases = [instance_data_dir()]
     if sys.platform == "win32" and os.environ.get("APPDATA"):
         bases.append(Path(os.environ["APPDATA"]) / "Ladybird")
     for base in bases:
-        profile_dir = base / "Profiles" / f"app-{app_id}--{account_id}"
+        profile_dir = base / "Profiles" / f"app-{storage_id}--{account_id}"
         if profile_dir.exists():
             shutil.rmtree(profile_dir, ignore_errors=True)
     data_dir = instance_data_dir()
-    runtime_file = data_dir / "AppRuntime" / f"{app_id}--{account_id}.json"
+    runtime_file = data_dir / "AppRuntime" / f"{storage_id}--{account_id}.json"
     runtime_file.unlink(missing_ok=True)
-    registry_file = data_dir / "AppAccounts" / f"{app_id}.json"
+    registry_file = data_dir / "AppAccounts" / f"{storage_id}.json"
     if registry_file.is_file():
         try:
             doc = json.loads(registry_file.read_text(encoding="utf-8"))
@@ -193,7 +198,7 @@ def test_validate_examples() -> None:
 def test_bash_workbench_automcp_and_persistence(binary: Path) -> None:
     print("[2/7] Testing BashWorkbench auto-MCP, just-bash, disk sync, KV & restart persistence...")
     acct = "e2e-suite-bash"
-    clean_test_account("bash-workbench", acct)
+    clean_test_account(BASH_APP, acct)
     manifest = str(BASH_APP / "ladybird-app.json")
     proc1 = proc2 = None
     try:
@@ -247,7 +252,7 @@ def test_bash_workbench_automcp_and_persistence(binary: Path) -> None:
     finally:
         stop_proc(proc1)
         stop_proc(proc2)
-        clean_test_account("bash-workbench", acct)
+        clean_test_account(BASH_APP, acct)
 
 
 def test_webmcp_only_privacy_boundary(binary: Path) -> None:
@@ -317,7 +322,7 @@ window.addEventListener('ladybird:webmcp-ready', reg); reg();
 def test_runtime_connect_status_stop() -> None:
     print("[4/7] Testing AppRuntime discovery and connect/status/stop lifecycle...")
     acct = "e2e-suite-life"
-    clean_test_account("bash-workbench", acct)
+    clean_test_account(BASH_APP, acct)
     try:
         c1 = run_cli("connect", str(BASH_APP), "--account", acct, "--headless", "--webmcp-only", "--json")
         assert c1["running"] is True and c1["reused"] is False and c1["mode"] == "headless" and c1["mcpAccess"] == "webmcp-only"
@@ -337,13 +342,13 @@ def test_runtime_connect_status_stop() -> None:
         assert run_cli("status", str(BASH_APP), "--account", acct, "--json")["running"] is False
     finally:
         run_cli("stop", str(BASH_APP), "--account", acct, "--json", check=False)
-        clean_test_account("bash-workbench", acct)
+        clean_test_account(BASH_APP, acct)
 
 
 def test_audio_studio_webmcp_only_and_persistence(binary: Path) -> None:
     print("[5/7] Testing AudioStudioApp (webmcp-only, Range probe, DSP, undo, markers & persistence)...")
     acct = "e2e-suite-audio"
-    clean_test_account("audio-studio", acct)
+    clean_test_account(AUDIO_APP, acct)
     manifest = str(AUDIO_APP / "ladybird-app.json")
     proc1 = proc2 = None
     try:
@@ -454,13 +459,13 @@ def test_audio_studio_webmcp_only_and_persistence(binary: Path) -> None:
     finally:
         stop_proc(proc1)
         stop_proc(proc2)
-        clean_test_account("audio-studio", acct)
+        clean_test_account(AUDIO_APP, acct)
 
 
 def test_sales_crm_full_spec_and_privacy(binary: Path) -> None:
     print("[6/7] Testing SalesCRMApp (full-mode CRM CRUD + recurring MRR + 3-tier webmcp-only PII isolation + persistence)...")
     acct = "e2e-suite-crm"
-    clean_test_account("sales-crm", acct)
+    clean_test_account(CRM_APP, acct)
     manifest = str(CRM_APP / "ladybird-app.json")
     canary_name = "Elena Vance-Canary"
     canary_email = "ceo-secret@acme-vip.example"
@@ -610,7 +615,7 @@ def test_sales_crm_full_spec_and_privacy(binary: Path) -> None:
     finally:
         stop_proc(proc1)
         stop_proc(proc2)
-        clean_test_account("sales-crm", acct)
+        clean_test_account(CRM_APP, acct)
 
 
 def eval_js_value(mcp_url: str, token: str, tab_id: int, script: str):
@@ -644,7 +649,7 @@ def test_flow_studio_full_e2e(binary: Path) -> None:
         assert "failed=0" in node_res.stdout, node_res.stdout
 
     acct = "e2e-suite-flow"
-    clean_test_account("flow-studio", acct)
+    clean_test_account(FLOW_APP, acct)
     manifest = str(FLOW_APP / "ladybird-app.json")
     proc1 = proc2 = None
     try:
@@ -761,7 +766,7 @@ def test_flow_studio_full_e2e(binary: Path) -> None:
     finally:
         stop_proc(proc1)
         stop_proc(proc2)
-        clean_test_account("flow-studio", acct)
+        clean_test_account(FLOW_APP, acct)
 
 
 def main() -> int:

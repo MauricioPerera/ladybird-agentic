@@ -1583,7 +1583,7 @@ private:
             if (label_storage.has_value())
                 label_view = label_storage->bytes_as_string_view();
 
-            auto created = AppAccountRegistry::upsert(*m_server->accounts_registry_path(), manifest.id, *account_id, label_view, false);
+            auto created = AppAccountRegistry::upsert(*m_server->accounts_registry_path(), manifest.storage_id, *account_id, label_view, false);
             if (created.is_error()) {
                 send_ipc_error(500, "Failed persisting new account record"sv);
                 return;
@@ -1622,7 +1622,7 @@ private:
                         Optional<StringView> label_view;
                         if (label_storage.has_value())
                             label_view = label_storage->bytes_as_string_view();
-                        if (auto up = AppAccountRegistry::upsert(*m_server->accounts_registry_path(), manifest.id, *account_id, label_view, false); up.is_error()) {
+                        if (auto up = AppAccountRegistry::upsert(*m_server->accounts_registry_path(), manifest.storage_id, *account_id, label_view, false); up.is_error()) {
                             send_ipc_error(500, "Failed registering account before launch"sv);
                             return;
                         }
@@ -2810,6 +2810,9 @@ u16 AppModeServer::compute_stable_port(StringView app_id, StringView account_id)
 
 ErrorOr<NonnullOwnPtr<AppModeServer>> AppModeServer::create(AppModeServerConfig config)
 {
+    if (!AppManifest::is_valid_app_id(config.manifest.storage_id))
+        return Error::from_string_literal("App manifest is missing a valid source-bound storage id");
+
     TRY(Core::Directory::create(config.data_directory, Core::Directory::CreateDirectories::Yes));
     auto real_data_directory = TRY(FileSystem::real_path(config.data_directory));
     config.data_directory = real_data_directory;
@@ -2819,7 +2822,7 @@ ErrorOr<NonnullOwnPtr<AppModeServer>> AppModeServer::create(AppModeServerConfig 
     if (config.account_label.is_empty())
         config.account_label = AppAccountRegistry::default_label_for_account(config.account_id);
     if (config.profile_name.is_empty())
-        config.profile_name = AppManifest::profile_name_for_account(config.manifest.id, config.account_id);
+        config.profile_name = AppManifest::profile_name_for_account(config.manifest.storage_id, config.account_id);
 
     for (auto const& dir : config.manifest.permissions.fs_read) {
         auto full = TRY(AppManifest::resolve_confined_subpath(real_data_directory, dir, true));
@@ -2849,7 +2852,7 @@ ErrorOr<NonnullOwnPtr<AppModeServer>> AppModeServer::create(AppModeServerConfig 
     } else if (config.account_id == "default"sv && config.manifest.preferred_port.has_value()) {
         preferred_port = *config.manifest.preferred_port;
     } else {
-        preferred_port = compute_stable_port(config.manifest.id, config.account_id);
+        preferred_port = compute_stable_port(config.manifest.storage_id, config.account_id);
     }
 
     auto server = TRY(Core::TCPServer::try_create());

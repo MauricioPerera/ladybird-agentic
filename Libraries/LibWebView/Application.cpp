@@ -907,7 +907,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     String app_profile_name;
     if (app_manifest.has_value() && !profile_name.has_value() && !profile_path.has_value() && !temporary_profile) {
-        app_profile_name = AppManifest::profile_name_for_account(app_manifest->id, effective_account_id);
+        app_profile_name = AppManifest::profile_name_for_account(app_manifest->storage_id, effective_account_id);
         profile_name = app_profile_name.bytes_as_string_view();
     }
 
@@ -1015,12 +1015,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
             m_app_runtime_descriptor_path = LexicalPath::join(
                 m_instance_data_directory,
                 "AppRuntime"sv,
-                ByteString::formatted("{}--{}.json", app_manifest->id, effective_account_id))
+                ByteString::formatted("{}--{}.json", app_manifest->storage_id, effective_account_id))
                                                 .string();
             m_app_runtime_started_at_ms = UnixDateTime::now().milliseconds_since_epoch();
 
-            accounts_registry_path = LexicalPath::join(m_instance_data_directory, "AppAccounts"sv, ByteString::formatted("{}.json", app_manifest->id)).string();
-            auto active_record = AppAccountRegistry::upsert(*accounts_registry_path, app_manifest->id, effective_account_id, {}, true);
+            accounts_registry_path = LexicalPath::join(m_instance_data_directory, "AppAccounts"sv, ByteString::formatted("{}.json", app_manifest->storage_id)).string();
+            auto active_record = AppAccountRegistry::upsert(*accounts_registry_path, app_manifest->storage_id, effective_account_id, {}, true);
             if (!active_record.is_error()) {
                 effective_account_label = active_record.value().label;
             } else {
@@ -1035,7 +1035,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         if (app_manifest->is_remote()) {
             m_browser_options.urls = { *app_manifest->remote_url };
         } else {
-            auto app_data_dir = LexicalPath::join(profile().paths().data, "AppData"sv, app_manifest->id).string();
+            auto app_data_dir = LexicalPath::join(profile().paths().data, "AppData"sv, app_manifest->storage_id).string();
             auto resolved_profile_name = String::from_utf8_with_replacement_character(profile().identifier());
             auto effective_manifest = *app_manifest;
             if (m_browser_options.mcp_webmcp_only)
