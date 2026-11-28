@@ -217,6 +217,15 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob
+          # GitHub normalizes tildes in asset names. Match the published names before hashing.
+          for package in *~*.AppImage *~*.deb; do
+            published_name="${package//\~/.}"
+            if [[ -e "$published_name" ]]; then
+              echo "Cannot rename $package: $published_name already exists" >&2
+              exit 1
+            fi
+            mv -- "$package" "$published_name"
+          done
           assets=(*.AppImage *.deb)
           if [ ${#assets[@]} -eq 0 ]; then
             echo "No packaged assets found in Build/packages" >&2
