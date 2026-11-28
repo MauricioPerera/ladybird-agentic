@@ -4,24 +4,70 @@ on:
     branches:
       - master
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}
 
 jobs:
-  build:
+  generate:
     if: github.repository == 'LadybirdBrowser/ladybird'
+    permissions:
+      contents: read
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: fregante/setup-git-user@v2
-      - run: |
+      - name: Generate notes bundle
+        run: |
           git fetch origin "refs/notes/*:refs/notes/*"
           curl -fsSLO https://github.com/gh-tui-tools/git-gloss/raw/refs/heads/main/git-gloss
           bash ./git-gloss
-          git push origin "refs/notes/*"
+
+          mapfile -t note_refs < <(git for-each-ref --format='%(refname)' refs/notes/)
+          ((${#note_refs[@]} > 0))
+          git bundle create notes.bundle "${note_refs[@]}"
+
+      - name: Upload notes bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notes-bundle
+          path: notes.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  push:
+    needs: generate
+    permissions:
+      contents: write
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Download notes bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: notes-bundle
+          path: transferred-notes
+
+      - name: Import generated notes
+        run: |
+          test -f transferred-notes/notes.bundle
+          test ! -L transferred-notes/notes.bundle
+          git init notes-repository
+          git -C notes-repository fetch "$GITHUB_WORKSPACE/transferred-notes/notes.bundle" "refs/notes/*:refs/notes/*"
+          git -C notes-repository fsck --strict --no-reflogs
+
+      - name: Push notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf -v git_credentials 'x-access-token:%s' "$GH_TOKEN"
+          git_auth="$(printf '%s' "$git_credentials" | base64 --wrap=0)"
+          unset git_credentials
+
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $git_auth" \
+            git -C notes-repository push "https://github.com/${GITHUB_REPOSITORY}.git" "refs/notes/*"
