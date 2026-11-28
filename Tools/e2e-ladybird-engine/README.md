@@ -39,6 +39,6 @@ export default {
 node --test Tools/e2e-ladybird-engine/test/engine-protocol.test.mjs
 ```
 
-The protocol & mocked-MCP test runs out of the box; the second end-to-end integration test activates when `E2E_REPO_PATH` points to a built `e2e` checkout containing its compiled client/transport bundles.
+The protocol & mocked-MCP unit test runs out of the box; the second optional integration test activates when `E2E_REPO_PATH` points to a built `e2e` checkout containing its compiled client/transport bundles, exercising the real `e2e` client/transport against the adapter's mocked MCP server (`startMockMcpServer()`) rather than a live Ladybird browser process.
 
 Alternatively, without `e2e`, open `about:flows` directly inside Ladybird or call Ladybird's native MCP flow tools (`list_flows`, `save_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`).

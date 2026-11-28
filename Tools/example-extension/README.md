@@ -13,6 +13,8 @@ Unpacked MV3 + Ladybird Flows reference extension:
 
 ## Load via MCP (`install_unpacked_extension`)
 
+> **Prerequisites:** `install_unpacked_extension` is disabled by default over MCP. Launch Ladybird with `--mcp-allow-extension-install` and approve the native Qt confirmation prompt (or run in `--headless` mode with `--mcp-auto-approve`). See [Extensions Security Boundaries](../../Libraries/LibWebView/Extensions/README.md#4-security-boundaries-and-known-caveats).
+
 ```json
 {
   "jsonrpc": "2.0",

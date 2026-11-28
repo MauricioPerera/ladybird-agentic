@@ -40,3 +40,11 @@ If you have any questions that are not answered here or in the [FAQ](FAQ.md), yo
 * [Investigating Websites with WebDriver](WebDriver.md)
 * [CSS Generated Files](CSSGeneratedFiles.md)
 * [Media Pipeline Design](MediaPipelineDesign.md)
+
+## Fork Architecture & Automation
+* [Fork Overview & Quickstart](../FORK.md)
+* [Fork Architecture and Capabilities](ForkArchitectureAndCapabilities.md)
+* [Embedded MCP Server (`LibMCP`)](../Libraries/LibMCP/README.md)
+* [Declarative Browser Automation](../Libraries/LibWebView/Automation/README.md)
+* [Native MV3 Extensions & DNR](../Libraries/LibWebView/Extensions/README.md)
+* [e2e Engine Protocol Adapter](../Tools/e2e-ladybird-engine/README.md)

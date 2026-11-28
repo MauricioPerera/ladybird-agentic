@@ -42,7 +42,7 @@
 
 - **Navigation**: `open` (`http:`, `https:`, or `about:blank` only; fails if final URL is an `about:` error page when `wait_for_load` defaults to `true`), `reload` (waits for load by default and fails if the landed page is an `about:` error page), `back`, `forward` (`back` and `forward` wait a fixed `250 ms` timer rather than page-load completion events).
 - **Interaction & Sync**: `click`, `fill` (clears by default; invokes native `HTMLInputElement` / `HTMLTextAreaElement` value setters and dispatches `input`/`change` events for React compatibility, and writes `textContent` on `isContentEditable` elements), `press` (`KeyboardEvent` dispatch), `upload_file` (`path` or `paths` with `{{var}}` interpolation, resolved and sandboxed against the browser-configured Upload Directory in `about:flows` / `about:settings` or `--mcp-upload-dir`, resolving `<input type="file">` or associated labels/Shadow DOM triggers), `wait_for`, `sleep`.
-- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`; results from `extract`, `eval`, `screenshot`, and `upload_file` when `save_as` — or fallback alias `name` — is set update `record.outputs` and `runtime_vars` for downstream `{{var}}` interpolation).
+- **Assertions & Extraction**: `assert_text`, `assert_visible`, `assert_url`, `extract`, `eval` (receives runtime variables as `arguments[0]`). `extract` always writes its output into `record.outputs` and `runtime_vars` — defaulting to the key `"extracted"` when both `save_as` and `name` are omitted (so consecutive unnamed `extract` steps overwrite `"extracted"`); `eval`, `screenshot`, and `upload_file` store outputs only when `save_as` (or fallback alias `name`) is set.
 - **Capture**: `screenshot` (writes decoded PNG to `<storage_dir>/runs/<run_id>_step_<index>.png`, populates `step.output` / `step.screenshot_path`, and stores `step.output` into `record.outputs` / `runtime_vars` when `save_as` is set).
 
 ### Supported Locators (7)
@@ -78,10 +78,10 @@ flowchart LR
 
 ## 5. Testing
 
-Run the unit test suite (`7` test cases):
+Run the unit test suite (`10` test cases):
 
 ```powershell
 ./Build/release/bin/TestLibWebView[.exe] --suite TestAutomationFlows
 ```
 
-Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, `flow_store_persistence_and_observers`, `flow_store_prunes_evicted_runs_from_disk`, and `upload_file_step_parse_serialize_and_shadow_dom_script`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.
+Covers: `flow_id_validation`, `parse_and_serialize_flow_roundtrip`, `variable_interpolation_single_pass`, `locator_action_script_escapes_special_characters`, `flow_store_persistence_and_observers`, `flow_store_prunes_evicted_runs_from_disk`, `upload_file_step_parse_serialize_and_shadow_dom_script`, `flow_source_provenance_validation_and_roundtrip`, `flow_edits_and_legacy_flows_keep_their_execution_policy`, and `extract_flow_template_variables_detects_placeholders`. MCP flow lifecycle tools (`list_flows`, `get_flow`, `save_flow`, `delete_flow`, `run_flow`, `list_flow_runs`, `get_flow_run`, `cancel_flow_run`) are verified in `TestMCPAutomation`.

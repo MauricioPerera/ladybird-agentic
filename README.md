@@ -13,7 +13,7 @@ We aim to build a complete, usable browser for the modern web.
 Ladybird uses a [multi-process architecture](Documentation/ProcessArchitecture.md) with a main UI process,
 WebContent renderer processes, and helper processes for tasks such as networking, image decoding, compositing and media.
 
-Documents from different sites run in separate renderer processes, each sandboxed from the rest of the system.
+Documents from different sites run in separate renderer processes, each sandboxed from the rest of the system on supported platforms (Linux via seccomp/Landlock and macOS via Seatbelt; native Windows builds do not yet enable a renderer sandbox — see [ProcessArchitecture.md](Documentation/ProcessArchitecture.md#sandboxing), while WSL2 uses the Linux sandbox).
 Image decoding and network connections are done out of process, separately for each site, to be more robust against
 malicious content.
 
@@ -34,11 +34,11 @@ At the moment, many core library support components are inherited from SerenityO
 
 See [build instructions](Documentation/BuildInstructionsLadybird.md) for information on how to build Ladybird.
 
-Ladybird runs on Linux, macOS, Windows (with WSL2), and many other \*Nixes.
+Ladybird runs on Linux, macOS, Windows (native builds without renderer sandbox yet, or WSL2), and many other \*Nixes.
 
 ## How do I read the documentation?
 
-Code-related documentation can be found in the [documentation](Documentation/) folder.
+Code-related documentation can be found in the [documentation](Documentation/) folder. For this fork's MCP, security shield, container, and extension capabilities, see [FORK.md](FORK.md) and the [Fork Architecture Manual](Documentation/ForkArchitectureAndCapabilities.md).
 
 ## Get in touch and participate!
 
