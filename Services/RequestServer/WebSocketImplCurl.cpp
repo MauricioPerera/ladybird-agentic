@@ -83,6 +83,8 @@ void WebSocketImplCurl::connect(WebSocket::ConnectionInfo const& info)
     set_option(CURLOPT_PROTOCOLS_STR, "ws,wss");
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
+    if (m_fresh_connect)
+        set_option(CURLOPT_FRESH_CONNECT, 1L);
 
     if (auto root_certs = info.root_certificates_path(); root_certs.has_value())
         set_option(CURLOPT_CAINFO, root_certs->characters());

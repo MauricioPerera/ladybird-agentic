@@ -106,6 +106,7 @@
 #include <LibWebView/Utilities.h>
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebContentClient.h>
+#include <LibWebView/WebContentPage.h>
 #include <LibWebView/WebDriverBiDi.h>
 #include <LibWebView/WebDriverBrowserConnection.h>
 #include <LibWebView/WebUI/SettingsUI.h>
@@ -3254,6 +3255,54 @@ ErrorOr<void> Application::launch_request_server()
 
 void Application::configure_request_server_control_client(Requests::RequestControlClient& control_client)
 {
+    control_client.on_authorize_network_access = [](int client_id, u64 page_id, URL::URL const& url, ReadonlySpan<ByteString> resolved_addresses, bool proxy_resolves_hostnames) {
+        Requests::RequestControlClient::NetworkAccessDecision decision;
+        auto session = the().session_for_request_server_client(client_id);
+        if (!session)
+            return decision;
+
+        auto policy = the().mcp_security_policy();
+        Optional<ViewImplementation&> originating_view;
+        auto use_page = [&](WebContentClient& client, Web::PageId candidate_page_id) {
+            auto* page = client.page(candidate_page_id);
+            if (!page || &client.session() != session.ptr())
+                return IterationDecision::Continue;
+            auto& view = page->view();
+            if (!view.is_mcp_access_allowed() || !mcp_container_is_allowed_by_policy(view.container_id(), policy))
+                return IterationDecision::Continue;
+            originating_view = view;
+            return IterationDecision::Break;
+        };
+
+        if (page_id != 0) {
+            WebContentClient::for_each_client([&](WebContentClient& client) {
+                return use_page(client, Web::PageId { page_id });
+            });
+        } else {
+            WorkerAgentManager::the().for_each_page_owner_of_request_server_client(client_id, use_page);
+            if (!originating_view.has_value()) {
+                WebContentClient::for_each_client([&](WebContentClient& client) {
+                    if (&client.session() != session.ptr() || !client.request_server_site_bindings().has_client(client_id))
+                        return IterationDecision::Continue;
+                    client.for_each_page([&](WebContentPage& page) {
+                        return use_page(client, page.routed_page_id());
+                    });
+                    return originating_view.has_value() ? IterationDecision::Break : IterationDecision::Continue;
+                });
+            }
+        }
+
+        if (!originating_view.has_value())
+            return decision;
+
+        if (mcp_url_may_access_private_network(url, policy))
+            return decision;
+
+        decision.is_restricted = true;
+        decision.is_allowed = mcp_resolved_network_access_is_allowed(resolved_addresses, proxy_resolves_hostnames);
+        return decision;
+    };
+
     control_client.on_store_response_cookies_and_hsts_policy = [](int client_id, URL::URL const& url, Optional<HTTP::Cookie::PartitionContext> const& partition_context, HTTP::Cookie::SameSiteContext same_site_context, Vector<HTTP::Cookie::ParsedCookie> const& cookies, Optional<HTTP::HSTS::ParsedHSTSPolicy> const& hsts_policy) {
         auto session = the().session_for_request_server_client(client_id);
         if (!session)

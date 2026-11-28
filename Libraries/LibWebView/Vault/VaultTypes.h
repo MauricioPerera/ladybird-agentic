@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/ByteBuffer.h>
+#include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
@@ -80,6 +81,8 @@ WEBVIEW_API String scrub_secrets_from_string(StringView input, ReadonlySpan<Stri
 
 WEBVIEW_API bool mcp_domain_matches_pattern(StringView host, StringView pattern);
 WEBVIEW_API bool mcp_host_is_private_or_internal(StringView host);
+WEBVIEW_API bool mcp_url_may_access_private_network(URL::URL const& url, MCPSecurityPolicy const& policy);
+WEBVIEW_API bool mcp_resolved_network_access_is_allowed(ReadonlySpan<ByteString> resolved_addresses, bool proxy_resolves_hostnames);
 WEBVIEW_API ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPolicy const& policy);
 WEBVIEW_API ErrorOr<HashMap<String, String>> mcp_parse_container_policies(StringView raw_spec);
 WEBVIEW_API Optional<StringView> mcp_container_policy_mode(StringView container_id, MCPSecurityPolicy const& policy);

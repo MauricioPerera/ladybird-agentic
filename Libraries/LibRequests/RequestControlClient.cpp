@@ -63,6 +63,14 @@ void RequestControlClient::client_disconnected(int client_id)
         on_client_disconnected(client_id);
 }
 
+void RequestControlClient::authorize_network_access(u64 authorization_id, int client_id, u64 page_id, URL::URL url, Vector<ByteString> resolved_addresses, bool proxy_resolves_hostnames)
+{
+    NetworkAccessDecision decision;
+    if (on_authorize_network_access)
+        decision = on_authorize_network_access(client_id, page_id, url, resolved_addresses.span(), proxy_resolves_hostnames);
+    async_network_access_authorized(authorization_id, decision.is_restricted, decision.is_allowed);
+}
+
 void RequestControlClient::retrieve_http_cookie(int client_id, u64 request_id, RequestServer::RequestType request_type, u64 cookie_request_id, URL::URL url, Optional<HTTP::Cookie::PartitionContext> partition_context, HTTP::Cookie::SameSiteContext same_site_context)
 {
     String cookie;

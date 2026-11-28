@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AllOf.h>
 #include <AK/Base64.h>
 #include <AK/CharacterTypes.h>
 #include <AK/IPv4Address.h>
@@ -318,7 +319,7 @@ bool mcp_domain_matches_pattern(StringView host, StringView pattern)
     return host.equals_ignoring_ascii_case(pat);
 }
 
-static bool is_private_ipv4_octets(u8 a, u8 b)
+static bool is_private_ipv4_octets(u8 a, u8 b, u8 c, u8 d)
 {
     if (a == 0 || a == 10 || a == 127)
         return true;
@@ -328,7 +329,19 @@ static bool is_private_ipv4_octets(u8 a, u8 b)
         return true;
     if (a == 172 && b >= 16 && b <= 31) // RFC1918 172.16.0.0/12
         return true;
+    if (a == 192 && b == 0 && c == 0 && d != 9 && d != 10) // IETF protocol assignments, except globally reachable anycast
+        return true;
+    if (a == 192 && b == 0 && c == 2) // Documentation 192.0.2.0/24
+        return true;
     if (a == 192 && b == 168) // RFC1918 192.168.0.0/16
+        return true;
+    if (a == 192 && b == 88 && c == 99 && d != 2) // Deprecated 6to4 relay anycast block
+        return true;
+    if (a == 198 && (b == 18 || b == 19)) // Benchmarking 198.18.0.0/15
+        return true;
+    if (a == 198 && b == 51 && c == 100) // Documentation 198.51.100.0/24
+        return true;
+    if (a == 203 && b == 0 && c == 113) // Documentation 203.0.113.0/24
         return true;
     if (a >= 224) // Multicast & reserved 224.0.0.0/4+
         return true;
@@ -353,14 +366,15 @@ bool mcp_host_is_private_or_internal(StringView host)
         return true;
 
     if (auto ipv4 = IPv4Address::from_string(clean); ipv4.has_value())
-        return is_private_ipv4_octets((*ipv4)[0], (*ipv4)[1]);
+        return is_private_ipv4_octets((*ipv4)[0], (*ipv4)[1], (*ipv4)[2], (*ipv4)[3]);
 
     if (auto ipv6 = IPv6Address::from_string(clean); ipv6.has_value()) {
         if (ipv6->is_zero())
             return true;
         if (ipv6->is_ipv4_mapped()) {
             auto p6 = (*ipv6)[6];
-            return is_private_ipv4_octets(static_cast<u8>(p6 >> 8), static_cast<u8>(p6 & 0xff));
+            auto p7 = (*ipv6)[7];
+            return is_private_ipv4_octets(static_cast<u8>(p6 >> 8), static_cast<u8>(p6 & 0xff), static_cast<u8>(p7 >> 8), static_cast<u8>(p7 & 0xff));
         }
         bool is_loopback = true;
         for (size_t i = 0; i < 7; ++i) {
@@ -372,15 +386,72 @@ bool mcp_host_is_private_or_internal(StringView host)
         if (is_loopback && (*ipv6)[7] == 1)
             return true;
         auto p0 = (*ipv6)[0];
+        if (p0 == 0 && (*ipv6)[1] == 0 && (*ipv6)[2] == 0 && (*ipv6)[3] == 0 && (*ipv6)[4] == 0 && (*ipv6)[5] == 0) // IPv4-compatible ::/96
+            return true;
+        if (p0 == 0x0064 && (*ipv6)[1] == 0xff9b && (*ipv6)[2] == 0 && (*ipv6)[3] == 0 && (*ipv6)[4] == 0 && (*ipv6)[5] == 0) { // Well-known translation 64:ff9b::/96
+            auto p6 = (*ipv6)[6];
+            auto p7 = (*ipv6)[7];
+            if (is_private_ipv4_octets(static_cast<u8>(p6 >> 8), static_cast<u8>(p6 & 0xff), static_cast<u8>(p7 >> 8), static_cast<u8>(p7 & 0xff)))
+                return true;
+        }
+        if (p0 == 0x0064 && (*ipv6)[1] == 0xff9b && (*ipv6)[2] == 0x0001) // Local-use translation 64:ff9b:1::/48
+            return true;
+        if (p0 == 0x0100 && (*ipv6)[1] == 0 && (*ipv6)[2] == 0 && (*ipv6)[3] == 0) // Discard-only 100::/64
+            return true;
+        if (p0 == 0x2001 && (*ipv6)[1] == 0x0002 && (*ipv6)[2] == 0) // Benchmarking 2001:2::/48
+            return true;
+        if (p0 == 0x2001 && (*ipv6)[1] == 0x0db8) // Documentation 2001:db8::/32
+            return true;
+        if (p0 == 0x2001 && ((*ipv6)[1] & 0xfff0) == 0x0010) // Deprecated ORCHID 2001:10::/28
+            return true;
+        if ((p0 & 0xfff0) == 0x3ff0) // Documentation 3fff::/20
+            return true;
         if ((p0 & 0xfe00) == 0xfc00) // Unique local fc00::/7
             return true;
         if ((p0 & 0xffc0) == 0xfe80) // Link-local fe80::/10
+            return true;
+        if ((p0 & 0xffc0) == 0xfec0) // Deprecated site-local fec0::/10
             return true;
         if ((p0 & 0xff00) == 0xff00) // Multicast ff00::/8
             return true;
     }
 
     return false;
+}
+
+bool mcp_url_may_access_private_network(URL::URL const& url, MCPSecurityPolicy const& policy)
+{
+    auto host = url.serialized_host();
+    if (host.is_empty())
+        return false;
+
+    for (auto const& blocked : policy.blocked_domains) {
+        if (mcp_domain_matches_pattern(host, blocked))
+            return false;
+    }
+
+    if (policy.allow_private_network)
+        return true;
+
+    for (auto const& allowed : policy.allowed_domains) {
+        auto pattern = allowed.bytes_as_string_view().trim_whitespace();
+        if (mcp_domain_matches_pattern(host, pattern))
+            return pattern != "*"sv;
+    }
+
+    return false;
+}
+
+bool mcp_resolved_network_access_is_allowed(ReadonlySpan<ByteString> resolved_addresses, bool proxy_resolves_hostnames)
+{
+    if (proxy_resolves_hostnames || resolved_addresses.is_empty())
+        return false;
+
+    return all_of(resolved_addresses, [](auto const& address) {
+        if (!IPv4Address::from_string(address).has_value() && !IPv6Address::from_string(address).has_value())
+            return false;
+        return !mcp_host_is_private_or_internal(address);
+    });
 }
 
 ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPolicy const& policy)
@@ -401,14 +472,11 @@ ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPo
             return Error::from_string_literal("Navigation blocked by MCP domain denylist policy (--mcp-blocked-domains)");
     }
 
-    bool explicitly_allowlisted = false;
     if (!policy.allowed_domains.is_empty()) {
         bool allowed = false;
         for (auto const& pat : policy.allowed_domains) {
             if (mcp_domain_matches_pattern(host, pat)) {
                 allowed = true;
-                if (pat.bytes_as_string_view().trim_whitespace() != "*"sv)
-                    explicitly_allowlisted = true;
                 break;
             }
         }
@@ -416,7 +484,7 @@ ErrorOr<void> mcp_validate_url_against_policy(URL::URL const& url, MCPSecurityPo
             return Error::from_string_literal("Navigation blocked by MCP domain allowlist policy (--mcp-allowed-domains)");
     }
 
-    if (!policy.allow_private_network && !explicitly_allowlisted && mcp_host_is_private_or_internal(host))
+    if (!mcp_url_may_access_private_network(url, policy) && mcp_host_is_private_or_internal(host))
         return Error::from_string_literal("Navigation to private/local network address blocked by MCP SSRF protection (--mcp-allow-private-network or --mcp-allowed-domains required)");
 
     return {};

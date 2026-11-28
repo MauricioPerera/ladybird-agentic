@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
 #include <AK/Optional.h>
 #include <AK/Time.h>
+#include <AK/Vector.h>
 #include <LibCore/Timer.h>
 #include <LibDNS/Resolver.h>
 #include <LibHTTP/Cache/DiskCacheSettings.h>
@@ -36,6 +38,7 @@ public:
 
     // Resolves a name through the system resolver of the process that launched RequestServer.
     void resolve_host_with_system_resolver(ByteString const& host, Core::Socket::AddressFamily, Function<void(DNS::Resolver::SystemResolution)>);
+    void authorize_network_access(int client_id, u64 page_id, URL::URL const&, Vector<ByteString> resolved_addresses, bool proxy_resolves_hostnames, Function<void(bool is_restricted, bool is_allowed)>);
 
 private:
     ControlConnectionFromClient(NonnullOwnPtr<IPC::Transport>, RequestServer::ConnectionFromClient::ConnectionMap&, RequestServer::ConnectionFromClient::RequestTransferLeaseMap&, Optional<HTTP::DiskCache&>);
@@ -66,6 +69,7 @@ private:
 
     virtual void retrieved_http_cookie(int client_id, u64 request_id, RequestType request_type, u64 cookie_request_id, String cookie) override;
     virtual void stored_response_cookies_and_hsts_policy(int client_id, u64 request_id, u64 store_request_id) override;
+    virtual void network_access_authorized(u64 authorization_id, bool is_restricted, bool is_allowed) override;
 
     virtual void resolved_host_with_system_resolver(u64 resolution_id, Optional<Vector<ByteString>> addresses) override;
 
@@ -89,6 +93,8 @@ private:
 
     HashMap<u64, Function<void(DNS::Resolver::SystemResolution)>> m_pending_system_resolutions;
     u64 m_next_system_resolution_id { 0 };
+    HashMap<u64, Function<void(bool, bool)>> m_pending_network_authorizations;
+    u64 m_next_network_authorization_id { 0 };
 };
 
 }

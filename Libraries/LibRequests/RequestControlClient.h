@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
 #include <AK/HashMap.h>
+#include <AK/Span.h>
 #include <LibCore/Promise.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
@@ -28,6 +30,11 @@ class RequestControlClient final
     C_OBJECT_ABSTRACT(RequestControlClient)
 
 public:
+    struct NetworkAccessDecision {
+        bool is_restricted { false };
+        bool is_allowed { true };
+    };
+
     explicit RequestControlClient(NonnullOwnPtr<IPC::Transport>);
     virtual ~RequestControlClient() override;
 
@@ -42,6 +49,7 @@ public:
     Function<void(int client_id)> on_client_disconnected;
     Function<String(int client_id, URL::URL const&, Optional<HTTP::Cookie::PartitionContext> const&, HTTP::Cookie::SameSiteContext)> on_retrieve_http_cookie;
     Function<void(int client_id, URL::URL const&, Optional<HTTP::Cookie::PartitionContext> const&, HTTP::Cookie::SameSiteContext, Vector<HTTP::Cookie::ParsedCookie> const&, Optional<HTTP::HSTS::ParsedHSTSPolicy> const&)> on_store_response_cookies_and_hsts_policy;
+    Function<NetworkAccessDecision(int client_id, u64 page_id, URL::URL const&, ReadonlySpan<ByteString> resolved_addresses, bool proxy_resolves_hostnames)> on_authorize_network_access;
     Function<void()> on_request_server_died;
     Function<void(u64 size)> on_disk_cache_size_changed;
 
@@ -58,6 +66,7 @@ private:
     virtual void disk_cache_size_changed(u64 size) override;
     virtual void retrieved_cache_access_profile(u64 access_profile_request_id, Vector<CacheAccessBucket> buckets) override;
     virtual void request_adopter_designated(u64 designation_id) override;
+    virtual void authorize_network_access(u64 authorization_id, int client_id, u64 page_id, URL::URL url, Vector<ByteString> resolved_addresses, bool proxy_resolves_hostnames) override;
     virtual void resolve_host_with_system_resolver(u64 resolution_id, ByteString host, bool ipv6) override;
 
     HashMap<u64, NonnullRefPtr<Core::Promise<CacheSizes>>> m_pending_cache_size_estimations;

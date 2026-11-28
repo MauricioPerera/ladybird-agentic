@@ -196,6 +196,12 @@ void WorkerAgentManager::register_dedicated_worker(WebContentClient& owner_clien
         .request_server_site_bindings = owner_client.request_server_site_bindings(),
         .local_file_roots = owner_client.local_file_roots(),
         .has_cross_site_ancestor = page_environment_has_cross_site_ancestor(owner_client, page_id, *outside_settings),
+        .ancestry = {
+            .page_owner = Owner {
+                .client = owner_client,
+                .page_id = page_id,
+            },
+        },
     };
     register_dedicated_worker(owner, *outside_settings, move(request), move(worker_transport));
 }
@@ -211,6 +217,9 @@ void WorkerAgentManager::register_dedicated_worker(WebWorkerClient& owner_client
         .request_server_site_bindings = owner_client.request_server_site_bindings(),
         .local_file_roots = owner_client.local_file_roots(),
         .has_cross_site_ancestor = static_cast<CanonicalWorkerEnvironmentSettingsObject const&>(*outside_settings).has_cross_site_ancestor(),
+        .ancestry = {
+            .worker_owner = WeakPtr<WebWorkerClient> { owner_client },
+        },
     };
     register_dedicated_worker(owner, *outside_settings, move(request), move(worker_transport));
 }
@@ -238,6 +247,7 @@ void WorkerAgentManager::register_dedicated_worker(DedicatedWorkerOwner const& o
     }
 
     auto client = client_or_error.release_value();
+    m_dedicated_worker_ancestries.set(client.ptr(), owner.ancestry);
     start_worker(*client, move(request), outside_settings, owner.has_cross_site_ancestor, owner.local_file_roots, false);
 }
 
@@ -498,6 +508,42 @@ void WorkerAgentManager::for_each_request_server_site_bindings(Function<Iteratio
     });
 }
 
+void WorkerAgentManager::for_each_page_owner_of_request_server_client(int client_id, Function<IterationDecision(WebContentClient&, Web::PageId)> const& callback) const
+{
+    Function<IterationDecision(WebWorkerClient&)> visit_worker;
+    visit_worker = [&](WebWorkerClient& worker) {
+        for (auto const& entry : m_agents) {
+            auto const& agent = entry.value;
+            if (agent.client.ptr() != &worker)
+                continue;
+            for (auto const& owner : agent.owners) {
+                auto owner_client = owner.client.strong_ref();
+                if (owner_client && callback(*owner_client, owner.page_id) == IterationDecision::Break)
+                    return IterationDecision::Break;
+            }
+            return IterationDecision::Continue;
+        }
+
+        auto ancestry = m_dedicated_worker_ancestries.find(&worker);
+        if (ancestry == m_dedicated_worker_ancestries.end())
+            return IterationDecision::Continue;
+        if (ancestry->value.page_owner.has_value()) {
+            auto owner_client = ancestry->value.page_owner->client.strong_ref();
+            if (owner_client)
+                return callback(*owner_client, ancestry->value.page_owner->page_id);
+            return IterationDecision::Continue;
+        }
+        if (auto worker_owner = ancestry->value.worker_owner.strong_ref())
+            return visit_worker(*worker_owner);
+        return IterationDecision::Continue;
+    };
+
+    for (auto const& client : m_clients) {
+        if (client->request_server_site_bindings().has_client(client_id) && visit_worker(*client) == IterationDecision::Break)
+            return;
+    }
+}
+
 WebContentClient* WorkerAgentManager::host_of_request_server_client(int client_id) const
 {
     for (auto const& client : m_clients) {
@@ -727,6 +773,7 @@ void WorkerAgentManager::remove_agent(Web::HTML::WorkerAgentId agent_id, AgentRe
 
 void WorkerAgentManager::worker_thread_did_exit(WebWorkerClient& client)
 {
+    m_dedicated_worker_ancestries.remove(&client);
     Vector<NonnullRefPtr<WebWorkerClient>> exited_clients;
     for (size_t i = m_clients.size(); i > 0; --i) {
         if (m_clients[i - 1].ptr() == &client)

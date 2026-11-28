@@ -81,6 +81,10 @@ void ControlConnectionFromClient::die()
     for (auto& [resolution_id, on_resolved] : pending_system_resolutions)
         on_resolved(Error::from_string_literal("The system resolver's process is gone"));
 
+    auto pending_network_authorizations = move(m_pending_network_authorizations);
+    for (auto& [authorization_id, on_authorized] : pending_network_authorizations)
+        on_authorized(true, false);
+
     if (m_connections.is_empty())
         Core::EventLoop::current().quit(0);
 }
@@ -92,7 +96,7 @@ ErrorOr<ControlConnectionFromClient::ClientSocket> ControlConnectionFromClient::
     auto disk_cache = is_private == IsPrivate::Yes ? Optional<HTTP::DiskCache&> {} : m_disk_cache;
 
     // Note: A ref is stored in the m_connections map
-    auto client = adopt_ref(*new RequestServer::ConnectionFromClient(move(paired.local), is_private, site_binding, m_connections, m_request_transfer_leases, disk_cache));
+    auto client = adopt_ref(*new RequestServer::ConnectionFromClient(move(paired.local), is_private, site_binding, m_connections, m_request_transfer_leases, disk_cache, true));
 
     return ClientSocket { .handle = move(handle), .client_id = client->client_id() };
 }
@@ -278,6 +282,23 @@ void ControlConnectionFromClient::resolve_host_with_system_resolver(ByteString c
     auto resolution_id = m_next_system_resolution_id++;
     m_pending_system_resolutions.set(resolution_id, move(on_resolved));
     async_resolve_host_with_system_resolver(resolution_id, host, family == Core::Socket::AddressFamily::IPv6Only);
+}
+
+void ControlConnectionFromClient::authorize_network_access(int client_id, u64 page_id, URL::URL const& url, Vector<ByteString> resolved_addresses, bool proxy_resolves_hostnames, Function<void(bool, bool)> on_authorized)
+{
+    auto authorization_id = m_next_network_authorization_id++;
+    m_pending_network_authorizations.set(authorization_id, move(on_authorized));
+    async_authorize_network_access(authorization_id, client_id, page_id, url, move(resolved_addresses), proxy_resolves_hostnames);
+}
+
+void ControlConnectionFromClient::network_access_authorized(u64 authorization_id, bool is_restricted, bool is_allowed)
+{
+    auto on_authorized = m_pending_network_authorizations.take(authorization_id);
+    if (!on_authorized.has_value()) {
+        did_misbehave("Unexpected network authorization answer");
+        return;
+    }
+    (*on_authorized)(is_restricted, is_allowed);
 }
 
 void ControlConnectionFromClient::resolved_host_with_system_resolver(u64 resolution_id, Optional<Vector<ByteString>> addresses)

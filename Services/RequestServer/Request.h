@@ -66,7 +66,8 @@ public:
         HTTP::Cookie::SameSiteContext,
         Optional<Requests::RequestTransferLeaseKey>,
         Optional<u32> address_selection_hint,
-        bool notify_on_cache_miss);
+        bool notify_on_cache_miss,
+        u64 originating_page_id);
 
     static NonnullOwnPtr<Request> connect(
         u64 request_id,
@@ -88,7 +89,8 @@ public:
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
-        HTTP::Cookie::SameSiteContext);
+        HTTP::Cookie::SameSiteContext,
+        u64 originating_page_id);
 
     static NonnullOwnPtr<Request> import(
         u64 request_id,
@@ -240,6 +242,7 @@ private:
     void continue_after_dns_lookup();
     void set_curl_resolve_list(Optional<ByteString> host_entry);
     StringView connect_host() const;
+    void authorize_network_access(RefPtr<DNS::LookupResult const>, bool proxy_resolves_hostnames);
     void reset_for_retry();
     void update_alternative_services();
     bool should_retry_without_alternative_service(int curl_result_code) const;
@@ -301,6 +304,8 @@ private:
     Requests::RequestTimingInfo acquire_timing_info() const;
 
     Requests::NetworkUsage m_performance_origin;
+    u64 m_originating_page_id { 0 };
+    bool m_private_network_access_restricted { false };
     u64 m_performance_generation { 0 };
     u64 m_sampled_download_bytes { 0 };
     u64 m_sampled_upload_bytes { 0 };

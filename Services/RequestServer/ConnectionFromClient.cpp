@@ -6,6 +6,8 @@
 
 #include <AK/AllOf.h>
 #include <AK/IDAllocator.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <AK/Math.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/WeakPtr.h>
@@ -93,9 +95,10 @@ static auto time_curl_call(StringView label, F&& f)
 static constexpr i64 BURST_WINDOW_MS = 100;
 static constexpr u64 BURST_REPORT_THRESHOLD = 5;
 
-ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, SiteBinding site_binding, ConnectionMap& connections, RequestTransferLeaseMap& request_transfer_leases, Optional<HTTP::DiskCache&> disk_cache)
+ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, SiteBinding site_binding, ConnectionMap& connections, RequestTransferLeaseMap& request_transfer_leases, Optional<HTTP::DiskCache&> disk_cache, bool requires_network_authorization)
     : IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport), s_client_ids.allocate())
     , m_is_private(is_private)
+    , m_requires_network_authorization(requires_network_authorization)
     , m_site_binding(site_binding)
     , m_connections(connections)
     , m_request_transfer_leases(request_transfer_leases)
@@ -359,8 +362,7 @@ void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL:
     auto transfer_lease = create_transfer_lease
         ? Optional<Requests::RequestTransferLeaseKey> { lease_key }
         : Optional<Requests::RequestTransferLeaseKey> {};
-    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_fetch_curl.handle, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, same_site_context, transfer_lease, address_selection_hint, notify_on_cache_miss);
-    request->set_performance_origin(client_id(), originating_page_id);
+    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_fetch_curl.handle, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, same_site_context, transfer_lease, address_selection_hint, notify_on_cache_miss, originating_page_id);
     m_active_requests.set(request_id, move(request));
 
     if (transfer_lease.has_value())
@@ -461,14 +463,14 @@ void ConnectionFromClient::release_request_transfer_lease(int source_client_id, 
     }
 }
 
-void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, HTTP::Cookie::SameSiteContext same_site_context)
+void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, HTTP::Cookie::SameSiteContext same_site_context, u64 originating_page_id)
 {
     note_event_tick("ipc-start-revalidation"sv);
     auto request_id = m_next_revalidation_request_id++;
 
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_revalidation_request({}, {})", request_id, url);
 
-    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_fetch_curl.handle, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context);
+    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_fetch_curl.handle, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, originating_page_id);
     m_active_revalidation_requests.set(request_id, move(request));
 }
 
@@ -1020,8 +1022,7 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
 
     // Avoid leaking hostnames resolved by the proxy.
     if (proxy.has_value() && proxy->resolves_hostnames()) {
-        if (m_pending_websockets.remove(websocket_id))
-            open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), nullptr);
+        authorize_and_open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), nullptr, true);
         return;
     }
 
@@ -1047,15 +1048,50 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
                 return;
             }
 
-            // Don't connect the websocket if we already requested to close it before the DNS lookup completed.
-            if (!self->m_pending_websockets.remove(websocket_id))
-                return;
-
-            self->open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), dns_result);
+            self->authorize_and_open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), dns_result, false);
         });
 }
 
-void ConnectionFromClient::open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy> proxy, RefPtr<DNS::LookupResult const> dns_result)
+void ConnectionFromClient::authorize_and_open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy> proxy, RefPtr<DNS::LookupResult const> dns_result, bool proxy_resolves_hostnames)
+{
+    if (!requires_network_authorization()) {
+        if (m_pending_websockets.remove(websocket_id))
+            open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), move(dns_result), false);
+        return;
+    }
+
+    auto control_connection = ControlConnectionFromClient::the();
+    if (!control_connection.has_value()) {
+        if (m_pending_websockets.remove(websocket_id))
+            fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
+        return;
+    }
+
+    Vector<ByteString> resolved_addresses;
+    if (dns_result) {
+        resolved_addresses.ensure_capacity(dns_result->cached_addresses().size());
+        for (auto const& address : dns_result->cached_addresses()) {
+            resolved_addresses.unchecked_append(address.visit(
+                [](IPv4Address const& ipv4) { return ipv4.to_byte_string(); },
+                [](IPv6Address const& ipv6) { return MUST(ipv6.to_string()).to_byte_string(); }));
+        }
+    }
+
+    auto weak_self = make_weak_ptr<ConnectionFromClient>();
+    control_connection->authorize_network_access(client_id(), originating_page_id, url, move(resolved_addresses), proxy_resolves_hostnames,
+        [weak_self, websocket_id, originating_page_id, url = move(url), origin = move(origin), protocols = move(protocols), extensions = move(extensions), additional_request_headers = move(additional_request_headers), proxy = move(proxy), dns_result = move(dns_result)](bool is_restricted, bool is_allowed) mutable {
+            auto self = weak_self.strong_ref();
+            if (!self || !self->m_pending_websockets.remove(websocket_id))
+                return;
+            if (!is_allowed) {
+                self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
+                return;
+            }
+            self->open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), move(dns_result), is_restricted);
+        });
+}
+
+void ConnectionFromClient::open_websocket(u64 websocket_id, u64 originating_page_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy> proxy, RefPtr<DNS::LookupResult const> dns_result, bool fresh_connect)
 {
     auto weak_self = make_weak_ptr<ConnectionFromClient>();
 
@@ -1072,6 +1108,7 @@ void ConnectionFromClient::open_websocket(u64 websocket_id, u64 originating_page
 
     auto impl = WebSocketImplCurl::create(m_websocket_curl.handle, m_is_private);
     impl->set_proxy(move(proxy));
+    impl->set_fresh_connect(fresh_connect);
     impl->set_performance_origin(client_id(), originating_page_id);
     auto connection = WebSocket::WebSocket::create(move(connection_info), move(impl));
 

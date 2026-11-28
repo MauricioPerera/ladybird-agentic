@@ -28,6 +28,7 @@ public:
     static NonnullRefPtr<WebSocketImplCurl> create(CURLM*, IsPrivate);
 
     void set_proxy(Optional<HTTP::Proxy> proxy) { m_proxy = move(proxy); }
+    void set_fresh_connect(bool fresh_connect) { m_fresh_connect = fresh_connect; }
     void set_performance_origin(int client_id, u64 page_id) { m_performance_origin = { client_id, page_id, 0, 0 }; }
 
     virtual void connect(WebSocket::ConnectionInfo const&) override;
@@ -47,6 +48,7 @@ private:
 
     CURLM* m_multi_handle { nullptr };
     Optional<HTTP::Proxy> m_proxy;
+    bool m_fresh_connect { false };
     Requests::NetworkUsage m_performance_origin;
     CURL* m_easy_handle { nullptr };
     NonnullRefPtr<AIACollector> m_aia_collector;
