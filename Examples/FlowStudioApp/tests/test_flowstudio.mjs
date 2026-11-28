@@ -29,7 +29,11 @@ import {
   validateCustomSiteAction,
 } from '../src/lib/site-packs.js';
 import { runPipelineWorkflow } from '../src/lib/runner.js';
-import { runSandboxedTransform } from '../src/lib/sandbox.js';
+import {
+  runSandboxedTransform,
+  TRANSFORM_FRAME_CSP,
+  TRANSFORM_FRAME_SANDBOX,
+} from '../src/lib/sandbox.js';
 import { createSecretStore, redactSecrets, stripSecretsFromExport } from '../src/lib/secrets.js';
 import { parseCronExpression, matchesCron, nextCronRuns, cronSlotKey } from '../src/lib/cron.js';
 import { normalizeRecordedEvents } from '../src/lib/recorder.js';
@@ -290,9 +294,13 @@ await test('Auth required pause & auto-resume handles AUTH_REQUIRED cleanly', as
   assert.deepEqual(rec.outputs.inbox, { count: 1, rows: [] });
 });
 
-await test('Sandbox blocks bridge/process/fetch and terminates infinite loops', async () => {
+await test('Sandbox isolates globals, contains constructor escapes, and terminates infinite loops', async () => {
   const ok = await runSandboxedTransform('return { doubled: (input?.n || 0) * 2 };', { input: { n: 21 } });
   assert.deepEqual(ok, { doubled: 42 });
+
+  assert.equal(TRANSFORM_FRAME_SANDBOX, 'allow-scripts');
+  assert.ok(!TRANSFORM_FRAME_SANDBOX.includes('allow-same-origin'));
+  assert.match(TRANSFORM_FRAME_CSP, /connect-src 'none'/);
 
   const leakCheck = await runSandboxedTransform(
     'return { hasBridge: typeof ladybirdApp, hasFetch: typeof fetch, hasProcess: typeof process };',
@@ -301,6 +309,11 @@ await test('Sandbox blocks bridge/process/fetch and terminates infinite loops', 
   assert.equal(leakCheck.hasBridge, 'undefined');
   assert.equal(leakCheck.hasFetch, 'undefined');
   assert.equal(leakCheck.hasProcess, 'undefined');
+
+  await assert.rejects(
+    () => runSandboxedTransform('return ({}).constructor.constructor("return process")();', {}),
+    /Code generation from strings disallowed/i
+  );
 
   await assert.rejects(
     () => runSandboxedTransform('while (true) {}', { timeoutMs: 120 }),

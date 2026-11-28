@@ -12,7 +12,7 @@ Local-first browser workflow automation studio built on **Ladybird App Mode** (`
   - `src/lib/recorder.js`: Normalizes semantic clicks, collapsed fills, key presses, and text extractions into steps.
   - `src/lib/healing.js`: Captures DOM candidate attributes on locator failures (`HEAL_INSPECT_SCRIPT`) and ranks semantic replacements (`rankHealCandidates`) with 1-click **Apply & Retry**.
 - **Sandboxed Transforms, Encrypted Secrets & Scheduling**:
-  - `src/lib/sandbox.js` + `src/lib/transform-worker.js`: Runs user `transform` code inside an isolated Web Worker without `window.ladybirdApp`, `fetch`, or `process`, with timeout termination.
+  - `src/lib/sandbox.js` + `src/lib/transform-worker.js`: Runs user `transform` code in a nested worker owned by a network-disabled, opaque-origin sandbox frame, with timeout termination.
   - `src/lib/secrets.js`: Stores encrypted secrets in SQLite KV (`flowstudio:secrets:v1`), injects `{{secrets.NAME}}` into HTTP steps, and redacts secret values from outputs/exports.
   - `src/lib/cron.js`: 5-field Cron expression parser and scheduler (`parseCronExpression`, `matchesCron`, `nextCronRuns`).
 - **Inbound Local Webhooks & Portable FlowPacks**:
