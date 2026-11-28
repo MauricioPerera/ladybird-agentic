@@ -900,6 +900,9 @@ void ViewImplementation::set_mcp_access_mode(MCPAccessMode mode)
     else
         m_mcp_pinned_origin.clear();
 
+    if (mode != MCPAccessMode::Full && Application::is_initialized())
+        Application::the().did_restrict_mcp_network_access_for_view(view_id());
+
     if (mode != MCPAccessMode::Blocked) {
         page().async_start_sending_console_output(true, true);
         if (Application::is_initialized())

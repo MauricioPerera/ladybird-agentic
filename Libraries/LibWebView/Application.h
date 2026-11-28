@@ -469,6 +469,7 @@ public:
     bool mcp_egress_requires_approval(URL::URL const& destination_url, Optional<URL::URL> const& current_view_url = {}) const;
     void approve_mcp_egress_origin(URL::URL const& origin_url);
     void request_mcp_user_approval_any_view(String action_kind, String summary, String details, Function<void(bool approved)> callback);
+    void did_restrict_mcp_network_access_for_view(u64 view_id);
     void did_revoke_mcp_access_for_view(u64 view_id);
     void did_close_mcp_view(u64 view_id);
     void record_mcp_console_output(u64 view_id, ConsoleOutput const&);
@@ -794,9 +795,9 @@ private:
     virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, MCP::OnToolCallComplete) override;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
-    virtual void add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete) override;
-    virtual void list_network_rules(MCP::OnToolCallComplete) override;
-    virtual void clear_network_rules(Optional<String> rule_id, MCP::OnToolCallComplete) override;
+    virtual void add_network_rule(u64 tab_id, JsonObject rule_args, MCP::OnToolCallComplete) override;
+    virtual void list_network_rules(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void clear_network_rules(u64 tab_id, Optional<String> rule_id, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
     virtual void take_screenshot(u64 tab_id, bool redact_media, MCP::OnToolCallComplete) override;
     virtual void list_flows(MCP::OnToolCallComplete) override;
@@ -1117,8 +1118,9 @@ private:
     mutable HashMap<u64, u64> m_navigation_listener_ids;
 
     void sync_network_intercept_rules_to_request_servers();
+    void clear_mcp_network_intercept_rules();
+    void clear_mcp_network_intercept_rules_for_view(u64 view_id);
     Vector<JsonObject> m_mcp_network_intercept_rules;
-    ByteString m_mcp_network_intercept_rules_json;
     u64 m_next_mcp_network_rule_id { 1 };
 
     struct MCPTabArtifact {

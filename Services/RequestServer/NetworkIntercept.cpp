@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AnyOf.h>
 #include <AK/Base64.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
+#include <AK/NumericLimits.h>
 #include <RequestServer/NetworkIntercept.h>
 
 namespace RequestServer {
@@ -73,6 +75,15 @@ static bool method_matches(Vector<String> const& methods, StringView method)
     return false;
 }
 
+static bool scope_matches(Vector<NetworkInterceptRule::Scope> const& scopes, int client_id, u64 page_id)
+{
+    if (page_id == 0)
+        return false;
+    return any_of(scopes, [&](auto const& scope) {
+        return scope.client_id == client_id && scope.page_id == page_id;
+    });
+}
+
 ErrorOr<void> NetworkInterceptStore::set_rules_from_json(StringView json)
 {
     if (json.trim_whitespace().is_empty()) {
@@ -107,6 +118,27 @@ ErrorOr<void> NetworkInterceptStore::set_rules_from_json(StringView json)
         NetworkInterceptRule rule;
         rule.id = move(id);
         rule.url_pattern = move(*url_pattern);
+
+        auto scopes = obj.get_array("scopes"sv);
+        if (!scopes.has_value())
+            continue;
+        for (auto const& scope_value : scopes->values()) {
+            if (!scope_value.is_object())
+                continue;
+            auto const& scope_object = scope_value.as_object();
+            auto client_id = scope_object.get_i64("client_id"sv);
+            auto page_id = scope_object.get_u64("page_id"sv);
+            if (!client_id.has_value() || *client_id < 0 || *client_id > NumericLimits<int>::max())
+                continue;
+            if (!page_id.has_value() || *page_id == 0)
+                continue;
+            rule.scopes.append({
+                .client_id = static_cast<int>(*client_id),
+                .page_id = *page_id,
+            });
+        }
+        if (rule.scopes.is_empty())
+            continue;
 
         if (*action_str == "block"sv) {
             rule.action = NetworkInterceptRule::Action::Block;
@@ -164,7 +196,7 @@ ErrorOr<void> NetworkInterceptStore::set_rules_from_json(StringView json)
     return {};
 }
 
-Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url, StringView method) const
+Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url, StringView method, int client_id, u64 page_id) const
 {
     if (m_rules.is_empty())
         return {};
@@ -172,6 +204,8 @@ Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url,
     auto serialized = url.serialize();
     for (auto const& rule : m_rules) {
         if (rule.action == NetworkInterceptRule::Action::ModifyHeaders)
+            continue;
+        if (!scope_matches(rule.scopes, client_id, page_id))
             continue;
         if (!method_matches(rule.methods, method))
             continue;
@@ -181,7 +215,7 @@ Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url,
     return {};
 }
 
-void NetworkInterceptStore::apply_header_modifications(URL::URL const& url, StringView method, HTTP::HeaderList& headers) const
+void NetworkInterceptStore::apply_header_modifications(URL::URL const& url, StringView method, int client_id, u64 page_id, HTTP::HeaderList& headers) const
 {
     if (m_rules.is_empty())
         return;
@@ -189,6 +223,8 @@ void NetworkInterceptStore::apply_header_modifications(URL::URL const& url, Stri
     auto serialized = url.serialize();
     for (auto const& rule : m_rules) {
         if (rule.action != NetworkInterceptRule::Action::ModifyHeaders)
+            continue;
+        if (!scope_matches(rule.scopes, client_id, page_id))
             continue;
         if (!method_matches(rule.methods, method))
             continue;

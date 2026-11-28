@@ -25,6 +25,11 @@ struct NetworkInterceptRule {
         ModifyHeaders,
     };
 
+    struct Scope {
+        int client_id { -1 };
+        u64 page_id { 0 };
+    };
+
     String id;
     String url_pattern;
     Action action { Action::Block };
@@ -33,6 +38,7 @@ struct NetworkInterceptRule {
     String content_type { "text/plain; charset=utf-8"_string };
     ByteBuffer body {};
     Vector<HTTP::Header> headers {};
+    Vector<Scope> scopes {};
 };
 
 class NetworkInterceptStore {
@@ -46,8 +52,8 @@ public:
     void clear();
 
     static bool url_matches_pattern(StringView url, StringView pattern);
-    Optional<NetworkInterceptRule> match(URL::URL const& url, StringView method) const;
-    void apply_header_modifications(URL::URL const& url, StringView method, HTTP::HeaderList& headers) const;
+    Optional<NetworkInterceptRule> match(URL::URL const& url, StringView method, int client_id, u64 page_id) const;
+    void apply_header_modifications(URL::URL const& url, StringView method, int client_id, u64 page_id, HTTP::HeaderList& headers) const;
 
 private:
     Vector<NetworkInterceptRule> m_rules;
