@@ -5760,6 +5760,8 @@ ErrorOr<void> Application::toggle_mcp_enabled()
     if (m_mcp) {
         fail_all_mcp_requests("MCP server disabled"sv);
         m_mcp.clear();
+        m_mcp_network_intercept_rules.clear();
+        sync_network_intercept_rules_to_request_servers();
         m_mcp_token.clear();
         m_mcp_secret_tainted_views.clear();
         m_mcp_active_secrets.clear();
@@ -5849,6 +5851,7 @@ void Application::set_mcp_paused(bool paused)
         for (auto wait_id : notif_ids)
             finish_mcp_notification_wait(wait_id, mcp_error_result(paused_msg));
     }
+    sync_network_intercept_rules_to_request_servers();
     on_mcp_paused_changed(paused);
     notify_mcp_audit_observers();
 }
@@ -6271,6 +6274,10 @@ void Application::did_revoke_mcp_access_for_view(u64 view_id)
     m_mcp_console_logs.remove(view_id);
     m_mcp_network_requests.remove(view_id);
     m_mcp_notifications.remove_all_matching([view_id](auto const& entry) { return entry.tab_id == view_id; });
+    m_mcp_network_intercept_rules.remove_all_matching([view_id](JsonObject const& rule) {
+        return rule.get_u64("tab_id"sv) == view_id;
+    });
+    sync_network_intercept_rules_to_request_servers();
     notify_mcp_audit_observers();
 }
 
@@ -6287,6 +6294,10 @@ void Application::did_close_mcp_view(u64 view_id)
     m_mcp_console_logs.remove(view_id);
     m_mcp_network_requests.remove(view_id);
     m_mcp_notifications.remove_all_matching([view_id](auto const& entry) { return entry.tab_id == view_id; });
+    m_mcp_network_intercept_rules.remove_all_matching([view_id](JsonObject const& rule) {
+        return rule.get_u64("tab_id"sv) == view_id;
+    });
+    sync_network_intercept_rules_to_request_servers();
     Core::deferred_invoke([this] {
         if (Application::is_initialized())
             cleanup_unused_ephemeral_containers();
@@ -7037,6 +7048,8 @@ void Application::cleanup_unused_ephemeral_containers(Optional<u64> ignore_view_
 
 void Application::on_mcp_session_closed()
 {
+    m_mcp_network_intercept_rules.clear();
+    sync_network_intercept_rules_to_request_servers();
     cleanup_unused_ephemeral_containers();
     m_mcp_ephemeral_container_id.clear();
     m_mcp_tab_artifacts.clear();
@@ -11259,8 +11272,28 @@ void Application::get_network_requests(u64 tab_id, size_t limit, bool clear, boo
 void Application::sync_network_intercept_rules_to_request_servers()
 {
     JsonArray rules_array;
-    for (auto const& rule : m_mcp_network_intercept_rules)
-        rules_array.must_append(rule);
+    for (auto const& rule : m_mcp_network_intercept_rules) {
+        auto tab_id = rule.get_u64("tab_id"sv);
+        if (!tab_id.has_value() || check_mcp_mutation_allowed(*tab_id, "intercept network requests"sv).has_value())
+            continue;
+        auto view = find_allowed_mcp_view(*tab_id);
+        if (!view.has_value())
+            continue;
+        // Same-Origin and other restrictive modes cannot safely authorize wildcard subresource interception.
+        if (effective_tab_mcp_access_mode_name(*view) != "full"sv)
+            continue;
+
+        JsonArray page_ids;
+        view->traversable().for_each_hosting_page([&](WebContentPage& page) {
+            page_ids.must_append(page.id().value());
+        });
+        if (page_ids.is_empty())
+            continue;
+
+        auto scoped_rule = rule;
+        scoped_rule.set("page_ids"sv, move(page_ids));
+        rules_array.must_append(move(scoped_rule));
+    }
 
     JsonObject payload;
     payload.set("rules"sv, move(rules_array));
@@ -11274,23 +11307,16 @@ void Application::sync_network_intercept_rules_to_request_servers()
     });
 }
 
-void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete on_complete)
+void Application::did_change_mcp_network_rule_scope()
 {
-    if (m_mcp_paused) {
-        on_complete(mcp_error_result("MCP automation is currently paused by the user"sv));
+    sync_network_intercept_rules_to_request_servers();
+}
+
+void Application::add_network_rule(u64 tab_id, JsonObject rule_args, MCP::OnToolCallComplete on_complete)
+{
+    if (auto err = check_mcp_mutation_allowed(tab_id, "add a network interception rule"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
         return;
-    }
-    auto policy = mcp_security_policy();
-    if (policy.webmcp_only) {
-        on_complete(mcp_error_result("add_network_rule is disabled in WebMCP-Only mode"sv));
-        return;
-    }
-    for (auto const& [container, mode] : policy.container_policies) {
-        (void)container;
-        if (mode != "full"sv) {
-            on_complete(mcp_error_result("add_network_rule is disabled while restrictive MCP container policies (--mcp-container-policies) are active"sv));
-            return;
-        }
     }
 
     auto url_pattern = rule_args.get_string("url_pattern"sv);
@@ -11307,11 +11333,6 @@ void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete
         on_complete(mcp_error_result("Intercept rule 'body' exceeds 2 MiB limit"sv));
         return;
     }
-    if (m_mcp_network_intercept_rules.size() >= 128 && !rule_args.get_string("id"sv).has_value()) {
-        on_complete(mcp_error_result("Maximum of 128 active network intercept rules reached"sv));
-        return;
-    }
-
     String rule_id;
     if (auto custom_id = rule_args.get_string("id"sv); custom_id.has_value() && !custom_id->is_empty()) {
         rule_id = *custom_id;
@@ -11319,8 +11340,17 @@ void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete
         rule_id = MUST(String::formatted("rule-{}", m_next_mcp_network_rule_id++));
     }
 
+    bool replaces_existing_rule = any_of(m_mcp_network_intercept_rules, [&](JsonObject const& existing) {
+        return existing.get_u64("tab_id"sv) == tab_id && existing.get_string("id"sv) == rule_id;
+    });
+    if (m_mcp_network_intercept_rules.size() >= 128 && !replaces_existing_rule) {
+        on_complete(mcp_error_result("Maximum of 128 active network intercept rules reached"sv));
+        return;
+    }
+
     JsonObject stored;
     stored.set("id"sv, rule_id);
+    stored.set("tab_id"sv, tab_id);
     stored.set("url_pattern"sv, *url_pattern);
     stored.set("action"sv, *action);
     if (auto methods = rule_args.get_array("methods"sv); methods.has_value())
@@ -11336,51 +11366,108 @@ void Application::add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete
     if (auto headers = rule_args.get_object("headers"sv); headers.has_value())
         stored.set("headers"sv, *headers);
 
-    m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
-        return existing.get_string("id"sv) == rule_id;
+    auto view = find_allowed_mcp_view(tab_id);
+    if (!view.has_value()) {
+        on_complete(mcp_error_result(mcp_denied_message));
+        return;
+    }
+    if (effective_tab_mcp_access_mode_name(*view) != "full"sv) {
+        on_complete(mcp_error_result("Network interception rules require Full MCP access for the selected tab and container"sv));
+        return;
+    }
+    auto expected_url = view->url().serialize();
+    auto summary = MUST(String::formatted("Intercept {} requests in tab {}", *action, tab_id));
+    auto details = MUST(String::formatted("Tab ID: {}\nURL: {}\nURL pattern: {}\nRule ID: {}", tab_id, expected_url, *url_pattern, rule_id));
+    request_mcp_user_approval(tab_id, "add_network_rule"_string, move(summary), move(details), [this, tab_id, expected_url = move(expected_url), stored = move(stored), on_complete = move(on_complete)](bool approved) mutable {
+        if (!approved) {
+            on_complete(mcp_error_result("Network interception rule rejected by the user"sv));
+            return;
+        }
+        if (auto err = check_mcp_mutation_allowed(tab_id, "add a network interception rule"sv); err.has_value()) {
+            on_complete(mcp_error_result(*err));
+            return;
+        }
+        auto current_view = find_allowed_mcp_view(tab_id);
+        if (!current_view.has_value()) {
+            on_complete(mcp_error_result(mcp_denied_message));
+            return;
+        }
+        if (effective_tab_mcp_access_mode_name(*current_view) != "full"sv) {
+            on_complete(mcp_error_result("Network interception rules require Full MCP access for the selected tab and container"sv));
+            return;
+        }
+        if (current_view->url().serialize() != expected_url) {
+            on_complete(mcp_error_result("Tab URL changed during network rule approval (aborting for safety)"sv));
+            return;
+        }
+
+        auto rule_id = stored.get_string("id"sv).value();
+        auto action = stored.get_string("action"sv).value();
+        auto url_pattern = stored.get_string("url_pattern"sv).value();
+        m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
+            return existing.get_u64("tab_id"sv) == tab_id && existing.get_string("id"sv) == rule_id;
+        });
+        m_mcp_network_intercept_rules.append(stored);
+        sync_network_intercept_rules_to_request_servers();
+
+        record_mcp_audit_event("add_network_rule"_string, tab_id, "ok"_string, MUST(String::formatted("{} {} -> {}", action, url_pattern, rule_id)));
+
+        size_t rule_count = 0;
+        for (auto const& rule : m_mcp_network_intercept_rules) {
+            if (rule.get_u64("tab_id"sv) == tab_id)
+                ++rule_count;
+        }
+        JsonObject result;
+        result.set("added"sv, true);
+        result.set("rule_count"sv, static_cast<u64>(rule_count));
+        result.set("rule"sv, move(stored));
+        on_complete(mcp_ok_json(JsonValue { move(result) }));
     });
-    m_mcp_network_intercept_rules.append(stored);
-    sync_network_intercept_rules_to_request_servers();
-
-    record_mcp_audit_event("add_network_rule"_string, {}, "ok"_string, MUST(String::formatted("{} {} -> {}", *action, *url_pattern, rule_id)));
-
-    JsonObject result;
-    result.set("added"sv, true);
-    result.set("rule_count"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
-    result.set("rule"sv, move(stored));
-    on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
-void Application::list_network_rules(MCP::OnToolCallComplete on_complete)
+void Application::list_network_rules(u64 tab_id, MCP::OnToolCallComplete on_complete)
 {
+    if (auto err = check_mcp_read_allowed(tab_id, "list network interception rules"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
+        return;
+    }
     JsonArray rules;
-    for (auto const& rule : m_mcp_network_intercept_rules)
-        rules.must_append(rule);
+    for (auto const& rule : m_mcp_network_intercept_rules) {
+        if (rule.get_u64("tab_id"sv) == tab_id)
+            rules.must_append(rule);
+    }
 
     JsonObject result;
-    result.set("count"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
+    result.set("tab_id"sv, tab_id);
+    result.set("count"sv, static_cast<u64>(rules.size()));
     result.set("rules"sv, move(rules));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 
-void Application::clear_network_rules(Optional<String> rule_id, MCP::OnToolCallComplete on_complete)
+void Application::clear_network_rules(u64 tab_id, Optional<String> rule_id, MCP::OnToolCallComplete on_complete)
 {
-    size_t before = m_mcp_network_intercept_rules.size();
-    if (rule_id.has_value() && !rule_id->is_empty()) {
-        m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
-            return existing.get_string("id"sv) == *rule_id;
-        });
-    } else {
-        m_mcp_network_intercept_rules.clear();
+    // Removing interception cannot broaden access, so allow it in read-only tab modes as well.
+    if (auto err = check_mcp_read_allowed(tab_id, "clear network interception rules"sv); err.has_value()) {
+        on_complete(mcp_error_result(*err));
+        return;
     }
-    size_t removed = before - m_mcp_network_intercept_rules.size();
+    size_t removed = m_mcp_network_intercept_rules.remove_all_matching([&](JsonObject const& existing) {
+        if (existing.get_u64("tab_id"sv) != tab_id)
+            return false;
+        return !rule_id.has_value() || rule_id->is_empty() || existing.get_string("id"sv) == *rule_id;
+    });
     sync_network_intercept_rules_to_request_servers();
 
-    record_mcp_audit_event("clear_network_rules"_string, {}, "ok"_string, MUST(String::formatted("removed {} rule(s)", removed)));
+    record_mcp_audit_event("clear_network_rules"_string, tab_id, "ok"_string, MUST(String::formatted("removed {} rule(s)", removed)));
 
+    size_t remaining = 0;
+    for (auto const& rule : m_mcp_network_intercept_rules) {
+        if (rule.get_u64("tab_id"sv) == tab_id)
+            ++remaining;
+    }
     JsonObject result;
     result.set("removed"sv, static_cast<u64>(removed));
-    result.set("remaining"sv, static_cast<u64>(m_mcp_network_intercept_rules.size()));
+    result.set("remaining"sv, static_cast<u64>(remaining));
     on_complete(mcp_ok_json(JsonValue { move(result) }));
 }
 

@@ -271,6 +271,7 @@ public:
     void configure_request_server_control_client(Requests::RequestControlClient&);
     RefPtr<BrowsingSession> session_for_request_server_client(int client_id) const;
     Vector<int> request_server_client_ids_for_testing(BrowsingSession const&) const;
+    void did_change_mcp_network_rule_scope();
 
     // NB: Null once that session has ended, so a closed private tab is not offered back afterwards.
 
@@ -794,9 +795,9 @@ private:
     virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, MCP::OnToolCallComplete) override;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, MCP::OnToolCallComplete) override;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, MCP::OnToolCallComplete) override;
-    virtual void add_network_rule(JsonObject rule_args, MCP::OnToolCallComplete) override;
-    virtual void list_network_rules(MCP::OnToolCallComplete) override;
-    virtual void clear_network_rules(Optional<String> rule_id, MCP::OnToolCallComplete) override;
+    virtual void add_network_rule(u64 tab_id, JsonObject rule_args, MCP::OnToolCallComplete) override;
+    virtual void list_network_rules(u64 tab_id, MCP::OnToolCallComplete) override;
+    virtual void clear_network_rules(u64 tab_id, Optional<String> rule_id, MCP::OnToolCallComplete) override;
     virtual void evaluate_javascript(u64 tab_id, String script, MCP::OnToolCallComplete) override;
     virtual void take_screenshot(u64 tab_id, bool redact_media, MCP::OnToolCallComplete) override;
     virtual void list_flows(MCP::OnToolCallComplete) override;

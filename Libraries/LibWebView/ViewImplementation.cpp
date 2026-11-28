@@ -259,6 +259,8 @@ void ViewImplementation::did_update_url()
     }
 
     did_change_state();
+    if (Application::is_initialized())
+        Application::the().did_change_mcp_network_rule_scope();
     if (auto page = traversable().display_page(); page && page->routed_connection())
         page->routed_connection()->update_audio_capture_permission();
     update_displayed_url();
@@ -907,6 +909,8 @@ void ViewImplementation::set_mcp_access_mode(MCPAccessMode mode)
     } else if (Application::is_initialized()) {
         Application::the().did_revoke_mcp_access_for_view(view_id());
     }
+    if (Application::is_initialized())
+        Application::the().did_change_mcp_network_rule_scope();
     did_change_state();
 }
 
@@ -4312,6 +4316,7 @@ void ViewImplementation::prepare_page_for_tab(WebContentPage& page)
     Application::the().update_compositor_context_scales_frames_to_fit(page.compositor_context_id(), m_scales_frames_to_fit);
     page.async_set_viewport(viewport_size(), m_device_pixel_ratio, m_is_fullscreen);
     Application::the().update_compositor_viewport(page.compositor_context_id(), viewport_size().to_type<int>(), m_device_pixel_ratio);
+    Application::the().did_change_mcp_network_rule_scope();
 }
 
 void ViewImplementation::did_change_display_page(Badge<CanonicalNavigable>, RefPtr<WebContentPage> previous_page)

@@ -108,6 +108,16 @@ ErrorOr<void> NetworkInterceptStore::set_rules_from_json(StringView json)
         rule.id = move(id);
         rule.url_pattern = move(*url_pattern);
 
+        if (auto page_ids = obj.get_array("page_ids"sv); page_ids.has_value()) {
+            for (auto const& page_id : page_ids->values()) {
+                if (auto value = page_id.get_u64(); value.has_value() && *value != 0)
+                    rule.page_ids.set(*value);
+            }
+        }
+        // Rules without a UI-authorized page scope must never become process-global.
+        if (rule.page_ids.is_empty())
+            continue;
+
         if (*action_str == "block"sv) {
             rule.action = NetworkInterceptRule::Action::Block;
         } else if (*action_str == "fulfill"sv) {
@@ -164,13 +174,15 @@ ErrorOr<void> NetworkInterceptStore::set_rules_from_json(StringView json)
     return {};
 }
 
-Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url, StringView method) const
+Optional<NetworkInterceptRule> NetworkInterceptStore::match(u64 page_id, URL::URL const& url, StringView method) const
 {
-    if (m_rules.is_empty())
+    if (page_id == 0 || m_rules.is_empty())
         return {};
 
     auto serialized = url.serialize();
     for (auto const& rule : m_rules) {
+        if (!rule.page_ids.contains(page_id))
+            continue;
         if (rule.action == NetworkInterceptRule::Action::ModifyHeaders)
             continue;
         if (!method_matches(rule.methods, method))
@@ -181,13 +193,15 @@ Optional<NetworkInterceptRule> NetworkInterceptStore::match(URL::URL const& url,
     return {};
 }
 
-void NetworkInterceptStore::apply_header_modifications(URL::URL const& url, StringView method, HTTP::HeaderList& headers) const
+void NetworkInterceptStore::apply_header_modifications(u64 page_id, URL::URL const& url, StringView method, HTTP::HeaderList& headers) const
 {
-    if (m_rules.is_empty())
+    if (page_id == 0 || m_rules.is_empty())
         return;
 
     auto serialized = url.serialize();
     for (auto const& rule : m_rules) {
+        if (!rule.page_ids.contains(page_id))
+            continue;
         if (rule.action != NetworkInterceptRule::Action::ModifyHeaders)
             continue;
         if (!method_matches(rule.methods, method))

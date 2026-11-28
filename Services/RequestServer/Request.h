@@ -66,7 +66,8 @@ public:
         HTTP::Cookie::SameSiteContext,
         Optional<Requests::RequestTransferLeaseKey>,
         Optional<u32> address_selection_hint,
-        bool notify_on_cache_miss);
+        bool notify_on_cache_miss,
+        u64 originating_page_id);
 
     static NonnullOwnPtr<Request> connect(
         u64 request_id,
@@ -88,7 +89,8 @@ public:
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
-        HTTP::Cookie::SameSiteContext);
+        HTTP::Cookie::SameSiteContext,
+        u64 originating_page_id);
 
     static NonnullOwnPtr<Request> import(
         u64 request_id,

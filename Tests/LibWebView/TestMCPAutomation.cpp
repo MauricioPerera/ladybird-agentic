@@ -1363,6 +1363,8 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     Optional<JsonObject> snapshot_tool;
     Optional<JsonObject> get_page_markdown_tool;
     Optional<JsonObject> add_network_rule_tool;
+    Optional<JsonObject> list_network_rules_tool;
+    Optional<JsonObject> clear_network_rules_tool;
     Optional<JsonObject> list_page_tools_tool;
     Optional<JsonObject> call_page_tool_tool;
     Optional<JsonObject> capture_tab_artifact_tool;
@@ -1376,8 +1378,6 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     bool found_console = false;
     bool found_network = false;
     bool found_wait_for = false;
-    bool found_list_network_rules = false;
-    bool found_clear_network_rules = false;
     bool found_list_tab_artifacts = false;
     bool found_clear_tab_artifacts = false;
     for (size_t i = 0; i < tools->size(); ++i) {
@@ -1426,9 +1426,9 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
         else if (name == "add_network_rule"sv)
             add_network_rule_tool = tool;
         else if (name == "list_network_rules"sv)
-            found_list_network_rules = true;
+            list_network_rules_tool = tool;
         else if (name == "clear_network_rules"sv)
-            found_clear_network_rules = true;
+            clear_network_rules_tool = tool;
         else if (name == "capture_tab_artifact"sv)
             capture_tab_artifact_tool = tool;
         else if (name == "list_tab_artifacts"sv)
@@ -1458,10 +1458,13 @@ TEST_CASE(mcp_initialize_and_tools_list_schemas)
     EXPECT(get_page_markdown_tool.has_value());
     EXPECT(get_page_markdown_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("main_content_only"sv));
     EXPECT(add_network_rule_tool.has_value());
+    EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("tab_id"sv));
     EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("url_pattern"sv));
     EXPECT(add_network_rule_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("action"sv));
-    EXPECT(found_list_network_rules);
-    EXPECT(found_clear_network_rules);
+    EXPECT(list_network_rules_tool.has_value());
+    EXPECT(list_network_rules_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("tab_id"sv));
+    EXPECT(clear_network_rules_tool.has_value());
+    EXPECT(clear_network_rules_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("tab_id"sv));
     EXPECT(capture_tab_artifact_tool.has_value());
     EXPECT(capture_tab_artifact_tool->get_object("inputSchema"sv)->get_object("properties"sv)->has("kind"sv));
     EXPECT(found_list_tab_artifacts);

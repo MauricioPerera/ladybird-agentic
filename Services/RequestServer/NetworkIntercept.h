@@ -8,6 +8,7 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/Error.h>
+#include <AK/HashTable.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
@@ -27,6 +28,7 @@ struct NetworkInterceptRule {
 
     String id;
     String url_pattern;
+    HashTable<u64> page_ids;
     Action action { Action::Block };
     Vector<String> methods {};
     u32 status_code { 200 };
@@ -46,8 +48,8 @@ public:
     void clear();
 
     static bool url_matches_pattern(StringView url, StringView pattern);
-    Optional<NetworkInterceptRule> match(URL::URL const& url, StringView method) const;
-    void apply_header_modifications(URL::URL const& url, StringView method, HTTP::HeaderList& headers) const;
+    Optional<NetworkInterceptRule> match(u64 page_id, URL::URL const& url, StringView method) const;
+    void apply_header_modifications(u64 page_id, URL::URL const& url, StringView method, HTTP::HeaderList& headers) const;
 
 private:
     Vector<NetworkInterceptRule> m_rules;

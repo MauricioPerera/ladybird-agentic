@@ -359,8 +359,7 @@ void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL:
     auto transfer_lease = create_transfer_lease
         ? Optional<Requests::RequestTransferLeaseKey> { lease_key }
         : Optional<Requests::RequestTransferLeaseKey> {};
-    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_fetch_curl.handle, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, same_site_context, transfer_lease, address_selection_hint, notify_on_cache_miss);
-    request->set_performance_origin(client_id(), originating_page_id);
+    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_fetch_curl.handle, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, same_site_context, transfer_lease, address_selection_hint, notify_on_cache_miss, originating_page_id);
     m_active_requests.set(request_id, move(request));
 
     if (transfer_lease.has_value())
@@ -461,14 +460,14 @@ void ConnectionFromClient::release_request_transfer_lease(int source_client_id, 
     }
 }
 
-void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, HTTP::Cookie::SameSiteContext same_site_context)
+void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, HTTP::Cookie::SameSiteContext same_site_context, u64 originating_page_id)
 {
     note_event_tick("ipc-start-revalidation"sv);
     auto request_id = m_next_revalidation_request_id++;
 
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_revalidation_request({}, {})", request_id, url);
 
-    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_fetch_curl.handle, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context);
+    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_fetch_curl.handle, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, originating_page_id);
     m_active_revalidation_requests.set(request_id, move(request));
 }
 
