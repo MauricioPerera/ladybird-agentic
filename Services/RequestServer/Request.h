@@ -64,6 +64,7 @@ public:
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
         HTTP::Cookie::SameSiteContext,
+        u64 originating_page_id,
         Optional<Requests::RequestTransferLeaseKey>,
         Optional<u32> address_selection_hint,
         bool notify_on_cache_miss);
@@ -88,7 +89,8 @@ public:
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
-        HTTP::Cookie::SameSiteContext);
+        HTTP::Cookie::SameSiteContext,
+        u64 originating_page_id);
 
     static NonnullOwnPtr<Request> import(
         u64 request_id,
@@ -217,7 +219,8 @@ private:
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
         HTTP::Cookie::SameSiteContext,
-        Optional<Requests::RequestTransferLeaseKey> = {});
+        Optional<Requests::RequestTransferLeaseKey> = {},
+        u64 originating_page_id = 0);
 
     Request(
         u64 request_id,
@@ -339,6 +342,7 @@ private:
     Optional<Utf16String> m_disk_cache_partition;
     HTTP::CacheMode m_cache_mode { HTTP::CacheMode::Default };
     ConnectionFromClient* m_client { nullptr };
+    u64 m_originating_page_id { 0 };
 
     void* m_curl_multi_handle { nullptr };
     void* m_curl_easy_handle { nullptr };

@@ -441,13 +441,15 @@ NonnullOwnPtr<Request> Request::fetch(
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
     HTTP::Cookie::SameSiteContext same_site_context,
+    u64 originating_page_id,
     Optional<Requests::RequestTransferLeaseKey> transfer_lease,
     Optional<u32> address_selection_hint,
     bool notify_on_cache_miss)
 {
-    auto request = adopt_own(*new Request { request_id, RequestType::Fetch, disk_cache, move(network_isolation_key), cache_mode, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, move(transfer_lease) });
+    auto request = adopt_own(*new Request { request_id, RequestType::Fetch, disk_cache, move(network_isolation_key), cache_mode, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, move(transfer_lease), originating_page_id });
     request->m_address_selection_hint = address_selection_hint;
     request->m_notify_on_cache_miss = notify_on_cache_miss;
+    request->set_performance_origin(client.client_id(), originating_page_id);
     request->process();
 
     return request;
@@ -479,12 +481,13 @@ NonnullOwnPtr<Request> Request::revalidate(
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
-    HTTP::Cookie::SameSiteContext same_site_context)
+    HTTP::Cookie::SameSiteContext same_site_context,
+    u64 originating_page_id)
 {
     // Revalidation headers must not leak into the initiating request.
     request_headers = HTTP::HeaderList::create(request_headers->headers());
 
-    auto request = adopt_own(*new Request { request_id, RequestType::BackgroundRevalidation, disk_cache, move(network_isolation_key), HTTP::CacheMode::Default, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context });
+    auto request = adopt_own(*new Request { request_id, RequestType::BackgroundRevalidation, disk_cache, move(network_isolation_key), HTTP::CacheMode::Default, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, same_site_context, {}, originating_page_id });
     request->process();
 
     return request;
@@ -505,7 +508,8 @@ Request::Request(
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
     HTTP::Cookie::SameSiteContext same_site_context,
-    Optional<Requests::RequestTransferLeaseKey> transfer_lease)
+    Optional<Requests::RequestTransferLeaseKey> transfer_lease,
+    u64 originating_page_id)
     : m_request_id(request_id)
     , m_type(type)
     , m_network_isolation_key(move(network_isolation_key))
@@ -513,6 +517,7 @@ Request::Request(
     , m_disk_cache_partition(m_network_isolation_key.has_value() ? m_network_isolation_key->disk_cache_partition() : OptionalNone {})
     , m_cache_mode(cache_mode)
     , m_client(&client)
+    , m_originating_page_id(originating_page_id)
     , m_curl_multi_handle(curl_multi)
     , m_resolver(resolver)
     , m_url(move(url))
@@ -1032,7 +1037,7 @@ void Request::handle_initial_state()
     }
 
     // Check runtime in-flight network interception rules (MCP block / fulfill / modify_headers).
-    if (auto matched = NetworkInterceptStore::the().match(m_url, m_method); matched.has_value()) {
+    if (auto matched = NetworkInterceptStore::the().match(m_url, m_method, m_client->client_id(), m_originating_page_id); matched.has_value()) {
         if (matched->action == NetworkInterceptRule::Action::Block) {
             m_network_error = Requests::NetworkError::UnableToConnect;
             transition_to_state(State::Error);
@@ -1045,7 +1050,7 @@ void Request::handle_initial_state()
         }
     }
 
-    NetworkInterceptStore::the().apply_header_modifications(m_url, m_method, *m_request_headers);
+    NetworkInterceptStore::the().apply_header_modifications(m_url, m_method, m_client->client_id(), m_originating_page_id, *m_request_headers);
 
     if (m_cache_mode == HTTP::CacheMode::NoStore) {
         m_cache_status = HTTP::CacheRequest::CacheStatus::NotCached;
@@ -1061,7 +1066,7 @@ void Request::handle_initial_state()
 
                     if (m_cache_entry_reader.has_value()) {
                         if (m_cache_entry_reader->revalidation_type() == HTTP::CacheEntryReader::RevalidationType::StaleWhileRevalidate)
-                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials, m_same_site_context);
+                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials, m_same_site_context, m_originating_page_id);
 
                         if (is_revalidation_request())
                             transition_to_state(State::DNSLookup);

@@ -724,6 +724,7 @@ static JsonArray build_tool_definitions(bool webmcp_only = false)
     {
         static constexpr Array intercept_actions { "block"sv, "fulfill"sv, "modify_headers"sv };
         JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of a Full-access tab whose current document may be intercepted after user approval."sv));
         props.set("url_pattern"sv, make_prop("string"sv, "URL substring or wildcard pattern using '*' (e.g. 'https://api.example.com/*')."sv));
         props.set("action"sv, make_string_enum_prop("Interception action to apply inside RequestServer."sv, intercept_actions, "block"sv));
         props.set("id"sv, make_prop("string"sv, "Optional rule ID (replaces existing rule with same ID; auto-generated if omitted)."sv));
@@ -743,26 +744,30 @@ static JsonArray build_tool_definitions(bool webmcp_only = false)
         props.set("headers"sv, move(headers_prop));
         tools.must_append(make_tool_schema(
             "add_network_rule"sv,
-            "Add an in-flight RequestServer network interception rule ('block', 'fulfill' with synthetic response, or 'modify_headers')."sv,
+            "Add a document-scoped RequestServer network interception rule for one Full-access tab after explicit user approval."sv,
             move(props),
-            Array { "url_pattern"sv, "action"sv }));
+            Array { "tab_id"sv, "url_pattern"sv, "action"sv }));
     }
 
     {
         JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of the Full-access tab whose rules should be listed."sv));
         tools.must_append(make_tool_schema(
             "list_network_rules"sv,
-            "List all active runtime RequestServer network interception rules."sv,
-            move(props)));
+            "List active runtime RequestServer network interception rules for one Full-access tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
     }
 
     {
         JsonObject props;
+        props.set("tab_id"sv, make_prop("integer"sv, "ID of the Full-access tab whose rules should be removed."sv));
         props.set("rule_id"sv, make_prop("string"sv, "Optional rule ID to remove; omit to clear all runtime network rules."sv));
         tools.must_append(make_tool_schema(
             "clear_network_rules"sv,
-            "Remove one runtime network interception rule by ID or clear all active rules."sv,
-            move(props)));
+            "Remove one runtime network interception rule by ID or clear all rules for one Full-access tab."sv,
+            move(props),
+            Array { "tab_id"sv }));
     }
 
     {
@@ -2281,22 +2286,29 @@ private:
         }
 
         if (tool_name == "add_network_rule"sv) {
+            auto tab_id = require_tab_id();
             auto url_pattern = arguments.get_string("url_pattern"sv);
             auto action = arguments.get_string("action"sv);
-            if (!url_pattern.has_value() || url_pattern->is_empty() || !action.has_value() || action->is_empty())
-                return fail_invalid_params("Missing required string parameters 'url_pattern' and 'action'"sv);
-            delegate.add_network_rule(arguments, move(complete));
+            if (!tab_id.has_value() || !url_pattern.has_value() || url_pattern->is_empty() || !action.has_value() || action->is_empty())
+                return fail_invalid_params("Missing required parameters 'tab_id', 'url_pattern', and 'action'"sv);
+            delegate.add_network_rule(*tab_id, arguments, move(complete));
             return;
         }
 
         if (tool_name == "list_network_rules"sv) {
-            delegate.list_network_rules(move(complete));
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
+            delegate.list_network_rules(*tab_id, move(complete));
             return;
         }
 
         if (tool_name == "clear_network_rules"sv) {
+            auto tab_id = require_tab_id();
+            if (!tab_id.has_value())
+                return fail_invalid_params("Missing integer parameter 'tab_id'"sv);
             auto rule_id = arguments.get_string("rule_id"sv).copy();
-            delegate.clear_network_rules(move(rule_id), move(complete));
+            delegate.clear_network_rules(*tab_id, move(rule_id), move(complete));
             return;
         }
 

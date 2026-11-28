@@ -118,17 +118,20 @@ public:
     virtual void wait_for_notification(Optional<u64> tab_id, Optional<String> origin, Optional<String> title_contains, Optional<String> body_contains, Optional<String> event_type, u32 timeout_ms, OnToolCallComplete) = 0;
     virtual void get_console_logs(u64 tab_id, size_t limit, bool clear, OnToolCallComplete) = 0;
     virtual void get_network_requests(u64 tab_id, size_t limit, bool clear, bool only_errors, OnToolCallComplete) = 0;
-    virtual void add_network_rule(JsonObject rule_args, OnToolCallComplete on_complete)
+    virtual void add_network_rule(u64 tab_id, JsonObject rule_args, OnToolCallComplete on_complete)
     {
+        (void)tab_id;
         (void)rule_args;
         on_complete({ .is_error = true, .text = "add_network_rule not implemented"_string });
     }
-    virtual void list_network_rules(OnToolCallComplete on_complete)
+    virtual void list_network_rules(u64 tab_id, OnToolCallComplete on_complete)
     {
+        (void)tab_id;
         on_complete({ .is_error = true, .text = "list_network_rules not implemented"_string });
     }
-    virtual void clear_network_rules(Optional<String> rule_id, OnToolCallComplete on_complete)
+    virtual void clear_network_rules(u64 tab_id, Optional<String> rule_id, OnToolCallComplete on_complete)
     {
+        (void)tab_id;
         (void)rule_id;
         on_complete({ .is_error = true, .text = "clear_network_rules not implemented"_string });
     }
